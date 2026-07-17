@@ -1,0 +1,126 @@
+spider:
+  name: sxrb
+  allowed_domains:
+    - epaper.sxrb.com
+  start:
+    - node: index
+      url: http://epaper.sxrb.com/index.shtml
+      method: GET
+      timeout: 30000
+
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          page_links:
+            required: true
+            extractors:
+              - kind: css
+                expr: ul[class~="conRList"] a::attr(href)
+      bind:
+        page_urls:
+          kind: pipeline
+          from: $fields.page_links
+          transforms:
+            - kind: url_join
+              base_url: $response.url
+
+    page:
+      parse:
+        fields:
+          article_links:
+            required: true
+            extractors:
+              - kind: css
+                expr: ul[class~="conMItemList"] a::attr(href)
+      bind:
+        article_urls:
+          kind: pipeline
+          from: $fields.article_links
+          transforms:
+            - kind: url_join
+              base_url: $response.url
+
+    detail:
+      parse:
+        fields:
+          title:
+            required: true
+            extractors:
+              - kind: css
+                expr: h2[class~="detConTit"]::text
+              - kind: css
+                expr: a[class~="group1"]::attr(title)
+          content:
+            required: false
+            default: ""
+            extractors:
+              - kind: css
+                expr: .detail-text::text
+      bind:
+        title:
+          kind: pipeline
+          from: $fields.title
+          transforms:
+            - kind: trim
+        content:
+          kind: pipeline
+          from: $fields.content
+          transforms:
+            - kind: normalize_space
+
+  edges:
+    - from: index
+      kind: request
+      request:
+        node: page
+        url:
+          from: $bind.page_urls
+        method: GET
+        timeout: 30000
+
+    - from: page
+      kind: request
+      request:
+        node: detail
+        url:
+          from: $bind.article_urls
+        method: GET
+        timeout: 30000
+        vals:
+          page_url:
+            from: $response.url
+
+    - from: detail
+      kind: item
+      fn: save
+      vals:
+        title:
+          from: $bind.title
+        content:
+          from: $bind.content
+        url:
+          from: $response.url
+        page_url:
+          from: $vals.page_url
+
+item:
+  schema:
+    fields:
+      title:
+        type: string
+        rules:
+          - required
+          - min: 1
+      content:
+        type: string
+      url:
+        type: string
+        rules:
+          - url
+      page_url:
+        type: string
+        rules:
+          - required
+          - url

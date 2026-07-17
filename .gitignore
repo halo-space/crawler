@@ -1,0 +1,10 @@
+/target/
+.DS_Store
+.idea/
+/data/
+/spider/data/
+/config
+/openspec/
+/docs/chapters/
+/docs/TODO.md
+/docs/架构设计文档.md
