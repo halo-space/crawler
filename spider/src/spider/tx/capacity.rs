@@ -39,12 +39,26 @@ impl Capacity {
                 && self
                     .state
                     .active
-                    .compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
             {
                 return Permit {
                     capacity: self.clone(),
                 };
+            }
+            changed.await;
+        }
+    }
+
+    pub(super) fn is_idle(&self) -> bool {
+        self.state.active.load(Ordering::Acquire) == 0
+    }
+
+    pub(super) async fn wait(&self) {
+        loop {
+            let changed = self.state.changed.notified();
+            if self.is_idle() {
+                return;
             }
             changed.await;
         }

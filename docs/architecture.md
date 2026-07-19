@@ -1,6 +1,6 @@
 # crawler Architecture and Feature Overview
 
-This document describes the features implemented by the current source tree, the core runtime model, and the extension boundaries. It is a standalone architecture overview. The [chapter index](./架构设计文档.md) contains the detailed decisions, historical discussion, and release plans.
+This document describes the features implemented by the current source tree, the core runtime model, and the extension boundaries. It is a standalone architecture overview.
 
 ## 1. Positioning and Current Scope
 
@@ -55,7 +55,7 @@ flowchart LR
     R["Rules mode<br/>YAML Config + graph"]
     X["Shared Execute contract"]
     T["Tx.request / Tx.item"]
-    A["Engine Coordinator<br/>single Actor"]
+    A["Kameo Engine Actor<br/>single coordinator"]
     S["Scheduler contract"]
     M["Memory Scheduler"]
     W["Request Worker"]
@@ -85,7 +85,7 @@ flowchart LR
     O -. on submission failure .-> F
 ```
 
-The Engine uses one message-driven coordinator internally, but it does not force the Scheduler, Downloader, Executor, or AI selector into Actor types. Components retain method-based contracts. The Actor is only the Engine's internal mechanism for concurrency, output handling, and termination.
+The Engine uses one private Kameo Actor as its message-driven coordinator, but it does not force the Scheduler, Downloader, Executor, or AI selector into Actor types. Components retain method-based contracts. The Actor directly owns runtime state and dependencies; Request and output work still runs in independent Tokio tasks so no long I/O blocks message handling.
 
 ## 4. Identity, Tasks, and Run Seeds
 
@@ -115,7 +115,7 @@ The logical input of one run is:
 task_id + trace_id + immutable Trace Snapshot + initial Requests
 ```
 
-A Trace Snapshot holds run-level configuration shared by Requests: `task_id`, parameters, optional attachment configuration, persistence target, and priority. It has no schema version, Task revision, or derived Request-mode collection. A Rules Snapshot additionally contains the complete DSL; a code Snapshot has an empty `dsl`.
+A Trace Snapshot holds run-level configuration shared by Requests: `task_id`, parameters, optional attachment configuration, persistence target, and priority. It has no schema version, Task revision, or derived Request-mode collection. A Rules Snapshot additionally contains the complete DSL, including its optional non-empty `spider.version` and valid IANA `spider.timezone`; a code Snapshot has an empty `dsl`.
 
 A Request Snapshot stores its stable `node` and executable request fields. It never stores handlers, function pointers, closures, or process-local objects:
 
@@ -145,7 +145,7 @@ flowchart TB
 
 Rules mode currently treats the loaded YAML as the definition of this run. Before claiming starts, `rules::Init` atomically stores its Trace Snapshot and initial Requests. A future externally dispatched Rules worker must preserve this snapshot contract instead of introducing a second identity model in the Worker.
 
-## 5. Engine and the Single Coordinator
+## 5. Engine Actor
 
 The outer `Runtime::start()` order is fixed:
 
@@ -154,18 +154,21 @@ validate runtime limits
 -> open Scheduler / Downloader / local snapshot directory
 -> before_spider
 -> initialize or attach to a run
--> Coordinator.run
+-> spawn and drain the Engine Actor
 -> after_spider
 -> close Downloader / Scheduler
 ```
 
-`Coordinator` in `engine/actor.rs` is the sole coordinator and owns:
+`Engine` in `engine/actor.rs` is the sole coordinator. It is a real Kameo Actor and owns:
 
+- Executor startup, poll, and producer-idle observation task handles;
 - at most one active Scheduler claim;
 - the set of active Request tasks;
 - the set of active Tx output tasks;
-- the Event Receiver, Tx producer activity, and final error;
+- Tx Event capacity, producer activity, and the first terminal error;
 - shared Scheduler, Downloader, Executor, Middleware Registry, and optional Item snapshot store references.
+
+Startup, claim, Request, output, poll, and producer-idle completions return as separate Actor messages. Every spawned task catches panic and reports completion. Kameo's mailbox is unbounded for internal messages; the explicit Event capacity controls only external `Tx` output and therefore remains independent from internal completion traffic.
 
 ### 5.1 Three Independent Limits
 
@@ -173,7 +176,7 @@ validate runtime limits
 | --- | ---: | --- |
 | `with_concurrency(n)` | `16` | Maximum number of active Request tasks |
 | `with_limit(n)` | concurrency | Maximum Requests requested by one `next_requests(limit)` call |
-| `with_event_limit(n)` | `32` | Maximum accepted Events whose handling is not complete |
+| `with_event_limit(n)` | `32` | Maximum accepted Events whose Actor handler has not started |
 
 The values are validated and frozen when the Engine starts. They are not hot-reloaded and do not replace one another. The actual claim size is:
 
@@ -181,18 +184,22 @@ The values are validated and frozen when the Engine starts. They are not hot-rel
 min(claim_limit, request_concurrency - active_request_tasks)
 ```
 
-An Event permit is acquired before `Tx` sends an Event and remains held until the Engine finishes handling that Request or Item Event. The Event limit therefore bounds complete outstanding output work, not merely messages waiting in the channel.
+An Event permit is acquired before `Tx` sends an Event and released when the Engine Actor starts its handler. The handler registers an output task and delegates the reply; `Tx` still waits for Scheduler and Middleware processing to finish. Event capacity therefore bounds Events waiting to start, while the Actor's output task set separately prevents early shutdown during processing.
 
 ### 5.2 Idle Detection and Exit
 
-An empty `next_requests(limit)` result means only that the current claim returned no work. It does not terminate the Engine. The Coordinator exits only when all of the following are true:
+An empty `next_requests(limit)` result means only that the current claim returned no work. It does not terminate the Engine. The Actor exits only when all of the following are true:
 
 - the Scheduler confirms there are no queued or processing Requests;
-- no claim is active;
+- no startup, claim, poll, or producer-idle observation task is active;
 - no Request task is active;
 - no output task is active;
-- the Event queue is empty;
+- no Event permit is active;
 - no tracked Tx producer can still emit an Event.
+
+An empty claim result is valid only for the work state observed by that claim. If a Request,
+output Event, or Tx producer changes work while the claim is in flight, the Actor treats the
+result as stale and claims again before it can terminate.
 
 This prevents early termination while a list page is producing detail Requests, an Item Event arrives late, or a handler has cloned its Tx for delayed output.
 
@@ -390,6 +397,8 @@ compile valid CSS
 
 Scoring covers tags, IDs, classes, attributes, combinator relationships, and supported static pseudo-classes. Extra candidate attributes are not penalized. The default `min` is `0.8`, and the valid range is `0.0..=1.0`.
 
+Healing accepts exactly the syntax that `scrape-core 0.2.9` can compile. In particular, that parser currently rejects `:is()`, `:where()`, and `:has()` before Healing starts.
+
 Healing stores no historical fingerprints, does not rewrite or persist a repaired selector, does not cross selector types, and never calls AI. Invalid CSS returns a CSS error. A score below `min` returns an empty set so Rules can continue to the next extractor for that field.
 
 ### 9.2 Regex, JSON, and AI
@@ -472,6 +481,13 @@ Normal Item output:
 
 Each Item is one JSON line containing only its business serialization. Concurrent writes to the same hourly file are serialized. A failed append attempts to roll back that append, and `close()` flushes open files.
 
+`version / timezone` are Trace-level runtime metadata. A persistent Scheduler may read the
+corresponding Trace Snapshot through `payload.trace_id` during `push_items` and denormalize
+them into its own Item record. The column names are `config_version` and `timezone`; plain
+`version` remains reserved for Request execution ownership. These fields are not automatically
+injected into business Item JSON or copied into every Request Snapshot, and the default Memory
+JSONL does not store them.
+
 Submission-failure snapshots:
 
 ```text
@@ -490,7 +506,13 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 
 | Path | Single responsibility |
 | --- | --- |
-| `spider/src/engine/actor.rs` | Coordinate claims, Request tasks, output tasks, errors, and termination |
+| `spider/src/engine/actor.rs` | Own Engine Actor state and the shared transition/termination decision |
+| `spider/src/engine/actor/start.rs` | Start Executor work and handle its completion message |
+| `spider/src/engine/actor/claim.rs` | Claim Scheduler work and handle its completion message |
+| `spider/src/engine/actor/request.rs` | Register one Request task and handle its completion message |
+| `spider/src/engine/actor/output.rs` | Accept Tx Events, delegate replies, and track output completion |
+| `spider/src/engine/actor/wait.rs` | Schedule poll and producer-idle notifications |
+| `spider/src/engine/actor/task.rs` | Own task handles and convert task panic into Engine errors |
 | `spider/src/engine/runtime.rs` | Component lifecycle, startup settings, and Actor assembly |
 | `spider/src/engine/worker.rs` | Ack, lease maintenance, and final settlement for one Request |
 | `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse path |
@@ -499,7 +521,12 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/engine/executor.rs` | Select Code/Rules from Trace Snapshot and invoke the shared Spider |
 | `spider/src/engine/code.rs` | Code-mode local run-seed initialization |
 | `spider/src/engine/rules.rs` | Rules-mode assembly and run-seed initialization |
-| `spider/src/engine/rules/executor/*` | Fields, values, and output construction for the current DSL node |
+| `spider/src/engine/rules/executor.rs` | Coordinate one Rules node execution and emit its outputs |
+| `spider/src/engine/rules/executor/field.rs` | Extract declared fields from the current Response |
+| `spider/src/engine/rules/executor/value.rs` | Resolve typed value references from the current Rules context |
+| `spider/src/engine/rules/executor/bind.rs` | Evaluate ordered bind pipelines, transforms, and templates |
+| `spider/src/engine/rules/executor/condition.rs` | Evaluate one edge condition |
+| `spider/src/engine/rules/executor/build.rs` | Construct Request and Item values from an enabled edge |
 | `spider/src/scheduler/contract.rs` | Public Scheduler contract |
 | `spider/src/scheduler/init.rs` | Run-seed initialization contract |
 | `spider/src/scheduler/memory.rs` | Public Memory implementation and submodule composition |
@@ -556,8 +583,5 @@ Implementation and extensions should continue to satisfy these checks:
 
 ## 15. Related Documentation
 
-- [Chapter-based architecture index](./架构设计文档.md)
-- [Version TODO](./TODO.md)
-- [Rust crate and directory layout](./chapters/24-code-structure.md)
-- [Release plan](./chapters/13-version-plan.md)
+- [Architecture document index](./架构设计文档.md)
 - [中文架构总览](./architecture.zh-CN.md)

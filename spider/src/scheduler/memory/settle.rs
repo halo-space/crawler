@@ -38,7 +38,10 @@ pub(super) fn validate_lease(
     Ok(())
 }
 
-pub(super) fn repeat(state: &State, payload: &payload::Payload) -> Result<bool, scheduler::Error> {
+pub(super) fn is_duplicate(
+    state: &State,
+    payload: &payload::Payload,
+) -> Result<bool, scheduler::Error> {
     let key = (payload.id.clone(), payload.version);
     let Some(completed) = state.completed.get(&key) else {
         if !state.processing.contains_key(&payload.id)
@@ -94,18 +97,51 @@ pub(super) fn counters(
         .iter()
         .map(|(name, value)| {
             serde_json::from_value::<stats::Counter>(value.clone())
-                .map(|counter| (name.clone(), counter))
                 .map_err(|error| {
                     scheduler::Error::Message(format!("invalid stats counter {name}: {error}"))
+                })
+                .and_then(|counter| {
+                    if counter.is_non_negative() {
+                        Ok((name.clone(), counter))
+                    } else {
+                        Err(scheduler::Error::Message(format!(
+                            "invalid stats counter {name}: values must be non-negative"
+                        )))
+                    }
                 })
         })
         .collect()
 }
 
-pub(super) fn apply(state: &mut State, trace_id: String, counters: Vec<(String, stats::Counter)>) {
+pub(super) fn merge_stats(
+    state: &State,
+    trace_id: &str,
+    counters: Vec<(String, stats::Counter)>,
+) -> Result<Vec<(String, stats::Counter)>, scheduler::Error> {
+    let trace_stats = state.trace_stats.get(trace_id);
+    counters
+        .into_iter()
+        .map(|(name, counter)| {
+            let current = trace_stats
+                .and_then(|counters| counters.get(&name))
+                .cloned()
+                .unwrap_or_default();
+            current
+                .checked_add(&counter)
+                .map(|merged| (name.clone(), merged))
+                .ok_or_else(|| scheduler::Error::Message(format!("stats counter overflow: {name}")))
+        })
+        .collect()
+}
+
+pub(super) fn apply_stats(
+    state: &mut State,
+    trace_id: String,
+    counters: Vec<(String, stats::Counter)>,
+) {
     let trace_stats = state.trace_stats.entry(trace_id).or_default();
     for (name, counter) in counters {
-        *trace_stats.entry(name).or_default() += &counter;
+        trace_stats.insert(name, counter);
     }
 }
 

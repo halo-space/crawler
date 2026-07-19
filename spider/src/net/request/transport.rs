@@ -21,9 +21,8 @@ pub(super) fn check_proxy(node: &str, value: Option<&Value>) -> Result<(), Error
         .get("url")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Message(format!("node {node} request.proxy.url is required")))?;
-    url::Url::parse(url).map_err(|error| {
-        Error::Message(format!("node {node} request.proxy.url is invalid: {error}"))
-    })?;
+    validate_proxy_url(url)
+        .map_err(|message| Error::Message(format!("node {node} request.proxy.url {message}")))?;
     Ok(())
 }
 
@@ -60,9 +59,22 @@ pub(super) fn proxy(value: Option<&Value>) -> Result<Option<ProxyConfig>, Error>
         .get("url")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Message("request.proxy.url is required".to_string()))?;
+    validate_proxy_url(url)
+        .map_err(|message| Error::Message(format!("request.proxy.url {message}")))?;
     Ok(Some(ProxyConfig {
         url: url.to_string(),
     }))
+}
+
+pub(super) fn validate_proxy_url(value: &str) -> Result<(), String> {
+    let url = url::Url::parse(value).map_err(|error| format!("is invalid: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("uses unsupported protocol: {}", url.scheme()));
+    }
+    if !url.has_host() {
+        return Err("must have a host".to_string());
+    }
+    Ok(())
 }
 
 pub(super) fn tls(value: Option<&Value>) -> Result<Option<TlsConfig>, Error> {
@@ -93,6 +105,15 @@ mod tests {
         let error = check_proxy("detail", Some(&value)).unwrap_err();
 
         assert!(error.to_string().contains("request.proxy.url is invalid"));
+    }
+
+    #[test]
+    fn rejects_unsupported_proxy_protocol() {
+        let value = serde_json::json!({"url": "ftp://proxy.example.com"});
+
+        let error = check_proxy("detail", Some(&value)).unwrap_err();
+
+        assert!(error.to_string().contains("unsupported protocol: ftp"));
     }
 
     #[test]

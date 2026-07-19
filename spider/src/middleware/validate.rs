@@ -122,6 +122,23 @@ impl Middleware for Validate {
 }
 
 pub(super) fn check(spec: &Spec) -> Result<(), crate::middleware::Error> {
+    if spec.hook.as_deref().is_some_and(|hook| {
+        !matches!(
+            hook,
+            "before_scheduler"
+                | "before_download"
+                | "after_download"
+                | "before_parse"
+                | "before_item"
+        )
+    }) {
+        return Err(invalid_config(
+            "hook must be before_scheduler, before_download, after_download, before_parse, or before_item",
+        ));
+    }
+    if spec.skip {
+        return Ok(());
+    }
     let Some(args) = spec.args.as_object() else {
         if spec.args.is_null() {
             return Ok(());
@@ -221,6 +238,34 @@ mod tests {
 
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
+        }
+    }
+
+    #[test]
+    fn accepts_implemented_hooks_and_an_unspecified_hook() {
+        check(&Spec::new("validate")).unwrap();
+        for hook in [
+            "before_scheduler",
+            "before_download",
+            "after_download",
+            "before_parse",
+            "before_item",
+        ] {
+            check(&Spec::new("validate").hook(hook)).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_error_and_lifecycle_hooks() {
+        for hook in [
+            "before_spider",
+            "after_spider",
+            "error_download",
+            "error_parse",
+            "error_item",
+        ] {
+            let error = check(&Spec::new("validate").hook(hook)).unwrap_err();
+            assert!(error.to_string().contains("hook must be"));
         }
     }
 

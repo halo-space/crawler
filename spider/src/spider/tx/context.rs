@@ -68,15 +68,13 @@ impl Context {
     }
 }
 
-pub(crate) async fn scope<F>(
+/// Runs one parse execution with its Request context available to Tx.
+pub(crate) async fn scope<T>(
     request: &net::Request,
     stats: Arc<stats::Delta>,
-    future: F,
-) -> F::Output
-where
-    F: Future,
-{
-    CURRENT.scope(Context::new(request, stats), future).await
+    execution: impl Future<Output = T>,
+) -> T {
+    CURRENT.scope(Context::new(request, stats), execution).await
 }
 
 pub(super) fn current() -> Option<Context> {

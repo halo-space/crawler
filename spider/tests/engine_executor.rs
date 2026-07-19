@@ -1196,6 +1196,7 @@ struct RecordingScheduler {
     items: Arc<Mutex<Vec<PayloadRecord>>>,
     reject_emitted: bool,
     reject_items: bool,
+    claim_sync: Option<Arc<ClaimSync>>,
 }
 
 impl RecordingScheduler {
@@ -1211,6 +1212,7 @@ impl RecordingScheduler {
             items,
             reject_emitted: false,
             reject_items: false,
+            claim_sync: None,
         }
     }
 
@@ -1221,6 +1223,11 @@ impl RecordingScheduler {
 
     fn reject_items(mut self) -> Self {
         self.reject_items = true;
+        self
+    }
+
+    fn with_stale_claim(mut self, sync: Arc<ClaimSync>) -> Self {
+        self.claim_sync = Some(sync);
         self
     }
 }
@@ -1239,6 +1246,10 @@ impl Scheduler for RecordingScheduler {
     }
 
     async fn push(&self, payload: payload::Payload) -> Result<(), spider::scheduler::Error> {
+        let emitted = payload
+            .requests
+            .iter()
+            .any(|request| request.url.ends_with("/emitted"));
         let reject = self.reject_emitted
             && payload
                 .requests
@@ -1254,7 +1265,14 @@ impl Scheduler for RecordingScheduler {
             ));
         }
 
-        self.inner.push(payload).await
+        let result = self.inner.push(payload).await;
+        if result.is_ok()
+            && emitted
+            && let Some(sync) = &self.claim_sync
+        {
+            sync.pushed.add_permits(1);
+        }
+        result
     }
 
     async fn push_items(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -1283,7 +1301,17 @@ impl Scheduler for RecordingScheduler {
     }
 
     async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests().await
+        let pending = self.inner.has_pending_requests().await?;
+        if !pending
+            && let Some(sync) = &self.claim_sync
+            && sync.armed.swap(false, Ordering::SeqCst)
+        {
+            sync.empty.add_permits(1);
+            ClaimSync::acquire(&sync.pushed).await;
+            ClaimSync::acquire(&sync.producer_done).await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        Ok(pending)
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -1544,6 +1572,24 @@ impl StartFailSpider {
 }
 
 #[macros::spider]
+struct PanicStartSpider;
+
+#[macros::spider]
+impl PanicStartSpider {
+    fn name(&self) -> &str {
+        "panic-start"
+    }
+
+    async fn start(&self) -> Result<(), spider::Error> {
+        panic!("startup task panic")
+    }
+
+    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+        Ok(())
+    }
+}
+
+#[macros::spider]
 struct StartEmitFailSpider {
     calls: Arc<AtomicUsize>,
 }
@@ -1627,6 +1673,60 @@ impl LateEventSpider {
                 let emitted = net::Request::follow("https://example.com/emitted").unwrap();
                 tx.request(vec![emitted]).await.unwrap();
                 tx.item(vec![TestItem::new()]).await.unwrap();
+            });
+        }
+        Ok(())
+    }
+}
+
+struct ClaimSync {
+    armed: AtomicBool,
+    empty: tokio::sync::Semaphore,
+    pushed: tokio::sync::Semaphore,
+    producer_done: tokio::sync::Semaphore,
+}
+
+impl ClaimSync {
+    fn new() -> Self {
+        Self {
+            armed: AtomicBool::new(true),
+            empty: tokio::sync::Semaphore::new(0),
+            pushed: tokio::sync::Semaphore::new(0),
+            producer_done: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    async fn acquire(semaphore: &tokio::sync::Semaphore) {
+        semaphore.acquire().await.unwrap().forget();
+    }
+}
+
+#[macros::spider]
+struct StaleClaimSpider {
+    sync: Arc<ClaimSync>,
+}
+
+#[macros::spider]
+impl StaleClaimSpider {
+    fn name(&self) -> &str {
+        "stale-claim"
+    }
+
+    async fn start(&self) -> Result<(), spider::Error> {
+        let request = net::Request::follow("https://example.com/source")
+            .map_err(|error| spider::Error::Message(error.to_string()))?;
+        self.tx.request(vec![request]).await
+    }
+
+    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+        if response.url.ends_with("/source") {
+            let tx = self.tx.clone();
+            let sync = self.sync.clone();
+            tokio::spawn(async move {
+                ClaimSync::acquire(&sync.empty).await;
+                let request = net::Request::follow("https://example.com/emitted").unwrap();
+                tx.request(vec![request]).await.unwrap();
+                sync.producer_done.add_permits(1);
             });
         }
         Ok(())
@@ -1852,6 +1952,22 @@ async fn engine_start_closes_resources_when_spider_start_fails() {
 }
 
 #[tokio::test]
+async fn engine_reports_start_task_panic_without_hanging() {
+    let mut engine = engine::Builder::new()
+        .with_scheduler(spider::Memory::new("worker-1"))
+        .with_downloader(TestDownload)
+        .with_spider(PanicStartSpider::new())
+        .build();
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), engine.start())
+        .await
+        .expect("engine must clear a panicked start task")
+        .unwrap_err();
+
+    assert!(error.to_string().contains("startup task panic"));
+}
+
+#[tokio::test]
 async fn spider_start_error_drains_work_that_was_already_accepted() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
@@ -2005,6 +2121,32 @@ async fn engine_waits_for_output_sent_after_the_request_task_finishes() {
     drop(items);
     let stats = engine.scheduler().inner.trace_stats(&trace_id);
     assert!(!stats.contains_key("items"));
+}
+
+#[tokio::test]
+async fn stale_empty_claim_is_rechecked_after_detached_output() {
+    let sync = Arc::new(ClaimSync::new());
+    let scheduler = RecordingScheduler::new(
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+    )
+    .with_stale_claim(sync.clone());
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(TestDownload)
+        .with_spider(StaleClaimSpider::new(sync))
+        .build()
+        .with_concurrency(2);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), engine.start())
+        .await
+        .expect("engine must recheck an empty claim after detached output")
+        .unwrap();
+
+    assert_eq!(engine.scheduler().inner.done_len(), 2);
+    assert_eq!(engine.scheduler().inner.queued_len(), 0);
+    assert_eq!(engine.scheduler().inner.processing_len(), 0);
 }
 
 #[tokio::test]

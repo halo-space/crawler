@@ -6,6 +6,25 @@ pub(super) fn check(config: &spider::Config, graph: &graph::Config) -> Result<()
             "spider.name is required".to_string(),
         ));
     }
+    if config
+        .version
+        .as_deref()
+        .is_some_and(|version| version.trim().is_empty())
+    {
+        return Err(config::Error::Message(
+            "spider.version must not be empty when provided".to_string(),
+        ));
+    }
+    if let Some(timezone) = config.timezone.as_deref() {
+        if timezone.trim().is_empty() {
+            return Err(config::Error::Message(
+                "spider.timezone must not be empty when provided".to_string(),
+            ));
+        }
+        timezone.parse::<chrono_tz::Tz>().map_err(|_| {
+            config::Error::Message("spider.timezone must be a valid IANA time zone".to_string())
+        })?;
+    }
     if config.start.is_empty() {
         return Err(config::Error::Message(
             "spider.start must not be empty".to_string(),
@@ -154,5 +173,47 @@ graph:
                 .to_string()
                 .contains("must be a string, number, or boolean")
         );
+    }
+
+    #[test]
+    fn spider_metadata_must_not_be_blank() {
+        let base = r#"
+spider:
+  name: metadata
+  start: [{node: index, url: https://example.com}]
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#;
+
+        let error =
+            Config::from_yaml(&base.replace("name: metadata", "name: metadata\n  version: '  '"))
+                .unwrap_err();
+        assert!(error.to_string().contains("spider.version"));
+
+        let error =
+            Config::from_yaml(&base.replace("name: metadata", "name: metadata\n  timezone: '  '"))
+                .unwrap_err();
+        assert!(error.to_string().contains("spider.timezone"));
+    }
+
+    #[test]
+    fn spider_timezone_must_be_a_valid_iana_name() {
+        let rules = r#"
+spider:
+  name: metadata
+  timezone: Mars/Olympus
+  start: [{node: index, url: https://example.com}]
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#;
+
+        let error = Config::from_yaml(rules).unwrap_err();
+        assert!(error.to_string().contains("valid IANA time zone"));
+
+        assert!(Config::from_yaml(&rules.replace("Mars/Olympus", "Asia/Shanghai")).is_ok());
     }
 }

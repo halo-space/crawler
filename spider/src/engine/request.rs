@@ -5,16 +5,16 @@ use crate::spider::tx;
 use crate::{downloader, middleware, net, scheduler, spider, stats};
 
 /// 执行一条已领取 Request 的完整下载与解析生命周期。
-pub(crate) async fn execute<R, D>(
+pub(crate) async fn execute<E, D>(
     claimed: &net::Request,
     downloader: Arc<D>,
-    executor: Arc<R>,
+    executor: Arc<E>,
     registry: Arc<middleware::Registry>,
     stats: Arc<stats::Delta>,
 ) -> Result<(), crate::Error>
 where
     D: downloader::Download + Sync,
-    R: Execute + 'static,
+    E: Execute + 'static,
 {
     let mut request = match registry
         .before_download(claimed.clone())
@@ -107,9 +107,9 @@ where
             Err(crate::Error::Spider(spider::Error::ItemRejected(message))) => {
                 return Err(crate::Error::Item(crate::item::Error::Message(message)));
             }
-            Err(crate::Error::Spider(spider::Error::ChannelClosed)) => {
+            Err(crate::Error::Spider(spider::Error::EngineStopped)) => {
                 return Err(crate::Error::message(
-                    spider::Error::ChannelClosed.to_string(),
+                    spider::Error::EngineStopped.to_string(),
                 ));
             }
             Err(error) if is_parse_error(&error) => {

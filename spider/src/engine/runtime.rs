@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::spider::tx::Receiver;
+use kameo::actor::Spawn;
+
+use crate::spider::tx::{Event, Events};
 use crate::{downloader, engine, middleware, scheduler};
 
 pub const MAX_REQUEST_CONCURRENCY: usize = 16;
@@ -8,26 +10,26 @@ pub const MAX_EVENTS: usize = 32;
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 pub const DEFAULT_WORKER_ID: &str = "worker-1";
 
-pub struct Runtime<S, D, R, N = engine::NoInit> {
+pub struct Runtime<S, D, E, N = engine::NoInit> {
     scheduler: Arc<S>,
     downloader: Arc<D>,
-    executor: Arc<R>,
-    events: Option<Receiver>,
+    executor: Arc<E>,
+    events: Option<Events>,
     registry: Arc<middleware::Registry>,
     middlewares: Arc<Vec<middleware::Spec>>,
     snapshots: Option<Arc<crate::item::snapshot::Store>>,
     concurrency: usize,
-    limit: Option<usize>,
+    claim_limit: Option<usize>,
     event_limit: usize,
     init: N,
 }
 
-impl<S: scheduler::Scheduler, D, R> Runtime<S, D, R, engine::NoInit> {
+impl<S: scheduler::Scheduler, D, E> Runtime<S, D, E, engine::NoInit> {
     pub(super) fn new(
         scheduler: S,
         downloader: D,
-        executor: R,
-        events: Receiver,
+        executor: E,
+        events: Events,
         registry: middleware::Registry,
         middlewares: Vec<middleware::Spec>,
     ) -> Self {
@@ -44,15 +46,15 @@ impl<S: scheduler::Scheduler, D, R> Runtime<S, D, R, engine::NoInit> {
             middlewares: Arc::new(middlewares),
             snapshots,
             concurrency: MAX_REQUEST_CONCURRENCY,
-            limit: None,
+            claim_limit: None,
             event_limit: MAX_EVENTS,
             init: engine::NoInit,
         }
     }
 }
 
-impl<S, D, R, N> Runtime<S, D, R, N> {
-    pub(super) fn with_init<T>(self, init: T) -> Runtime<S, D, R, T> {
+impl<S, D, E, N> Runtime<S, D, E, N> {
+    pub(super) fn with_init<T>(self, init: T) -> Runtime<S, D, E, T> {
         Runtime {
             scheduler: self.scheduler,
             downloader: self.downloader,
@@ -62,18 +64,18 @@ impl<S, D, R, N> Runtime<S, D, R, N> {
             middlewares: self.middlewares,
             snapshots: self.snapshots,
             concurrency: self.concurrency,
-            limit: self.limit,
+            claim_limit: self.claim_limit,
             event_limit: self.event_limit,
             init,
         }
     }
 }
 
-impl<S, D, R, N> Runtime<S, D, R, N>
+impl<S, D, E, N> Runtime<S, D, E, N>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
-    R: engine::contract::Execute + 'static,
+    E: engine::contract::Execute + 'static,
     N: engine::init::Init<S> + 'static,
 {
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
@@ -82,7 +84,7 @@ where
     }
 
     pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = Some(limit);
+        self.claim_limit = Some(limit);
         self
     }
 
@@ -164,17 +166,30 @@ where
         };
         events.set_limit(self.event_limit);
         let init = self.init.init(self.scheduler.clone()).await?;
-        engine::actor::Coordinator::new(
+        let actor = engine::actor::Engine::new(
             self.scheduler.clone(),
             self.downloader.clone(),
             self.executor.clone(),
             self.registry.clone(),
             self.snapshots.clone(),
-            self.concurrency,
-            self.limit.unwrap_or(self.concurrency),
-        )
-        .run(events, init)
-        .await
+            events.clone(),
+            engine::actor::Limits::new(
+                self.concurrency,
+                self.claim_limit.unwrap_or(self.concurrency),
+            ),
+        );
+        let prepared =
+            engine::actor::Engine::<S, D, E>::prepare_with_mailbox(kameo::mailbox::unbounded());
+        events.bind(prepared.actor_ref().clone().reply_recipient::<Event>())?;
+        let handle = prepared.spawn((actor, init));
+        let (actor, reason) = handle
+            .await
+            .map_err(|error| crate::Error::message(error.to_string()))?
+            .map_err(|error| crate::Error::message(error.to_string()))?;
+        if !reason.is_normal() {
+            return Err(crate::Error::message(reason.to_string()));
+        }
+        actor.into_result()
     }
 
     fn validate_limits(&self) -> Result<(), crate::Error> {
@@ -183,7 +198,7 @@ where
                 "Request concurrency must be positive",
             ));
         }
-        if self.limit == Some(0) {
+        if self.claim_limit == Some(0) {
             return Err(crate::Error::message(
                 "Request claim limit must be positive",
             ));

@@ -367,6 +367,20 @@ graph:
     }
 
     #[test]
+    fn bind_template_is_validated_before_execution() {
+        let rules = RULES.replace(
+            "      bind: {}",
+            "      bind:\n        title:\n          kind: template\n          template: '{missing}'\n          vars: {}",
+        );
+        let error = Config::from_yaml(&rules).unwrap_err();
+        assert!(error.to_string().contains("template variable is undefined"));
+
+        let malformed = rules.replace("'{missing}'", "'{missing'");
+        let error = Config::from_yaml(&malformed).unwrap_err();
+        assert!(error.to_string().contains("invalid template"));
+    }
+
+    #[test]
     fn initial_request_templates_render_from_start_vals() {
         let rules = RULES
             .replace("Accept: text/html", "Accept: \"{content_type}\"")
@@ -417,5 +431,17 @@ graph:
         let error = Config::from_yaml(&rules).unwrap_err();
 
         assert!(error.to_string().contains("$bind.missing"));
+    }
+
+    #[test]
+    fn url_join_requires_a_usable_literal_base_url() {
+        let rules = RULES.replace(
+            "      bind: {}",
+            "      bind:\n        url:\n          kind: pipeline\n          from: $response.url\n          transforms:\n            - {kind: url_join, base_url: 'mailto:test@example.com'}",
+        );
+
+        let error = Config::from_yaml(&rules).unwrap_err();
+
+        assert!(error.to_string().contains("cannot be used as a base URL"));
     }
 }

@@ -1,6 +1,6 @@
 use scrape_core::{CompiledSelector, query::ScrapeSelector};
 use selectors::attr::{AttrSelectorOperator, ParsedAttrSelectorOperation};
-use selectors::parser::{Combinator, Component, RelativeSelectorMatchHint, Selector, SelectorList};
+use selectors::parser::{Combinator, Component, Selector, SelectorList};
 
 use crate::selector;
 
@@ -27,9 +27,7 @@ pub(super) enum Constraint {
         operation: Option<(AttrSelectorOperator, String)>,
         exact: CompiledSelector,
     },
-    Any(Vec<Branch>),
     Not(SelectorList<ScrapeSelector>),
-    Has(Vec<(RelativeSelectorMatchHint, Branch)>),
     Exact(CompiledSelector),
 }
 
@@ -126,14 +124,10 @@ fn constraint(
                 operation,
             )?))
         }
-        Component::Is(list) | Component::Where(list) => Ok(Some(Constraint::Any(branches(list)?))),
         Component::Negation(list) => Ok(Some(Constraint::Not(list.clone()))),
-        Component::Has(selectors) => Ok(Some(Constraint::Has(
-            selectors
-                .iter()
-                .map(|selector| Ok((selector.match_hint, branch(&selector.selector)?)))
-                .collect::<Result<_, selector::Error>>()?,
-        ))),
+        Component::Is(_) | Component::Where(_) | Component::Has(_) => Err(selector::Error::Css(
+            "selector syntax is not supported by scrape-core".to_string(),
+        )),
         Component::ExplicitUniversalType
         | Component::ExplicitAnyNamespace
         | Component::ExplicitNoNamespace

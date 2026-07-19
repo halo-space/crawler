@@ -11,7 +11,7 @@ pub struct Config {
 
 /// Describes crawler-side processing for an Item field.
 ///
-/// v1 only uses `kind`. The dedicated structure leaves room for later
+/// Currently only uses `kind`. The dedicated structure leaves room for later
 /// processing metadata without mixing crawler concerns into validator Schema.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]

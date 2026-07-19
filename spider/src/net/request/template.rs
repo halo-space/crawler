@@ -80,7 +80,7 @@ fn render_string(template: &str, resolve: &impl Fn(&str) -> Option<Value>) -> Re
     Ok(Value::String(rendered))
 }
 
-pub(super) fn references(value: &Value) -> Result<Vec<&str>, String> {
+pub(crate) fn references(value: &Value) -> Result<Vec<&str>, String> {
     let mut references = Vec::new();
     collect(value, &mut references)?;
     Ok(references)

@@ -95,15 +95,16 @@ impl Writer {
             .drain()
             .map(|(_, file)| file)
             .collect::<Vec<_>>();
+        let mut first_error = None;
         for file in files {
-            file.lock()
-                .await
-                .flush()
-                .await
-                .map_err(crate::item::Error::from)?;
+            if let Err(error) = file.lock().await.flush().await
+                && first_error.is_none()
+            {
+                first_error = Some(crate::item::Error::from(error).into());
+            }
         }
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -126,49 +127,49 @@ impl Writer {
     }
 
     pub(crate) async fn write(&self, payload: &payload::Payload) -> Result<(), crate::Error> {
-        let mut writes = HashMap::<PathBuf, Vec<u8>>::new();
-
+        let path = self.current_path(&payload.task_id);
+        let mut bytes = Vec::new();
         for item in &payload.items {
-            let path = self.current_path(&payload.task_id);
             let mut line = serde_json::to_vec(item.as_ref()).map_err(crate::item::Error::from)?;
             line.push(b'\n');
-            writes.entry(path).or_default().extend(line);
+            bytes.extend(line);
+        }
+        if bytes.is_empty() {
+            return Ok(());
         }
 
-        for (path, bytes) in writes {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(crate::item::Error::from)?;
-            }
-
-            let file = self.file(&path).await?;
-            let mut file = file.lock().await;
-            let original_len = file
-                .metadata()
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(crate::item::Error::from)?
-                .len();
-            let write_result = async {
-                file.write_all(&bytes).await?;
-                file.flush().await
+                .map_err(crate::item::Error::from)?;
+        }
+
+        let file = self.file(&path).await?;
+        let mut file = file.lock().await;
+        let original_len = file
+            .metadata()
+            .await
+            .map_err(crate::item::Error::from)?
+            .len();
+        let write_result = async {
+            file.write_all(&bytes).await?;
+            file.flush().await
+        }
+        .await;
+        if let Err(error) = write_result {
+            let rollback_result = async {
+                file.set_len(original_len).await?;
+                file.seek(std::io::SeekFrom::End(0)).await?;
+                Ok::<(), std::io::Error>(())
             }
             .await;
-            if let Err(error) = write_result {
-                let rollback_result = async {
-                    file.set_len(original_len).await?;
-                    file.seek(std::io::SeekFrom::End(0)).await?;
-                    Ok::<(), std::io::Error>(())
-                }
-                .await;
-                if let Err(rollback_error) = rollback_result {
-                    return Err(crate::item::Error::Message(format!(
-                        "item write failed: {error}; rollback failed: {rollback_error}"
-                    ))
-                    .into());
-                }
-                return Err(crate::item::Error::from(error).into());
+            if let Err(rollback_error) = rollback_result {
+                return Err(crate::item::Error::Message(format!(
+                    "item write failed: {error}; rollback failed: {rollback_error}"
+                ))
+                .into());
             }
+            return Err(crate::item::Error::from(error).into());
         }
 
         Ok(())

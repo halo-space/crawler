@@ -111,6 +111,10 @@ impl Snapshot {
                 .map_err(|error| format!("Request Snapshot header value is invalid: {error}"))?;
         }
         if !self.cookies.is_empty() {
+            for name in self.cookies.keys() {
+                reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|error| format!("Request Snapshot cookie name is invalid: {error}"))?;
+            }
             let cookies = self
                 .cookies
                 .iter()
@@ -121,8 +125,8 @@ impl Snapshot {
                 .map_err(|error| format!("Request Snapshot cookie is invalid: {error}"))?;
         }
         if let Some(proxy) = &self.proxy {
-            url::Url::parse(&proxy.url)
-                .map_err(|error| format!("Request Snapshot proxy URL is invalid: {error}"))?;
+            super::transport::validate_proxy_url(&proxy.url)
+                .map_err(|message| format!("Request Snapshot proxy URL {message}"))?;
         }
         if self.state != net::State::Pending {
             return Err("queued Request Snapshot state must be pending".to_string());
@@ -311,6 +315,30 @@ graph:
         snapshot.state = net::State::Pending;
         snapshot.failed_workers = vec!["worker-1".to_string(), "worker-1".to_string()];
         assert!(snapshot.restore(None).is_err());
+    }
+
+    #[test]
+    fn restore_rejects_an_unsupported_proxy_protocol() {
+        let request = net::Request::follow("https://example.com").unwrap();
+        let mut snapshot = Snapshot::try_from(request).unwrap();
+        snapshot.proxy = Some(net::ProxyConfig {
+            url: "ftp://proxy.example.com".to_string(),
+        });
+
+        let error = snapshot.restore(None).unwrap_err();
+
+        assert!(error.contains("unsupported protocol: ftp"));
+    }
+
+    #[test]
+    fn snapshot_rejects_an_invalid_cookie_name() {
+        let request = net::Request::follow("https://example.com")
+            .unwrap()
+            .cookie("bad;name", "value");
+
+        let error = Snapshot::try_from(request).unwrap_err();
+
+        assert!(error.contains("cookie name is invalid"));
     }
 
     #[test]

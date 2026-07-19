@@ -1,7 +1,5 @@
 use std::sync::{Arc, OnceLock};
 
-use tokio::sync::{mpsc, oneshot};
-
 use crate::{Error, error::spider::Error as SpiderError, item, net};
 
 mod activity;
@@ -12,10 +10,10 @@ mod event;
 use activity::{Activity, Registration};
 use capacity::Capacity;
 pub(crate) use context::{Context, scope};
-pub(crate) use event::{Event, Receiver, Reply};
+pub(crate) use event::{Event, Events, Kind};
 
 pub struct Tx {
-    sender: mpsc::Sender<Event>,
+    events: Events,
     activity: Activity,
     capacity: Capacity,
     trace: Arc<OnceLock<Trace>>,
@@ -29,26 +27,26 @@ struct Trace {
     trace_id: String,
 }
 
-pub(crate) fn channel(buffer: usize) -> (Tx, Receiver) {
-    let (sender, receiver) = mpsc::channel(buffer);
+pub(crate) fn channel(buffer: usize) -> (Tx, Events) {
     let activity = Activity::default();
     let capacity = Capacity::new(buffer);
+    let events = Events::new(activity.clone(), capacity.clone());
     (
         Tx::new(
-            sender,
+            events.clone(),
             activity.clone(),
             capacity.clone(),
             Arc::new(OnceLock::new()),
             None,
         ),
-        Receiver::new(receiver, activity, capacity),
+        events,
     )
 }
 
 impl Clone for Tx {
     fn clone(&self) -> Self {
         Self {
-            sender: self.sender.clone(),
+            events: self.events.clone(),
             activity: self.activity.clone(),
             capacity: self.capacity.clone(),
             trace: self.trace.clone(),
@@ -62,14 +60,14 @@ impl Clone for Tx {
 
 impl Tx {
     fn new(
-        sender: mpsc::Sender<Event>,
+        events: Events,
         activity: Activity,
         capacity: Capacity,
         trace: Arc<OnceLock<Trace>>,
         detached: Option<Trace>,
     ) -> Self {
         Self {
-            sender,
+            events,
             activity,
             capacity,
             trace,
@@ -107,22 +105,18 @@ impl Tx {
             }
         }
 
-        let (reply, completion) = oneshot::channel();
         let permit = self.capacity.acquire().await;
-        self.sender
-            .send(Event::Requests {
-                requests,
-                context,
-                reply,
-                permit,
-            })
+        match self
+            .events
+            .send(Event::new(Kind::Requests { requests, context }, permit))
             .await
-            .map_err(|_| Error::Spider(SpiderError::ChannelClosed))?;
-
-        completion
-            .await
-            .map_err(|_| Error::Spider(SpiderError::ChannelClosed))?
-            .map_err(|error| Error::Spider(SpiderError::RequestRejected(error)))
+        {
+            Ok(()) => Ok(()),
+            Err(kameo::error::SendError::HandlerError(error)) => {
+                Err(Error::Spider(SpiderError::RequestRejected(error)))
+            }
+            Err(_) => Err(Error::Spider(SpiderError::EngineStopped)),
+        }
     }
 
     pub async fn item<I>(&self, items: Vec<I>) -> Result<(), Error>
@@ -139,22 +133,24 @@ impl Tx {
             })
             .collect();
 
-        let (reply, completion) = oneshot::channel();
         let permit = self.capacity.acquire().await;
-        self.sender
-            .send(Event::Items {
-                items,
-                context: self.context(),
-                reply,
+        match self
+            .events
+            .send(Event::new(
+                Kind::Items {
+                    items,
+                    context: self.context(),
+                },
                 permit,
-            })
+            ))
             .await
-            .map_err(|_| Error::Spider(SpiderError::ChannelClosed))?;
-
-        completion
-            .await
-            .map_err(|_| Error::Spider(SpiderError::ChannelClosed))?
-            .map_err(|error| Error::Spider(SpiderError::ItemRejected(error)))
+        {
+            Ok(()) => Ok(()),
+            Err(kameo::error::SendError::HandlerError(error)) => {
+                Err(Error::Spider(SpiderError::ItemRejected(error)))
+            }
+            Err(_) => Err(Error::Spider(SpiderError::EngineStopped)),
+        }
     }
 }
 
@@ -175,7 +171,70 @@ impl Trace {
 mod tests {
     use std::any::Any;
 
+    use kameo::actor::{Actor, ActorRef, Spawn};
+    use kameo::message::{Context as ActorContext, Message};
+    use kameo::reply::{DelegatedReply, ReplySender};
+    use tokio::sync::mpsc;
+
     use super::*;
+
+    struct Sink {
+        accepted: mpsc::UnboundedSender<Accepted>,
+    }
+
+    struct Accepted {
+        kind: Kind,
+        reply: Option<ReplySender<Result<(), String>>>,
+    }
+
+    impl Actor for Sink {
+        type Args = Self;
+        type Error = kameo::error::Infallible;
+
+        async fn on_start(
+            sink: Self::Args,
+            _actor_ref: ActorRef<Self>,
+        ) -> Result<Self, Self::Error> {
+            Ok(sink)
+        }
+    }
+
+    impl Message<Event> for Sink {
+        type Reply = DelegatedReply<Result<(), String>>;
+
+        async fn handle(
+            &mut self,
+            event: Event,
+            ctx: &mut ActorContext<Self, Self::Reply>,
+        ) -> Self::Reply {
+            let kind = event.accept();
+            let (delegated, reply) = ctx.reply_sender();
+            let _ = self.accepted.send(Accepted { kind, reply });
+            delegated
+        }
+    }
+
+    fn test_channel(
+        initial_limit: usize,
+        limit: usize,
+    ) -> (Tx, mpsc::UnboundedReceiver<Accepted>, ActorRef<Sink>) {
+        let (tx, events) = channel(initial_limit);
+        events.set_limit(limit);
+        let (accepted, receiver) = mpsc::unbounded_channel();
+        let prepared = Sink::prepare_with_mailbox(kameo::mailbox::unbounded());
+        let actor_ref = prepared.actor_ref().clone();
+        events
+            .bind(actor_ref.clone().reply_recipient::<Event>())
+            .unwrap();
+        drop(prepared.spawn(Sink { accepted }));
+        (tx, receiver, actor_ref)
+    }
+
+    fn complete(reply: Option<ReplySender<Result<(), String>>>) {
+        if let Some(reply) = reply {
+            reply.send(Ok(()));
+        }
+    }
 
     #[derive(serde::Serialize)]
     struct TestItem {
@@ -218,25 +277,15 @@ mod tests {
     }
 
     async fn emitted_item(item: TestItem) -> Box<dyn item::Item> {
-        let (tx, mut events) = channel(1);
+        let (tx, mut accepted, _actor) = test_channel(1, 1);
         let send = tokio::spawn(async move { tx.item(vec![item]).await });
-        let Event::Items {
-            mut items, reply, ..
-        } = events.recv().await.unwrap()
-        else {
+        let Accepted { kind, reply } = accepted.recv().await.unwrap();
+        let Kind::Items { mut items, .. } = kind else {
             panic!("expected item event");
         };
-        let _ = reply.send(Ok(()));
+        complete(reply);
         send.await.unwrap().unwrap();
         items.pop().unwrap()
-    }
-
-    async fn complete(event: Event) {
-        match event {
-            Event::Requests { reply, .. } | Event::Items { reply, .. } => {
-                let _ = reply.send(Ok(()));
-            }
-        }
     }
 
     #[tokio::test]
@@ -255,9 +304,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_limit_blocks_the_next_send_until_handling_finishes() {
-        let (tx, mut events) = channel(3);
-        events.set_limit(2);
+    async fn event_limit_is_released_when_handling_starts() {
+        let (tx, mut accepted, _actor) = test_channel(3, 1);
         let first = tokio::spawn({
             let tx = tx.clone();
             async move {
@@ -265,6 +313,9 @@ mod tests {
                     .await
             }
         });
+        let first_event = accepted.recv().await.unwrap();
+        assert!(!first.is_finished());
+
         let second = tokio::spawn({
             let tx = tx.clone();
             async move {
@@ -272,39 +323,23 @@ mod tests {
                     .await
             }
         });
-        let first_event = events.recv().await.unwrap();
-        let second_event = events.recv().await.unwrap();
-        let third = tokio::spawn({
-            let tx = tx.clone();
-            async move {
-                tx.request(vec![net::Request::follow("https://example.com/3").unwrap()])
-                    .await
-            }
-        });
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), events.recv())
-                .await
-                .is_err()
-        );
-        complete(first_event).await;
-        let third_event =
-            tokio::time::timeout(std::time::Duration::from_millis(100), events.recv())
+        let second_event =
+            tokio::time::timeout(std::time::Duration::from_millis(100), accepted.recv())
                 .await
                 .unwrap()
                 .unwrap();
-        complete(second_event).await;
-        complete(third_event).await;
+        assert!(!second.is_finished());
+
+        complete(first_event.reply);
+        complete(second_event.reply);
 
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
-        third.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn cancelling_sender_does_not_release_an_accepted_event() {
-        let (tx, mut events) = channel(2);
-        events.set_limit(1);
+    async fn cancelling_sender_does_not_cancel_an_accepted_event() {
+        let (tx, mut accepted, _actor) = test_channel(2, 1);
         let first = tokio::spawn({
             let tx = tx.clone();
             async move {
@@ -312,7 +347,7 @@ mod tests {
                     .await
             }
         });
-        let first_event = events.recv().await.unwrap();
+        let first_event = accepted.recv().await.unwrap();
         first.abort();
         let second = tokio::spawn({
             let tx = tx.clone();
@@ -322,26 +357,20 @@ mod tests {
             }
         });
 
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), events.recv())
-                .await
-                .is_err()
-        );
-        drop(first_event);
         let second_event =
-            tokio::time::timeout(std::time::Duration::from_millis(100), events.recv())
+            tokio::time::timeout(std::time::Duration::from_millis(100), accepted.recv())
                 .await
                 .unwrap()
                 .unwrap();
-        complete(second_event).await;
+        complete(first_event.reply);
+        complete(second_event.reply);
         second.await.unwrap().unwrap();
     }
 
     #[tokio::test]
     async fn event_limit_above_the_default_is_not_clamped() {
         let limit = crate::engine::MAX_EVENTS + 1;
-        let (tx, mut events) = channel(limit);
-        events.set_limit(limit);
+        let (tx, mut accepted, _actor) = test_channel(1, limit);
         let mut sends = Vec::with_capacity(limit);
         for index in 0..limit {
             let tx = tx.clone();
@@ -353,17 +382,17 @@ mod tests {
             }));
         }
 
-        let mut accepted = Vec::with_capacity(limit);
+        let mut events = Vec::with_capacity(limit);
         for _ in 0..limit {
-            accepted.push(
-                tokio::time::timeout(std::time::Duration::from_millis(100), events.recv())
+            events.push(
+                tokio::time::timeout(std::time::Duration::from_millis(100), accepted.recv())
                     .await
                     .unwrap()
                     .unwrap(),
             );
         }
-        for event in accepted {
-            complete(event).await;
+        for event in events {
+            complete(event.reply);
         }
         for send in sends {
             send.await.unwrap().unwrap();

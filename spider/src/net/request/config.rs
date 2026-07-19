@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -59,14 +59,22 @@ impl Config {
                 Error::Message(format!("node {node} uses unsupported method: {method}"))
             })?;
         }
+        let mut header_names = HashSet::with_capacity(self.headers.len());
         for (name, value) in &self.headers {
-            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
-                Error::Message(format!(
-                    "node {node} has an invalid header name {name}: {error}"
-                ))
-            })?;
+            let header_name =
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                    Error::Message(format!(
+                        "node {node} has an invalid header name {name}: {error}"
+                    ))
+                })?;
+            if !header_names.insert(header_name) {
+                return Err(Error::Message(format!(
+                    "node {node} contains duplicate header name: {name}"
+                )));
+            }
             check_scalar(node, &format!("header {name}"), value)?;
             template::check(node, &format!("header {name}"), value)?;
+            check_header_value(node, &format!("header {name}"), value)?;
         }
         for (name, value) in &self.cookies {
             reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
@@ -76,6 +84,7 @@ impl Config {
             })?;
             check_scalar(node, &format!("cookie {name}"), value)?;
             template::check(node, &format!("cookie {name}"), value)?;
+            check_header_value(node, &format!("cookie {name}"), value)?;
         }
         body::check(node, self.body.as_ref())?;
         transport::check_proxy(node, self.proxy.as_ref())?;
@@ -176,6 +185,15 @@ fn check_scalar(node: &str, name: &str, value: &Value) -> Result<(), Error> {
     }
 }
 
+fn check_header_value(node: &str, name: &str, value: &Value) -> Result<(), Error> {
+    let value = template::render(value, &|_| Some(Value::String("value".to_string())))?;
+    let value = template::scalar(&value, name)?;
+    reqwest::header::HeaderValue::from_str(&value).map_err(|error| {
+        Error::Message(format!("node {node} has an invalid {name} value: {error}"))
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +207,46 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("unknown field `user_agent`"));
+    }
+
+    #[test]
+    fn rejects_invalid_literal_header_and_cookie_values() {
+        let header = serde_json::from_value::<Config>(serde_json::json!({
+            "headers": {"X-Test": "line one\nline two"}
+        }))
+        .unwrap();
+        assert!(header.validate("index").is_err());
+
+        let cookie = serde_json::from_value::<Config>(serde_json::json!({
+            "cookies": {"session": "line one\nline two"}
+        }))
+        .unwrap();
+        assert!(cookie.validate("index").is_err());
+    }
+
+    #[test]
+    fn validates_header_templates_with_safe_placeholders() {
+        let config = serde_json::from_value::<Config>(serde_json::json!({
+            "headers": {"X-Trace": "prefix-{trace_id}"},
+            "cookies": {"session": "{session_id}"}
+        }))
+        .unwrap();
+
+        config.validate("index").unwrap();
+    }
+
+    #[test]
+    fn rejects_case_insensitive_duplicate_header_names() {
+        let config = serde_json::from_value::<Config>(serde_json::json!({
+            "headers": {
+                "X-Trace": "one",
+                "x-trace": "two"
+            }
+        }))
+        .unwrap();
+
+        let error = config.validate("index").unwrap_err();
+
+        assert!(error.to_string().contains("duplicate header name"));
     }
 }

@@ -94,12 +94,11 @@ fn normalize_map(value: &Map<String, Value>, kind: Kind, base_url: &str) -> Vec<
 }
 
 fn urls_in_html(html: &str) -> Vec<String> {
-    let document = scraper::Html::parse_fragment(html);
-    let selector = scraper::Selector::parse("source[src]").expect("valid source selector");
-    document
-        .select(&selector)
-        .filter_map(|element| element.value().attr("src"))
-        .map(ToOwned::to_owned)
+    let soup = scrape_core::Soup::parse(html);
+    soup.select("source[src]")
+        .expect("valid source selector")
+        .into_iter()
+        .filter_map(|element| element.get("src").map(str::to_owned))
         .collect()
 }
 

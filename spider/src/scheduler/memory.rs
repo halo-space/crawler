@@ -297,12 +297,13 @@ impl scheduler::Scheduler for Memory {
             .validate_success()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
         let mut state = self.state();
-        if settle::repeat(&state, payload)? {
+        if settle::is_duplicate(&state, payload)? {
             return Ok(());
         }
         settle::validate_lease(&state, payload, self.lease)?;
         settle::require_ack(&state, payload)?;
         let counters = settle::counters(payload)?;
+        let counters = settle::merge_stats(&state, &payload.trace_id, counters)?;
         if state.processing.remove(&payload.id).is_none() {
             return Err(scheduler::Error::RequestNotFound(payload.id.clone()));
         }
@@ -311,7 +312,7 @@ impl scheduler::Scheduler for Memory {
             .remove(&(payload.id.clone(), payload.version));
         state.done += 1;
         settle::record(&mut state, payload);
-        settle::apply(&mut state, payload.trace_id.clone(), counters);
+        settle::apply_stats(&mut state, payload.trace_id.clone(), counters);
         Ok(())
     }
 
@@ -320,12 +321,13 @@ impl scheduler::Scheduler for Memory {
             .validate_failure()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
         let mut state = self.state();
-        if settle::repeat(&state, payload)? {
+        if settle::is_duplicate(&state, payload)? {
             return Ok(());
         }
         settle::validate_lease(&state, payload, self.lease)?;
         settle::require_ack(&state, payload)?;
         let counters = settle::counters(payload)?;
+        let counters = settle::merge_stats(&state, &payload.trace_id, counters)?;
         let Some(request) = state.processing.remove(&payload.id) else {
             return Err(scheduler::Error::RequestNotFound(payload.id.clone()));
         };
@@ -338,7 +340,7 @@ impl scheduler::Scheduler for Memory {
         } else {
             settle::record(&mut state, payload);
         }
-        settle::apply(&mut state, payload.trace_id.clone(), counters);
+        settle::apply_stats(&mut state, payload.trace_id.clone(), counters);
         Ok(())
     }
 }

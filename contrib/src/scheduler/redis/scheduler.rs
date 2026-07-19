@@ -1,1 +1,1 @@
-// Redis is outside v1 implementation scope.
+// Redis Scheduler is planned for v4 and is outside the current implementation scope.

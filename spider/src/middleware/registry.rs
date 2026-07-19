@@ -183,6 +183,7 @@ impl Registry {
             if spec.name != "retry" || spec.hook.as_deref().is_some_and(|value| value != hook) {
                 continue;
             }
+            crate::middleware::check(spec)?;
             if spec.skip {
                 effective.remove(&spec.key);
             } else {
@@ -217,6 +218,8 @@ impl Registry {
             if spec.hook.as_deref().is_some_and(|value| value != hook) {
                 continue;
             }
+
+            crate::middleware::check(spec)?;
 
             let key = (spec.name.clone(), spec.key.clone());
             if spec.skip {
@@ -292,6 +295,7 @@ impl Default for Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -299,6 +303,43 @@ mod tests {
     struct Recorder {
         name: &'static str,
         calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct TestItem {
+        #[serde(skip)]
+        state: crate::item::State,
+        #[serde(skip)]
+        middlewares: Vec<Spec>,
+    }
+
+    impl Item for TestItem {
+        fn from_values(_values: crate::item::Values) -> Result<Self, crate::item::Error> {
+            Ok(Self {
+                state: crate::item::State::default(),
+                middlewares: Vec::new(),
+            })
+        }
+
+        fn state(&self) -> &crate::item::State {
+            &self.state
+        }
+
+        fn state_mut(&mut self) -> &mut crate::item::State {
+            &mut self.state
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+
+        fn middlewares(&self) -> &[Spec] {
+            &self.middlewares
+        }
     }
 
     impl Middleware for Recorder {
@@ -396,6 +437,26 @@ mod tests {
         let error = registry.before_scheduler(request).await.unwrap_err();
 
         assert!(matches!(error, Error::NotRegistered(name) if name == "missing"));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_item_middleware_before_execution() {
+        let registry = Registry::new();
+        let item = TestItem {
+            state: crate::item::State::default(),
+            middlewares: vec![
+                Spec::new("validate")
+                    .hook("before_item")
+                    .args(serde_json::json!({"required": "title"})),
+            ],
+        };
+
+        let error = match registry.before_item(Box::new(item)).await {
+            Ok(_) => panic!("invalid Item middleware must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, Error::InvalidConfig { name, .. } if name == "validate"));
     }
 
     #[tokio::test]

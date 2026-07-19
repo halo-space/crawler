@@ -1,23 +1,18 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
 
 use chrono::Local;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 
 use crate::payload;
 
 pub(crate) struct Store {
     dir: PathBuf,
-    locks: Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>,
 }
 
 impl Store {
     pub(crate) fn new(dir: impl Into<PathBuf>) -> Self {
-        Self {
-            dir: dir.into(),
-            locks: Mutex::new(HashMap::new()),
-        }
+        Self { dir: dir.into() }
     }
 
     pub(crate) async fn open(&self) -> Result<(), crate::Error> {
@@ -33,8 +28,6 @@ impl Store {
         error: &str,
     ) -> Result<PathBuf, crate::Error> {
         let path = self.path(payload);
-        let lock = self.file_lock(&path).await;
-        let _guard = lock.lock().await;
         let items = payload
             .items
             .iter()
@@ -49,7 +42,6 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()
             .map_err(crate::item::Error::from)?;
         let snapshot = serde_json::json!({
-            "schema_version": 1,
             "id": payload.id,
             "task_id": payload.task_id,
             "trace_id": payload.trace_id,
@@ -61,22 +53,12 @@ impl Store {
             "items": items,
         });
         let bytes = serde_json::to_vec_pretty(&snapshot).map_err(crate::item::Error::from)?;
-
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(crate::item::Error::from)?;
-        }
-        tokio::fs::write(&path, bytes)
-            .await
-            .map_err(crate::item::Error::from)?;
+        publish(&path, &bytes).await?;
 
         Ok(path)
     }
 
     pub(crate) async fn remove(&self, path: &Path) -> Result<(), crate::Error> {
-        let lock = self.file_lock(path).await;
-        let _guard = lock.lock().await;
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -97,23 +79,50 @@ impl Store {
             .join(hour)
             .join(file)
     }
+}
 
-    async fn file_lock(&self, path: &Path) -> Arc<Mutex<()>> {
-        let mut locks = self.locks().await;
-        locks.retain(|_, lock| lock.strong_count() > 0);
-
-        if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
-            return lock;
+async fn publish(path: &Path, bytes: &[u8]) -> Result<(), crate::Error> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(crate::item::Error::from)?;
+    }
+    let temporary = temporary_path(path);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .await
+        .map_err(crate::item::Error::from)?;
+    let result = async {
+        file.write_all(bytes).await?;
+        file.flush().await?;
+        drop(file);
+        tokio::fs::rename(&temporary, path).await
+    }
+    .await;
+    if let Err(error) = result {
+        let cleanup = tokio::fs::remove_file(&temporary).await;
+        if let Err(cleanup_error) = cleanup
+            && cleanup_error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(crate::item::Error::Message(format!(
+                "failure snapshot write failed: {error}; temporary file cleanup failed: {cleanup_error}"
+            ))
+            .into());
         }
-
-        let lock = Arc::new(Mutex::new(()));
-        locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
-        lock
+        return Err(crate::item::Error::from(error).into());
     }
 
-    async fn locks(&self) -> MutexGuard<'_, HashMap<PathBuf, Weak<Mutex<()>>>> {
-        self.locks.lock().await
-    }
+    Ok(())
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let file = path
+        .file_name()
+        .expect("failure snapshot path must have a file name")
+        .to_string_lossy();
+    path.with_file_name(format!(".{file}.{}.tmp", uuid::Uuid::now_v7()))
 }
 
 #[cfg(test)]
@@ -177,6 +186,17 @@ mod tests {
         ))
     }
 
+    async fn temporary_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut entries = tokio::fs::read_dir(dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                files.push(entry.path());
+            }
+        }
+        files
+    }
+
     #[tokio::test]
     async fn writes_complete_items_and_removes_snapshot() {
         let runtime_dir = temp_dir();
@@ -196,7 +216,9 @@ mod tests {
             serde_json::json!([{"id": "item-1", "data": {"value": 7}}])
         );
         assert_eq!(value["error"], "disk full");
+        assert!(value.get("schema_version").is_none());
         assert!(path.to_string_lossy().contains("task_1"));
+        assert!(temporary_files(path.parent().unwrap()).await.is_empty());
 
         snapshots.remove(&path).await.unwrap();
         assert!(!tokio::fs::try_exists(&path).await.unwrap());
@@ -227,6 +249,23 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&second_path).await.unwrap()).unwrap();
         assert_eq!(first["items"][0]["data"]["value"], 1);
         assert_eq!(second["items"][0]["data"]["value"], 2);
+        assert!(
+            temporary_files(first_path.parent().unwrap())
+                .await
+                .is_empty()
+        );
+
+        tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn publish_failure_removes_the_temporary_file() {
+        let runtime_dir = temp_dir();
+        let path = runtime_dir.join("snapshot.json");
+        tokio::fs::create_dir_all(&path).await.unwrap();
+
+        assert!(publish(&path, b"snapshot").await.is_err());
+        assert!(temporary_files(&runtime_dir).await.is_empty());
 
         tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
     }

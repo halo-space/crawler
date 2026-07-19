@@ -1,6 +1,6 @@
 # crawler 架构与功能说明
 
-本文描述当前源码已经实现的功能、核心运行模型和扩展边界。它是一份可以独立阅读的架构总览；更细的设计决策、历史讨论和版本规划见[章节文档](./架构设计文档.md)。
+本文描述当前源码已经实现的功能、核心运行模型和扩展边界。它是一份可以独立阅读的架构总览。
 
 ## 1. 定位与当前范围
 
@@ -55,7 +55,7 @@ flowchart LR
     R["Rules 模式<br/>YAML Config + graph"]
     X["统一 Execute 合同"]
     T["Tx.request / Tx.item"]
-    A["Engine Coordinator<br/>单一 Actor"]
+    A["Kameo Engine Actor<br/>单一协调者"]
     S["Scheduler 合同"]
     M["Memory Scheduler"]
     W["Request Worker"]
@@ -85,7 +85,7 @@ flowchart LR
     O -. 提交失败时 .-> F
 ```
 
-Engine 内部采用消息驱动的单协调者模型，但不会把 Scheduler、Downloader、Executor 或 AI 强制改造成 Actor。对外组件仍然使用清晰的方法合同；Actor 只是 Engine 内部管理并发、输出和退出条件的实现方式。
+Engine 内部使用一个私有 Kameo Actor 作为消息驱动的单一协调者，但不会把 Scheduler、Downloader、Executor 或 AI 强制改造成 Actor。对外组件仍使用方法合同；Actor 直接持有运行状态和依赖，Request 与输出工作继续在独立 Tokio 任务中执行，长 I/O 不会阻塞消息处理。
 
 ## 4. 身份、Task 与运行种子
 
@@ -115,7 +115,7 @@ flowchart LR
 task_id + trace_id + immutable Trace Snapshot + initial Requests
 ```
 
-Trace Snapshot 保存本轮 Request 共享的 `task_id`、参数、可选附件配置、持久化目标和优先级，不保存 schema 版本、Task revision 或静态推导的 Request mode 集合。Rules Snapshot 额外包含完整 DSL；代码 Snapshot 的 `dsl` 固定为空。
+Trace Snapshot 保存本轮 Request 共享的 `task_id`、参数、可选附件配置、持久化目标和优先级，不保存 schema 版本、Task revision 或静态推导的 Request mode 集合。Rules Snapshot 额外包含完整 DSL，其中可选的 `spider.version` 必须非空，`spider.timezone` 必须是有效 IANA 时区；代码 Snapshot 的 `dsl` 固定为空。
 
 Request Snapshot 保存稳定 `node` 和可执行请求字段，不保存 handler、函数指针、闭包或进程内对象：
 
@@ -145,7 +145,7 @@ flowchart TB
 
 Rules 模式当前把加载的 YAML 视为本次运行定义，在开始领取前由 `rules::Init` 原子写入 Trace Snapshot 和初始 Requests。未来由外部控制面派发的 Rules Worker 需要沿用同一快照合同，而不是在 Worker 内重新解释出另一套身份。
 
-## 5. Engine 与单一 Actor 协调
+## 5. Engine Actor
 
 `Runtime::start()` 的外层顺序固定为：
 
@@ -154,18 +154,21 @@ Rules 模式当前把加载的 YAML 视为本次运行定义，在开始领取�
 -> open Scheduler / Downloader / 本地快照目录
 -> before_spider
 -> 初始化或接入运行
--> Coordinator.run
+-> 启动并排空 Engine Actor
 -> after_spider
 -> close Downloader / Scheduler
 ```
 
-`engine/actor.rs` 中的 `Coordinator` 是唯一协调者，持有以下运行状态：
+`engine/actor.rs` 中的 `Engine` 是真实的 Kameo Actor，也是唯一协调者，持有以下运行状态：
 
+- Executor 启动、轮询和 producer 空闲观察任务句柄；
 - 至多一个正在进行的 Scheduler 领取任务；
 - 当前 Request 任务集合；
 - 当前 Tx 输出处理任务集合；
-- Event Receiver、Tx producer 活跃状态和最终错误；
+- Tx Event 容量、producer 活跃状态和第一个终态错误；
 - Scheduler、Downloader、Executor、Middleware Registry 和可选 Item 快照存储的共享引用。
+
+启动、领取、Request、输出、轮询和 producer 空闲分别通过独立 Actor 消息报告完成。所有派生任务都会捕获 panic 并报告完成。Kameo mailbox 对内部消息使用无界队列；显式 Event 容量只限制外部 `Tx` 输出，不会把内部完成消息计入用户配置的容量。
 
 ### 5.1 三个独立限制
 
@@ -173,7 +176,7 @@ Rules 模式当前把加载的 YAML 视为本次运行定义，在开始领取�
 | --- | ---: | --- |
 | `with_concurrency(n)` | `16` | 同时运行的 Request 任务上限 |
 | `with_limit(n)` | 等于 concurrency | 一次 `next_requests(limit)` 最多领取的 Request 数 |
-| `with_event_limit(n)` | `32` | 已被 Tx 接受、但尚未完成处理的 Event 上限 |
+| `with_event_limit(n)` | `32` | 已被 Tx 接受、但 Actor handler 尚未开始的 Event 上限 |
 
 三个值在 Engine 启动时校验并加载，不支持运行中热更新，也不会互相替代。一次实际领取数量为：
 
@@ -181,18 +184,21 @@ Rules 模式当前把加载的 YAML 视为本次运行定义，在开始领取�
 min(claim_limit, request_concurrency - active_request_tasks)
 ```
 
-Event permit 在 `Tx` 发送前获取，直到 Engine 完成对应 Request 或 Item Event 才释放。因此 Event 限制约束的是完整的未完成输出，不只是通道里等待接收的消息。
+Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Event 时释放。Handler 登记独立输出任务并委托应答；`Tx` 仍会等待 Scheduler 与 Middleware 处理完成。Event 容量因此限制等待开始的 Event，而 Actor 的输出任务集合独立保证处理期间不会提前退出。
 
 ### 5.2 空闲与退出
 
-一次 `next_requests(limit)` 返回空集合只表示当前领取没有结果，不能直接结束 Engine。Coordinator 只有同时满足以下条件才退出：
+一次 `next_requests(limit)` 返回空集合只表示当前领取没有结果，不能直接结束 Engine。Actor 只有同时满足以下条件才退出：
 
 - Scheduler 已确认没有排队或执行中的 Request；
-- 没有正在进行的领取任务；
+- 没有启动、领取、轮询或 producer 空闲观察任务；
 - 没有 Request 任务；
 - 没有输出任务；
-- Event 队列为空；
+- 没有活跃的 Event permit；
 - 没有仍可能产生 Event 的 Tx producer。
+
+空领取结果只对该次领取观察到的工作状态有效。如果领取期间有 Request、输出 Event 或 Tx producer
+改变了工作状态，Actor 会把该结果视为过期，并在退出前重新领取确认。
 
 这一条件保证列表页产生的详情 Request、延迟到达的 Item，以及 handler 内克隆 Tx 后产生的输出都不会被提前丢弃。
 
@@ -387,6 +393,8 @@ let nodes = soup.select("article h2")?;
 
 评分覆盖标签、ID、class、属性、组合关系和支持的静态伪类。候选的额外属性不扣分；默认 `min` 为 `0.8`，合法范围是 `0.0..=1.0`。
 
+Healing 只接受 `scrape-core 0.2.9` 能成功编译的语法；该解析器当前会在 Healing 开始前拒绝 `:is()`、`:where()` 和 `:has()`。
+
 Healing 不保存历史节点指纹、不改写或持久化修复后的 selector、不跨 selector 类型，也不会调用 AI。非法 CSS 直接返回 CSS 错误；低于 `min` 返回空集合，让 Rules 继续当前字段的下一个 extractor。
 
 ### 9.2 Regex、JSON 与 AI
@@ -468,6 +476,11 @@ Tx.item
 
 每个 Item 写一行 JSON，JSONL 只包含 Item 的业务序列化结果。并发写入同一小时文件会串行化，写入失败时尝试回滚本次追加，`close()` 刷新打开的文件。
 
+`version / timezone` 是 Trace 级运行元数据，持久化 Scheduler 在 `push_items` 时可通过
+`payload.trace_id` 读取对应 Trace Snapshot，并按需要反规范化到自己的 Item 记录。列名固定为
+`config_version / timezone`；裸 `version` 保留给 Request 执行权。这些元数据不自动注入业务
+Item JSON，也不复制到每条 Request Snapshot；默认 Memory JSONL 不保存这些运行字段。
+
 提交失败快照：
 
 ```text
@@ -486,7 +499,13 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 
 | 路径 | 单一职责 |
 | --- | --- |
-| `spider/src/engine/actor.rs` | 协调领取、Request 任务、输出任务、错误与退出 |
+| `spider/src/engine/actor.rs` | 持有 Engine Actor 状态及统一推进和退出判断 |
+| `spider/src/engine/actor/start.rs` | 启动 Executor 工作并处理完成消息 |
+| `spider/src/engine/actor/claim.rs` | 领取 Scheduler 工作并处理完成消息 |
+| `spider/src/engine/actor/request.rs` | 登记一条 Request 任务并处理完成消息 |
+| `spider/src/engine/actor/output.rs` | 接受 Tx Event、委托应答并跟踪输出完成 |
+| `spider/src/engine/actor/wait.rs` | 安排轮询与 producer 空闲通知 |
+| `spider/src/engine/actor/task.rs` | 持有任务句柄并把任务 panic 转为 Engine 错误 |
 | `spider/src/engine/runtime.rs` | 组件生命周期、启动参数和 Actor 装配 |
 | `spider/src/engine/worker.rs` | 单条 Request 的 ack、租约维护和最终结算 |
 | `spider/src/engine/request.rs` | 下载、Middleware、Worker 本地重试与解析主链 |
@@ -495,7 +514,12 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/engine/executor.rs` | 根据 Trace Snapshot 选择 Code/Rules 并调用共享 Spider |
 | `spider/src/engine/code.rs` | 代码模式本地运行种子初始化 |
 | `spider/src/engine/rules.rs` | Rules 模式装配与运行种子初始化 |
-| `spider/src/engine/rules/executor/*` | 当前 DSL node 的字段、值和输出构造 |
+| `spider/src/engine/rules/executor.rs` | 协调一次 Rules node 执行并发送产物 |
+| `spider/src/engine/rules/executor/field.rs` | 从当前 Response 提取声明字段 |
+| `spider/src/engine/rules/executor/value.rs` | 从当前 Rules 上下文解析类型化值引用 |
+| `spider/src/engine/rules/executor/bind.rs` | 执行有序 bind pipeline、transform 和 template |
+| `spider/src/engine/rules/executor/condition.rs` | 判断一条 edge 条件 |
+| `spider/src/engine/rules/executor/build.rs` | 从已启用 edge 构造 Request 与 Item 值 |
 | `spider/src/scheduler/contract.rs` | Scheduler 公共合同 |
 | `spider/src/scheduler/init.rs` | 运行种子初始化合同 |
 | `spider/src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |
@@ -552,8 +576,5 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 
 ## 15. 相关文档
 
-- [章节式架构设计索引](./架构设计文档.md)
-- [版本 TODO](./TODO.md)
-- [Rust crate 与目录结构](./chapters/24-code-structure.md)
-- [版本规划](./chapters/13-version-plan.md)
+- [架构文档索引](./架构设计文档.md)
 - [English architecture overview](./architecture.md)

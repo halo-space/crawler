@@ -67,6 +67,9 @@ pub(super) fn check(spec: &Spec) -> Result<(), crate::middleware::Error> {
     {
         return Err(invalid_config("hook must be before_download"));
     }
+    if spec.skip {
+        return Ok(());
+    }
     let Some(args) = spec.args.as_object() else {
         return Err(invalid_config("args must be an object"));
     };

@@ -1,1 +1,1 @@
-// MySQL is outside v1 implementation scope.
+// MySQL Scheduler is planned for v4 and is outside the current implementation scope.

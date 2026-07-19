@@ -126,10 +126,12 @@ Request 进入本地执行槽后先通过 `Scheduler::ack` 确认执行权，长
 `Scheduler::failure`。租约超时和续租间隔由具体 Scheduler 自己提供；Memory 默认超时 30 秒、
 每 10 秒续租。已确认执行失败时会保留有序且不重复的失败 Worker；未 ack 的领取过期不消费尝试次数。
 Memory 只从进程内不可变映射读取 Trace Snapshot。Engine 直接跟踪克隆出来的 Tx 生产者，不再通过固定空闲等待窗口猜测是否仍有输出。
+Engine 内部由一个 Kameo Actor 统一协调，Request 和输出 I/O 仍在独立 Tokio 任务中执行。
 当前 Request 内直接 await 的 Tx 调用可以使用完整 Request 上下文；移动到独立任务中的 Tx clone
 只保留 `task_id / trace_id`，不会继承 Request 执行权、租约身份、node、version 或 stats。
 Request 并发数、单次领取上限和 Event 容量是三个独立且只在启动时加载的配置，分别通过
 `with_concurrency`、`with_limit` 和 `with_event_limit` 设置。
+Actor 开始处理 Event 时即释放 Event 容量，但 Tx 调用仍会等待对应 Scheduler 与 Middleware 工作完成。
 
 Dedup 只处理配置 key 生成的 Request 指纹。默认精确存储使用 `HashMap + 过期时间堆`；TTL 省略或
 `-1` 表示进程生命周期内永久保留，`0` 表示不保留。同源 redirect 会把中间响应的 Cookie 带到

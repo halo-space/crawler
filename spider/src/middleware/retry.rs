@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::middleware::{Middleware, Spec};
 
@@ -31,11 +31,11 @@ impl Policy {
             None => 0,
         };
         let count = usize::try_from(count).map_err(|_| invalid_config("count is too large"))?;
-        let backoff = spec
-            .args
-            .get("backoff")
-            .and_then(serde_json::Value::as_array)
-            .map(|values| {
+        let backoff = match spec.args.get("backoff") {
+            Some(value) => {
+                let values = value
+                    .as_array()
+                    .ok_or_else(|| invalid_config("backoff must be an array"))?;
                 values
                     .iter()
                     .map(|value| {
@@ -45,9 +45,16 @@ impl Policy {
                     })
                     .map(|value| value.map(Duration::from_millis))
                     .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+            }
+            None => Ok(Vec::new()),
+        }?;
+        let now = Instant::now();
+        if backoff
+            .iter()
+            .any(|delay| now.checked_add(*delay).is_none())
+        {
+            return Err(invalid_config("backoff exceeds the runtime clock range"));
+        }
 
         Ok(Self {
             schedules: vec![Schedule { count, backoff }],
@@ -85,6 +92,9 @@ pub(super) fn check(spec: &Spec) -> Result<(), crate::middleware::Error> {
         return Err(invalid_config(
             "hook must be error_download, error_parse, or error_item",
         ));
+    }
+    if spec.skip {
+        return Ok(());
     }
     if spec
         .args
@@ -135,5 +145,30 @@ mod tests {
             Some(Duration::from_millis(7))
         );
         assert_eq!(policy.delay(1_000_000_000_000), None);
+    }
+
+    #[test]
+    fn rejects_non_array_backoff() {
+        let spec = Spec::new("retry").args(serde_json::json!({
+            "count": 1,
+            "backoff": 100
+        }));
+
+        assert!(Policy::from_spec(&spec).is_err());
+        assert!(check(&spec).is_err());
+    }
+
+    #[test]
+    fn checks_backoff_against_the_runtime_clock_range() {
+        let delay = Duration::from_millis(u64::MAX);
+        let overflows = Instant::now().checked_add(delay).is_none();
+        let spec = Spec::new("retry").args(serde_json::json!({
+            "count": 1,
+            "backoff": [u64::MAX]
+        }));
+
+        let result = Policy::from_spec(&spec);
+
+        assert_eq!(result.is_err(), overflows);
     }
 }

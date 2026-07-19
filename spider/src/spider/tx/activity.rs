@@ -41,18 +41,18 @@ impl Activity {
 }
 
 pub(super) struct Registration {
-    global: Activity,
+    activity: Activity,
 }
 
 impl Registration {
-    pub(super) fn new(global: Activity) -> Self {
-        global.register();
-        Self { global }
+    pub(super) fn new(activity: Activity) -> Self {
+        activity.register();
+        Self { activity }
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.global.unregister();
+        self.activity.unregister();
     }
 }

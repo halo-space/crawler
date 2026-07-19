@@ -50,6 +50,23 @@ impl Dedup {
         fingerprints: Vec<(String, Option<Duration>)>,
     ) -> Result<bool, crate::middleware::Error> {
         let now = Instant::now();
+        // Resolve every finite deadline before touching the store. If one value
+        // cannot be represented by the runtime clock, this request must leave
+        // the existing fingerprint set unchanged.
+        let expirations = fingerprints
+            .iter()
+            .map(|(_, ttl)| {
+                ttl.filter(|ttl| !ttl.is_zero())
+                    .map(|ttl| {
+                        now.checked_add(ttl).ok_or_else(|| {
+                            invalid_config(
+                                "ttl exceeds the runtime clock range; use -1 for permanent",
+                            )
+                        })
+                    })
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut store = self.store();
         store.remove_expired(now);
 
@@ -60,14 +77,10 @@ impl Dedup {
             return Ok(true);
         }
 
-        for (fingerprint, ttl) in fingerprints {
-            let expires = match ttl {
-                Some(ttl) if ttl.is_zero() => continue,
-                Some(ttl) => Some(now.checked_add(ttl).ok_or_else(|| {
-                    invalid_config("ttl exceeds the runtime clock range; use -1 for permanent")
-                })?),
-                None => None,
-            };
+        for ((fingerprint, ttl), expires) in fingerprints.into_iter().zip(expirations) {
+            if ttl.is_some_and(|ttl| ttl.is_zero()) {
+                continue;
+            }
             store.fingerprints.insert(fingerprint.clone(), expires);
             if let Some(expires) = expires {
                 store.expirations.push(Reverse((expires, fingerprint)));
@@ -108,6 +121,9 @@ pub(super) fn check(spec: &Spec) -> Result<(), crate::middleware::Error> {
     {
         return Err(invalid_config("hook must be before_scheduler"));
     }
+    if spec.skip {
+        return Ok(());
+    }
     let rules = spec
         .args
         .get("rules")
@@ -142,7 +158,7 @@ pub(super) fn check(spec: &Spec) -> Result<(), crate::middleware::Error> {
             let key = key
                 .as_str()
                 .ok_or_else(|| invalid_config("rule key values must be strings"))?;
-            if key != "$request.url" && !key.starts_with("$vals.") {
+            if key != "$request.url" && key.strip_prefix("$vals.").is_none_or(str::is_empty) {
                 return Err(invalid_config(&format!(
                     "unsupported fingerprint path: {key}"
                 )));
@@ -221,14 +237,14 @@ fn request_fingerprints(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let ttl = parse_ttl(rule)?;
-            let namespace = format!(
-                "{}:{}:{}",
-                request.task_id,
-                spec.key.as_deref().unwrap_or("default"),
-                rule_name
-            );
+            let digest = fingerprint(&(
+                request.task_id.as_str(),
+                spec.key.as_deref(),
+                rule_name.as_str(),
+                values,
+            ))?;
 
-            Ok((fingerprint(&namespace, &values)?, ttl))
+            Ok((digest, ttl))
         })
         .collect()
 }
@@ -293,7 +309,7 @@ fn normalize_url(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true)
     {
-        query.sort();
+        query.sort_by(|(left, _), (right, _)| left.cmp(right));
     }
     if query.is_empty() {
         url.set_query(None);
@@ -308,27 +324,19 @@ fn parse_ttl(args: &serde_json::Value) -> Result<Option<Duration>, crate::middle
     let Some(ttl) = args.get("ttl") else {
         return Ok(None);
     };
-    let ttl = ttl
-        .as_i64()
-        .ok_or_else(|| invalid_config("ttl must be -1 or non-negative integer milliseconds"))?;
-    match ttl {
-        -1 => Ok(None),
-        0.. => Ok(Some(Duration::from_millis(ttl as u64))),
-        _ => Err(invalid_config(
-            "ttl must be -1 or non-negative integer milliseconds",
-        )),
+    if ttl.as_i64() == Some(-1) {
+        return Ok(None);
     }
+    ttl.as_u64()
+        .map(Duration::from_millis)
+        .map(Some)
+        .ok_or_else(|| invalid_config("ttl must be -1 or non-negative integer milliseconds"))
 }
 
-fn fingerprint(
-    namespace: &str,
-    value: &impl serde::Serialize,
-) -> Result<String, crate::middleware::Error> {
+fn fingerprint(value: &impl serde::Serialize) -> Result<String, crate::middleware::Error> {
     let bytes = serde_json::to_vec(value)
         .map_err(|error| invalid_config(&format!("fingerprint cannot be serialized: {error}")))?;
     let mut hasher = Sha256::new();
-    hasher.update(namespace.as_bytes());
-    hasher.update([0]);
     hasher.update(bytes);
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -342,6 +350,8 @@ fn invalid_config(message: &str) -> crate::middleware::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::*;
 
     fn spec() -> Spec {
@@ -368,6 +378,10 @@ mod tests {
             parse_ttl(&serde_json::json!({"ttl": 2500})).unwrap(),
             Some(Duration::from_millis(2500))
         );
+        assert_eq!(
+            parse_ttl(&serde_json::json!({"ttl": u64::MAX})).unwrap(),
+            Some(Duration::from_millis(u64::MAX))
+        );
     }
 
     #[test]
@@ -376,6 +390,21 @@ mod tests {
             let error = parse_ttl(&serde_json::json!({"ttl": ttl})).unwrap_err();
             assert!(error.to_string().contains("ttl must be -1"));
         }
+    }
+
+    #[test]
+    fn rejects_empty_vals_path() {
+        let spec = Spec::new("dedup").args(serde_json::json!({
+            "rules": {
+                "value": {
+                    "key": ["$vals."]
+                }
+            }
+        }));
+
+        let error = check(&spec).unwrap_err();
+
+        assert!(error.to_string().contains("unsupported fingerprint path"));
     }
 
     #[tokio::test]
@@ -392,6 +421,122 @@ mod tests {
             dedup.before_scheduler(second, &spec()).await.unwrap(),
             Next::Skip
         ));
+    }
+
+    #[tokio::test]
+    async fn keeps_duplicate_query_values_in_input_order() {
+        let dedup = Dedup::default();
+        let first = Request::follow("https://example.com/a?step=2&step=1").unwrap();
+        let second = Request::follow("https://example.com/a?step=1&step=2").unwrap();
+
+        assert!(matches!(
+            dedup.before_scheduler(first, &spec()).await.unwrap(),
+            Next::Continue(_)
+        ));
+        assert!(matches!(
+            dedup.before_scheduler(second, &spec()).await.unwrap(),
+            Next::Continue(_)
+        ));
+    }
+
+    #[test]
+    fn normalizes_query_by_key_without_reordering_duplicate_values() {
+        let normalized = normalize_url(
+            "https://example.com/a?step=2&b=2&a=1&step=1",
+            Some(&serde_json::json!({"enabled": true})),
+        )
+        .unwrap();
+
+        assert_eq!(normalized, "https://example.com/a?a=1&b=2&step=2&step=1");
+    }
+
+    #[tokio::test]
+    async fn separates_dedup_instances_and_task_ids_without_delimiter_collisions() {
+        let dedup = Dedup::default();
+
+        let explicit_default = spec().key("default");
+        let request = Request::follow("https://example.com/a").unwrap();
+        assert!(matches!(
+            dedup
+                .before_scheduler(request.clone(), &spec())
+                .await
+                .unwrap(),
+            Next::Continue(_)
+        ));
+        assert!(matches!(
+            dedup
+                .before_scheduler(request, &explicit_default)
+                .await
+                .unwrap(),
+            Next::Continue(_)
+        ));
+
+        let first = spec().key("b:c");
+        let second = spec().key("c");
+        let mut first_request = Request::follow("https://example.com/b").unwrap();
+        first_request.task_id = "a".to_string();
+        let mut second_request = Request::follow("https://example.com/b").unwrap();
+        second_request.task_id = "a:b".to_string();
+        assert!(matches!(
+            dedup.before_scheduler(first_request, &first).await.unwrap(),
+            Next::Continue(_)
+        ));
+        assert!(matches!(
+            dedup
+                .before_scheduler(second_request, &second)
+                .await
+                .unwrap(),
+            Next::Continue(_)
+        ));
+    }
+
+    #[test]
+    fn ttl_failure_does_not_partially_write_fingerprints() {
+        let dedup = Dedup::default();
+        if Instant::now().checked_add(Duration::MAX).is_some() {
+            return;
+        }
+
+        let error = dedup
+            .contains_or_insert(vec![
+                ("first".to_string(), None),
+                ("second".to_string(), Some(Duration::MAX)),
+            ])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("runtime clock range"));
+        assert!(dedup.store().fingerprints.is_empty());
+        assert!(dedup.store().expirations.is_empty());
+    }
+
+    #[test]
+    fn concurrent_identical_fingerprints_only_one_inserts() {
+        let dedup = Arc::new(Dedup::default());
+        let barrier = Arc::new(Barrier::new(16));
+        let mut tasks = Vec::new();
+
+        for _ in 0..16 {
+            let dedup = dedup.clone();
+            let barrier = barrier.clone();
+            tasks.push(std::thread::spawn(move || {
+                barrier.wait();
+                dedup
+                    .contains_or_insert(vec![("same".to_string(), Some(Duration::from_secs(60)))])
+                    .unwrap()
+            }));
+        }
+
+        let mut existing = 0;
+        let mut inserted = 0;
+        for task in tasks {
+            if task.join().unwrap() {
+                existing += 1;
+            } else {
+                inserted += 1;
+            }
+        }
+        assert_eq!(inserted, 1);
+        assert_eq!(existing, 15);
     }
 
     #[tokio::test]

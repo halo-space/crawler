@@ -5,29 +5,33 @@ use crate::{net, payload, scheduler};
 
 const RETRY_DELAY: Duration = Duration::from_millis(25);
 
-pub(super) async fn maintain<S, F, T>(
+/// Runs one Request execution while its acknowledged lease remains valid.
+///
+/// Ownership loss, lease expiry, or a terminal refresh error stops the
+/// execution and returns a Scheduler error.
+pub(super) async fn run<S, T>(
     scheduler: &S,
     request: &net::Request,
-    future: F,
+    execution: impl Future<Output = Result<T, crate::Error>>,
 ) -> Result<T, crate::Error>
 where
     S: scheduler::Scheduler,
-    F: Future<Output = Result<T, crate::Error>>,
 {
     let Some(policy) = scheduler.lease() else {
-        return future.await;
+        return execution.await;
     };
 
     let refresh = refresh(scheduler, request, policy);
-    tokio::pin!(future);
+    tokio::pin!(execution);
     tokio::pin!(refresh);
     tokio::select! {
         biased;
-        result = &mut future => result,
+        result = &mut execution => result,
         error = &mut refresh => Err(crate::Error::Scheduler(error)),
     }
 }
 
+/// Refreshes until the current execution no longer owns a valid lease.
 async fn refresh<S>(
     scheduler: &S,
     request: &net::Request,

@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use crate::{config, net, spider};
 
+mod bind;
 mod build;
+mod condition;
 mod field;
 mod value;
 
@@ -24,7 +26,7 @@ where
         })?;
 
     let fields = field::parse(&node.parse, response).await?;
-    let bind = value::bind(node, request, response, &fields)?;
+    let bind = bind::evaluate(node, request, response, &fields)?;
     let context = value::Context {
         request,
         response,
@@ -40,7 +42,7 @@ where
         .iter()
         .filter(|edge| edge.from == node_key)
     {
-        if !value::matches(edge.when.as_deref(), &context)? {
+        if !condition::matches(edge.when.as_deref(), &context)? {
             continue;
         }
         match edge.kind {
@@ -431,7 +433,7 @@ graph:
         }))
         .unwrap();
 
-        let rendered = value::render("{slug}-v{edition}", &vars, &context).unwrap();
+        let rendered = bind::render("{slug}-v{edition}", &vars, &context).unwrap();
 
         assert_eq!(rendered, Value::String("rust-book-v2".to_string()));
     }

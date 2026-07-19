@@ -26,11 +26,8 @@ pub fn check(spec: &Spec) -> Result<(), Error> {
     {
         return Err(invalid(spec, &format!("unsupported hook: {hook}")));
     }
-    if !spec.args.is_null() && !spec.args.is_object() {
+    if !spec.skip && !spec.args.is_null() && !spec.args.is_object() {
         return Err(invalid(spec, "args must be an object"));
-    }
-    if spec.skip {
-        return Ok(());
     }
 
     match spec.name.as_str() {
@@ -78,7 +75,18 @@ mod tests {
     fn skip_spec_does_not_require_middleware_args() {
         let mut spec = Spec::new("rate_limit");
         spec.skip = true;
+        spec.args = serde_json::json!("ignored");
 
         check(&spec).unwrap();
+    }
+
+    #[test]
+    fn skip_spec_still_requires_a_supported_builtin_hook() {
+        let mut spec = Spec::new("validate").hook("error_parse");
+        spec.skip = true;
+
+        let error = check(&spec).unwrap_err();
+
+        assert!(error.to_string().contains("hook must be"));
     }
 }

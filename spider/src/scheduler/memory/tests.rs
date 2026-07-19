@@ -450,6 +450,103 @@ async fn repeated_success_is_idempotent() {
 }
 
 #[tokio::test]
+async fn success_rejects_negative_stats_without_settling() {
+    let scheduler = Memory::new("worker-1");
+    let request = net::Request::follow("https://example.com").unwrap();
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut ack = payload::Payload::for_request(&claimed, "worker-1");
+    ack.state = net::State::Processing;
+    scheduler.ack(&ack).await.unwrap();
+    let mut success = payload::Payload::for_request(&claimed, "worker-1");
+    success.start_time = Some(1);
+    success.end_time = Some(2);
+    success.stats.insert(
+        "index".to_string(),
+        serde_json::to_value(stats::Counter {
+            total: -1,
+            ..stats::Counter::default()
+        })
+        .unwrap(),
+    );
+
+    let error = scheduler.success(&success).await.unwrap_err();
+
+    assert!(error.to_string().contains("must be non-negative"));
+    assert_eq!(scheduler.processing_len(), 1);
+    assert_eq!(scheduler.done_len(), 0);
+    assert_eq!(scheduler.failed_len(), 0);
+    assert!(scheduler.trace_stats("").is_empty());
+    let state = scheduler.state();
+    assert!(
+        state
+            .acknowledged
+            .contains(&(claimed.id.clone(), claimed.version))
+    );
+    assert!(state.completed.is_empty());
+}
+
+#[tokio::test]
+async fn failure_rejects_stats_overflow_without_partial_settlement() {
+    let scheduler = Memory::new("worker-1");
+    let mut request = net::Request::follow("https://example.com").unwrap();
+    request.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut ack = payload::Payload::for_request(&claimed, "worker-1");
+    ack.state = net::State::Processing;
+    scheduler.ack(&ack).await.unwrap();
+    scheduler.state().trace_stats.insert(
+        String::new(),
+        HashMap::from([(
+            "overflow".to_string(),
+            stats::Counter {
+                total: i64::MAX,
+                ..stats::Counter::default()
+            },
+        )]),
+    );
+    let mut failure = payload::Payload::for_request(&claimed, "worker-1").failed("boom");
+    failure.start_time = Some(1);
+    failure.end_time = Some(2);
+    for name in ["new", "overflow"] {
+        failure.stats.insert(
+            name.to_string(),
+            serde_json::to_value(stats::Counter {
+                total: 1,
+                ..stats::Counter::default()
+            })
+            .unwrap(),
+        );
+    }
+
+    let error = scheduler.failure(&failure).await.unwrap_err();
+
+    assert!(error.to_string().contains("stats counter overflow"));
+    assert_eq!(scheduler.processing_len(), 1);
+    assert_eq!(scheduler.queued_len(), 0);
+    assert_eq!(scheduler.done_len(), 0);
+    assert_eq!(scheduler.failed_len(), 0);
+    let stats = scheduler.trace_stats("");
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats["overflow"].total, i64::MAX);
+    let state = scheduler.state();
+    assert!(
+        state
+            .acknowledged
+            .contains(&(claimed.id.clone(), claimed.version))
+    );
+    assert!(state.completed.is_empty());
+    assert_eq!(state.processing[&claimed.id].retry_count, 0);
+}
+
+#[tokio::test]
 async fn repeated_retryable_failure_does_not_duplicate_the_queue() {
     let scheduler = Memory::new("worker-1");
     let mut request = net::Request::follow("https://example.com").unwrap();
@@ -714,6 +811,31 @@ async fn claim_restores_rules_requests_and_shares_trace_config() {
     let first = claimed[0].snapshot().unwrap();
     let second = claimed[1].snapshot().unwrap();
     assert!(Arc::ptr_eq(first, second));
+}
+
+#[tokio::test]
+async fn trace_round_trip_preserves_spider_metadata() {
+    let scheduler = Memory::new("worker-1");
+    let mut config = rules_config("books", "detail");
+    config.spider.version = Some("2026.07".to_string());
+    config.spider.timezone = Some("Asia/Shanghai".to_string());
+
+    let requests = config
+        .initial_requests("task-1", "trace-1", HashMap::new())
+        .unwrap();
+    let snapshot = trace::Snapshot::rules("task-1", config);
+    let snapshot =
+        serde_json::from_value::<trace::Snapshot>(serde_json::to_value(snapshot).unwrap()).unwrap();
+
+    scheduler
+        .init("trace-1".to_string(), snapshot, requests)
+        .await
+        .unwrap();
+
+    let stored = scheduler.trace("trace-1").await.unwrap().unwrap();
+    let dsl = stored.dsl.unwrap();
+    assert_eq!(dsl.spider.version.as_deref(), Some("2026.07"));
+    assert_eq!(dsl.spider.timezone.as_deref(), Some("Asia/Shanghai"));
 }
 
 #[tokio::test]

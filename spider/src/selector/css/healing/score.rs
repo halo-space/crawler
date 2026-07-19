@@ -1,5 +1,8 @@
-use scrape_core::{Soup, Tag, query::matches_selector_with_caches};
-use selectors::{context::SelectorCaches, parser::RelativeSelectorMatchHint};
+use scrape_core::{
+    Soup, Tag,
+    query::{ScrapeSelector, matches_selector_with_caches},
+};
+use selectors::{context::SelectorCaches, parser::SelectorList};
 
 use super::reference::{Branch, Compound, Constraint, Reference, Relation};
 use crate::selector;
@@ -35,12 +38,11 @@ pub(super) fn select<'a>(
     let candidates = soup
         .select("*")
         .map_err(|error| selector::Error::Css(error.to_string()))?;
-    let mut caches = SelectorCaches::default();
     let mut scored = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let mut candidate_score = 0.0_f64;
         for branch in &reference.branches {
-            candidate_score = candidate_score.max(evaluate_branch(candidate, branch, &mut caches));
+            candidate_score = candidate_score.max(evaluate_branch(candidate, branch));
         }
         scored.push((candidate, candidate_score));
     }
@@ -58,12 +60,12 @@ pub(super) fn select<'a>(
         .collect())
 }
 
-fn evaluate_branch(candidate: Tag<'_>, branch: &Branch, caches: &mut SelectorCaches) -> f64 {
-    chain(candidate, branch, 0, caches).score()
+fn evaluate_branch(candidate: Tag<'_>, branch: &Branch) -> f64 {
+    chain(candidate, branch, 0).score()
 }
 
-fn chain(candidate: Tag<'_>, branch: &Branch, index: usize, caches: &mut SelectorCaches) -> Points {
-    let mut points = compound(candidate, &branch.compounds[index], caches);
+fn chain(candidate: Tag<'_>, branch: &Branch, index: usize) -> Points {
+    let mut points = compound(candidate, &branch.compounds[index]);
     let Some(relation) = branch.relations.get(index) else {
         return points;
     };
@@ -76,7 +78,7 @@ fn chain(candidate: Tag<'_>, branch: &Branch, index: usize, caches: &mut Selecto
     points.earned += 1.0;
     let mut best = None;
     for node in related {
-        let scored = chain(node, branch, index + 1, caches);
+        let scored = chain(node, branch, index + 1);
         if best.is_none_or(|best: Points| scored.score() > best.score()) {
             best = Some(scored);
         }
@@ -96,20 +98,16 @@ fn remaining_total(branch: &Branch, index: usize) -> f64 {
             .map_or(0.0, |relations| relations.len() as f64)
 }
 
-fn compound(candidate: Tag<'_>, compound: &Compound, caches: &mut SelectorCaches) -> Points {
+fn compound(candidate: Tag<'_>, compound: &Compound) -> Points {
     let mut points = Points::default();
     for constraint in &compound.constraints {
         points.total += 1.0;
-        points.earned += evaluate_constraint(candidate, constraint, caches);
+        points.earned += evaluate_constraint(candidate, constraint);
     }
     points
 }
 
-fn evaluate_constraint(
-    candidate: Tag<'_>,
-    constraint: &Constraint,
-    caches: &mut SelectorCaches,
-) -> f64 {
+fn evaluate_constraint(candidate: Tag<'_>, constraint: &Constraint) -> f64 {
     match constraint {
         Constraint::Tag(expected) => {
             if candidate.name() == Some(expected.as_str()) {
@@ -131,12 +129,7 @@ fn evaluate_constraint(
             let Some(value) = candidate.get(name) else {
                 return 0.0;
             };
-            if matches_selector_with_caches(
-                candidate.document(),
-                candidate.node_id(),
-                exact.selector_list(),
-                caches,
-            ) {
+            if matches(candidate, exact.selector_list()) {
                 return 1.0;
             }
             match operation {
@@ -144,41 +137,15 @@ fn evaluate_constraint(
                 Some((_, expected)) => similarity(expected, value),
             }
         }
-        Constraint::Any(branches) => {
-            let mut score = 0.0_f64;
-            for branch in branches {
-                score = score.max(evaluate_branch(candidate, branch, caches));
-            }
-            score
-        }
         Constraint::Not(selectors) => {
-            if matches_selector_with_caches(
-                candidate.document(),
-                candidate.node_id(),
-                selectors,
-                caches,
-            ) {
+            if matches(candidate, selectors) {
                 0.0
             } else {
                 1.0
             }
         }
-        Constraint::Has(branches) => {
-            let mut score = 0.0_f64;
-            for (hint, branch) in branches {
-                for node in related_for_has(candidate, *hint) {
-                    score = score.max(evaluate_branch(node, branch, caches));
-                }
-            }
-            score
-        }
         Constraint::Exact(selector) => {
-            if matches_selector_with_caches(
-                candidate.document(),
-                candidate.node_id(),
-                selector.selector_list(),
-                caches,
-            ) {
+            if matches(candidate, selector.selector_list()) {
                 1.0
             } else {
                 0.0
@@ -187,30 +154,16 @@ fn evaluate_constraint(
     }
 }
 
-fn related_for_has<'a>(candidate: Tag<'a>, hint: RelativeSelectorMatchHint) -> Vec<Tag<'a>> {
-    match hint {
-        RelativeSelectorMatchHint::InChild => candidate.children().collect(),
-        RelativeSelectorMatchHint::InSubtree => candidate.descendants().collect(),
-        RelativeSelectorMatchHint::InNextSibling => candidate.next_sibling().into_iter().collect(),
-        RelativeSelectorMatchHint::InNextSiblingSubtree => candidate
-            .next_sibling()
-            .into_iter()
-            .flat_map(|sibling| {
-                let mut nodes = vec![sibling];
-                nodes.extend(sibling.descendants());
-                nodes
-            })
-            .collect(),
-        RelativeSelectorMatchHint::InSibling => candidate.next_siblings().collect(),
-        RelativeSelectorMatchHint::InSiblingSubtree => candidate
-            .next_siblings()
-            .flat_map(|sibling| {
-                let mut nodes = vec![sibling];
-                nodes.extend(sibling.descendants());
-                nodes
-            })
-            .collect(),
-    }
+fn matches(candidate: Tag<'_>, selector: &SelectorList<ScrapeSelector>) -> bool {
+    // selectors caches are tied to one SelectorList and cannot be shared across
+    // the independently compiled constraints in a healing reference.
+    let mut caches = SelectorCaches::default();
+    matches_selector_with_caches(
+        candidate.document(),
+        candidate.node_id(),
+        selector,
+        &mut caches,
+    )
 }
 
 fn related<'a>(candidate: Tag<'a>, relation: Relation) -> Vec<Tag<'a>> {
@@ -242,11 +195,10 @@ mod tests {
         let selector = scrape_core::CompiledSelector::compile(expr).unwrap();
         let reference = Reference::new(&selector).unwrap();
         let candidate = soup.select(target).unwrap()[0];
-        let mut caches = SelectorCaches::default();
         reference
             .branches
             .iter()
-            .map(|branch| evaluate_branch(candidate, branch, &mut caches))
+            .map(|branch| evaluate_branch(candidate, branch))
             .fold(0.0_f64, f64::max)
     }
 

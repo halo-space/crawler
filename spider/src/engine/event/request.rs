@@ -46,3 +46,44 @@ where
         .await
         .map_err(crate::Error::Scheduler)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retains_fingerprint_after_scheduler_push_failure() {
+        let scheduler = Arc::new(crate::scheduler::Memory::new("worker-1"));
+        let registry = Arc::new(crate::middleware::Registry::new());
+        let mut request = crate::net::Request::follow("https://example.com/article").unwrap();
+        request.middlewares.push(
+            crate::middleware::Spec::new("dedup").args(serde_json::json!({
+                "rules": {
+                    "url": {
+                        "key": ["$request.url"],
+                        "ttl": -1
+                    }
+                }
+            })),
+        );
+        request.version = 1;
+
+        let error = handle(
+            vec![request.clone()],
+            None,
+            scheduler.clone(),
+            registry.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, crate::Error::Scheduler(_)));
+        assert_eq!(scheduler.queued_len(), 0);
+
+        request.version = 0;
+        handle(vec![request], None, scheduler.clone(), registry)
+            .await
+            .unwrap();
+
+        assert_eq!(scheduler.queued_len(), 0);
+    }
+}

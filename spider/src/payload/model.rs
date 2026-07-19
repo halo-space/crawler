@@ -190,8 +190,14 @@ impl Payload {
     fn validate_completion(&self) -> Result<(), &'static str> {
         self.validate_ownership()?;
         self.validate_empty_collections()?;
-        if self.start_time.is_none() || self.end_time.is_none() {
+        let (Some(start_time), Some(end_time)) = (self.start_time, self.end_time) else {
             return Err("completion payload requires start and end time");
+        };
+        if start_time < 0 || end_time < 0 {
+            return Err("completion times must be non-negative");
+        }
+        if end_time < start_time {
+            return Err("completion end time must not precede start time");
         }
         Ok(())
     }
@@ -210,18 +216,39 @@ mod tests {
 
     #[test]
     fn completion_validation_rejects_contradictory_state_and_error() {
-        let mut done = Payload::new();
+        let mut request = net::Request::follow("https://example.com").unwrap();
+        request.version = 1;
+
+        let mut done = Payload::for_request(&request, "worker-1");
+        done.start_time = Some(1);
+        done.end_time = Some(2);
         done.error = Some("unexpected".to_string());
         assert_eq!(
             done.validate_success(),
-            Err("payload requires request id, worker id, and node")
+            Err("success payload requires done state without error")
         );
 
-        let mut failed = Payload::new();
+        done.error = None;
+        done.state = State::Failed;
+        assert_eq!(
+            done.validate_success(),
+            Err("success payload requires done state without error")
+        );
+
+        let mut failed = Payload::for_request(&request, "worker-1");
         failed.state = State::Failed;
+        failed.start_time = Some(1);
+        failed.end_time = Some(2);
         assert_eq!(
             failed.validate_failure(),
-            Err("payload requires request id, worker id, and node")
+            Err("failure payload requires failed state and error")
+        );
+
+        failed.state = State::Done;
+        failed.error = Some("unexpected".to_string());
+        assert_eq!(
+            failed.validate_failure(),
+            Err("failure payload requires failed state and error")
         );
     }
 
@@ -230,14 +257,48 @@ mod tests {
         let mut request = net::Request::follow("https://example.com").unwrap();
         request.version = 1;
         let mut success = Payload::for_request(&request, "worker-1");
-        success.start_time = Some(1);
-        success.end_time = Some(2);
+        success.start_time = Some(0);
+        success.end_time = Some(0);
         assert!(success.validate_success().is_ok());
 
         let mut failure = Payload::for_request(&request, "worker-1").failed("boom");
         failure.start_time = Some(1);
         failure.end_time = Some(2);
         assert!(failure.validate_failure().is_ok());
+    }
+
+    #[test]
+    fn success_validation_rejects_invalid_completion_times() {
+        let mut request = net::Request::follow("https://example.com").unwrap();
+        request.version = 1;
+        let mut payload = Payload::for_request(&request, "worker-1");
+
+        for (start_time, end_time, expected) in [
+            (-1, 1, "completion times must be non-negative"),
+            (1, -1, "completion times must be non-negative"),
+            (2, 1, "completion end time must not precede start time"),
+        ] {
+            payload.start_time = Some(start_time);
+            payload.end_time = Some(end_time);
+            assert_eq!(payload.validate_success(), Err(expected));
+        }
+    }
+
+    #[test]
+    fn failure_validation_rejects_invalid_completion_times() {
+        let mut request = net::Request::follow("https://example.com").unwrap();
+        request.version = 1;
+        let mut payload = Payload::for_request(&request, "worker-1").failed("boom");
+
+        for (start_time, end_time, expected) in [
+            (-1, 1, "completion times must be non-negative"),
+            (1, -1, "completion times must be non-negative"),
+            (2, 1, "completion end time must not precede start time"),
+        ] {
+            payload.start_time = Some(start_time);
+            payload.end_time = Some(end_time);
+            assert_eq!(payload.validate_failure(), Err(expected));
+        }
     }
 
     #[test]

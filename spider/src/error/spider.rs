@@ -2,8 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("spider event channel closed")]
-    ChannelClosed,
+    #[error("engine stopped before accepting spider output")]
+    EngineStopped,
 
     #[error("spider error: {0}")]
     Message(String),

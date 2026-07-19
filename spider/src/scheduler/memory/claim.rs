@@ -119,18 +119,18 @@ pub(super) fn restore(
     worker_id: &str,
 ) -> Option<net::Request> {
     if let Err(error) = snapshot.validate() {
-        restore_failure(state, snapshot, worker_id, error);
+        retry_snapshot(state, snapshot, worker_id, error);
         return None;
     }
     let trace = if snapshot.trace_id.is_empty() {
         None
     } else {
         let Some(trace) = state.trace_snapshots.get(&snapshot.trace_id) else {
-            restore_failure(state, snapshot, worker_id, "Trace Snapshot not found");
+            retry_snapshot(state, snapshot, worker_id, "Trace Snapshot not found");
             return None;
         };
         if trace.task_id != snapshot.task_id {
-            restore_failure(
+            retry_snapshot(
                 state,
                 snapshot,
                 worker_id,
@@ -144,27 +144,19 @@ pub(super) fn restore(
     match snapshot.clone().restore(trace) {
         Ok(request) => Some(request),
         Err(error) => {
-            restore_failure(state, snapshot, worker_id, error);
+            retry_snapshot(state, snapshot, worker_id, error);
             None
         }
     }
-}
-
-fn restore_failure(
-    state: &mut State,
-    snapshot: net::request::Snapshot,
-    worker_id: &str,
-    error: impl Into<String>,
-) {
-    retry_snapshot(state, snapshot, worker_id, error.into());
 }
 
 fn retry_snapshot(
     state: &mut State,
     mut snapshot: net::request::Snapshot,
     worker_id: &str,
-    error: String,
+    error: impl Into<String>,
 ) {
+    let error = error.into();
     if !snapshot
         .failed_workers
         .iter()

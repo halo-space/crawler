@@ -105,6 +105,21 @@ fn check_node(name: &str, node: &graph::node::Config) -> Result<(), Error> {
                         "node {name} bind {bind_name} template is empty"
                     )));
                 }
+                let template_value = serde_json::Value::String(template.clone());
+                let references = crate::net::request::template_references(&template_value)
+                    .map_err(|error| {
+                        Error::Message(format!(
+                            "node {name} bind {bind_name} has an invalid template: {error}"
+                        ))
+                    })?;
+                if let Some(reference) = references
+                    .into_iter()
+                    .find(|reference| !vars.contains_key(*reference))
+                {
+                    return Err(Error::Message(format!(
+                        "node {name} bind {bind_name} template variable is undefined: {reference}"
+                    )));
+                }
                 for value in vars.values() {
                     let from = value.from.as_deref().ok_or_else(|| {
                         Error::Message(format!(
@@ -143,11 +158,16 @@ fn check_transform(
                 if base_url.starts_with('$') {
                     check_reference(node, base_url, parse, available_bind)?;
                 } else {
-                    url::Url::parse(base_url).map_err(|error| {
+                    let base = url::Url::parse(base_url).map_err(|error| {
                         Error::Message(format!(
                             "node {node} bind {bind_name} url_join.base_url is invalid: {error}"
                         ))
                     })?;
+                    if base.cannot_be_a_base() {
+                        return Err(Error::Message(format!(
+                            "node {node} bind {bind_name} url_join.base_url cannot be used as a base URL"
+                        )));
+                    }
                 }
             }
         }

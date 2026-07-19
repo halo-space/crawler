@@ -93,10 +93,13 @@ and refresh interval; Memory defaults to a 30-second timeout and a 10-second int
 lease failures preserve ordered, duplicate-free failed Worker history; unacknowledged claim expiry
 does not consume an attempt. Memory reads Trace Snapshots only from its immutable in-process map.
 Engine tracks cloned Tx producers directly, so delayed output is drained without a fixed idle timeout.
+Its internal coordinator is one Kameo Actor; Request and output I/O remains in independent Tokio tasks.
 An awaited Tx call can use the current Request context. A Tx clone moved into a detached task retains
 only `task_id / trace_id`; it never retains Request ownership, lease identity, node, version, or stats.
 Request concurrency, the per-call claim limit, and Event capacity are independent startup-frozen
 settings exposed by `with_concurrency`, `with_limit`, and `with_event_limit`.
+Event capacity is released when the Actor starts handling an Event, while the Tx call continues waiting
+for the corresponding Scheduler and Middleware work to finish.
 
 Dedup is Request-only and uses explicitly configured keys. The default exact store uses a `HashMap`
 plus an expiry heap; omitted TTL or `-1` lasts for the process lifetime, while `0` retains nothing.

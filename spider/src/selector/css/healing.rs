@@ -179,4 +179,30 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].text(), "Visible");
     }
+
+    #[test]
+    fn exact_structural_pseudos_discriminate_similar_candidates() {
+        let soup = scrape_core::Soup::parse(
+            "<ul><li class='items'>First</li><li class='items'>Second</li></ul>\
+             <div class='cards'></div><div class='cards'>Filled</div>",
+        );
+
+        let nth = select(&soup, "li.item:nth-child(2)", &Config::new(0.8).unwrap()).unwrap();
+        let empty = select(&soup, "div.card:empty", &Config::new(0.8).unwrap()).unwrap();
+
+        assert_eq!(nth.len(), 1);
+        assert_eq!(nth[0].text(), "Second");
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].text(), "");
+    }
+
+    #[test]
+    fn root_is_an_exact_structural_constraint() {
+        let soup = scrape_core::Soup::parse("<html class='pages'><body></body></html>");
+
+        let nodes = select(&soup, "html.page:root", &Config::new(0.8).unwrap()).unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name(), Some("html"));
+    }
 }
