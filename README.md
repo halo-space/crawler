@@ -63,7 +63,8 @@ variable reference; the Worker resolves the actual API key when the selector run
 
 Rules loads task seeds, a request graph, extraction, bindings, and Item Schema from YAML, while the
 runtime still loads a Rust Spider. Multiple Rules configurations can share the same Spider business
-code and concrete Item type; a Rules task name does not have to equal `Spider::name()`.
+code and concrete Item type; a Rules `spider.name` becomes the local `task_id` and does not have to
+equal the deployed Rust `Spider::name()`.
 
 ```rust
 let rules = config::Config::load("examples/rules-newspaper.yaml").await?;
@@ -77,6 +78,9 @@ let mut engine = engine::Engine::new()
 transport, priority, and vals before entering Tx or Scheduler. URL-array expansion writes a reserved
 one-based `vals.idx` before transport templates render. Rules constructs the Spider's Rust Item via
 `Item::from_values`, assigns its SchemaKey, and calls the default `item` function or the edge's `fn`.
+For every Rules Request, the shared Executor first calls the Rust Spider's `index(response.clone())`
+business entry and then interprets the DSL node selected by `Request.node`; this is one Executor path,
+not a Code/Rules Executor swap.
 Every concrete Item owns one non-serialized `item::State` and implements the mandatory
 `from_values / state / state_mut` contract. Additional Item functions referenced by edge `fn` are
 marked with `#[item]`; local Rules assembly panics before runtime initialization when a referenced
@@ -101,8 +105,18 @@ settings exposed by `with_concurrency`, `with_limit`, and `with_event_limit`.
 Event capacity is released when the Actor starts handling an Event, while the Tx call continues waiting
 for the corresponding Scheduler and Middleware work to finish.
 
-Dedup is Request-only and uses explicitly configured keys. The default exact store uses a `HashMap`
-plus an expiry heap; omitted TTL or `-1` lasts for the process lifetime, while `0` retains nothing.
+Dedup is Request-only and uses explicitly configured keys. It records fingerprints when
+`before_scheduler` observes a Request; a later `Scheduler::push` failure does not roll them back.
+The SHA-256 input is a structured tuple of `task_id`, middleware key, rule name, and ordered values,
+so namespace parts cannot collide. URL normalization stably sorts query pairs by key while preserving
+the original order of repeated keys. All active rules are checked and inserted atomically; omitted TTL
+or `-1` lasts for the process lifetime, while a rule with TTL `0` neither checks nor stores a
+fingerprint.
+
+The HTTP downloader applies proxy and TLS settings per Request. It reuses clients only for the same
+proxy URL and `accept_invalid_certs` setting, lazily removes clients after 90 idle seconds, and clears
+the pool on `Http::close()`. Direct requests, different proxy credentials, and different TLS behavior
+therefore never share a client entry.
 Same-origin redirects carry intermediate response cookies into the next hop. Cross-origin follow and
 redirect handling never inherit Request headers or cookies.
 

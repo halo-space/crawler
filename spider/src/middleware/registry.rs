@@ -8,7 +8,6 @@ use crate::net::{Request, Response};
 pub struct Registry {
     middlewares: RwLock<HashMap<String, Arc<dyn Middleware>>>,
     defaults: Vec<Spec>,
-    schemas: Arc<crate::item::schema::Store>,
 }
 
 #[derive(Debug)]
@@ -34,10 +33,6 @@ impl Registry {
         M: Middleware + 'static,
     {
         self.write().insert(name.into(), Arc::new(middleware));
-    }
-
-    pub(crate) fn schemas(&self) -> Arc<crate::item::schema::Store> {
-        self.schemas.clone()
     }
 
     pub(crate) async fn before_scheduler(
@@ -265,6 +260,12 @@ impl Registry {
 
 impl Default for Registry {
     fn default() -> Self {
+        Self::with_schemas(Arc::new(crate::item::schema::Store::new()))
+    }
+}
+
+impl Registry {
+    pub(crate) fn with_schemas(schemas: Arc<crate::item::schema::Store>) -> Self {
         let registry = Self {
             middlewares: RwLock::new(HashMap::new()),
             defaults: [
@@ -277,11 +278,10 @@ impl Default for Registry {
             .into_iter()
             .map(|hook| Spec::new("validate").hook(hook))
             .collect(),
-            schemas: Arc::new(crate::item::schema::Store::new()),
         };
         registry.register(
             "validate",
-            crate::middleware::validate::Validate::new(registry.schemas()),
+            crate::middleware::validate::Validate::new(schemas),
         );
         registry.register("dedup", crate::middleware::dedup::Dedup::default());
         registry.register(

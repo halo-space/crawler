@@ -39,7 +39,7 @@ XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护�
 
 ## 2. 核心设计原则
 
-1. **统一运行时**：代码模式和 Rules 模式只替换 Executor 与初始化逻辑，下载、调度、Middleware、事件和结算主链保持一致。
+1. **统一运行时**：代码模式和 Rules 模式使用同一个 Executor；Trace Snapshot 决定进入代码 handler 还是 Rules 解释路径，只有运行种子的初始化方式不同。
 2. **Scheduler 是分布式边界**：从 Memory 切换到其他实现时，装配层只替换 `.with_scheduler(...)`；新实现必须承担完整调度语义，不能只是把一个存储客户端包起来。
 3. **输出即时提交**：解析产生的 Request 和 Item 通过 `Tx` 立即进入 Engine，不等待整条 Trace 或整棵请求图结束。
 4. **身份与执行权分离**：Request ID 在重试和恢复中不变；`version`、`leased_by` 和 `lease_time` 描述某一次执行权。
@@ -62,7 +62,7 @@ flowchart LR
     MW["Middleware Registry"]
     D["Downloader"]
     H["HTTP"]
-    E["Code / Rules Executor"]
+    E["统一 Executor"]
     O["Request / Item 输出任务"]
     P["JSONL Item 输出"]
     F["Item 失败快照"]
@@ -93,18 +93,26 @@ Engine 内部使用一个私有 Kameo Actor 作为消息驱动的单一协调者
 
 ```mermaid
 flowchart LR
-    S["Spider.name<br/>部署中的 Spider 唯一名称"] --> T["Task.id<br/>任务定义"]
+    S["Rust Spider::name()<br/>部署的业务实现"]
+    C["代码模式本地运行<br/>task_id = Spider::name()"]
+    Y["Rules 本地运行<br/>task_id = config.spider.name"]
+    T["Task.id / task_id<br/>任务定义"]
+    S --> C
+    S -. 共享业务代码 .-> Y
+    C --> T
+    Y --> T
     T --> R["Trace.id<br/>一次调度运行"]
     R --> Q1["Request.id"]
     R --> Q2["Request.id"]
     R --> Q3["Request.id"]
 ```
 
-- `Spider.name` 是代码模式和 Rules 模式唯一的 Spider 标识，不再增加重复的 `spider.id`。
+- Rust `Spider::name()` 标识部署的业务实现，不再增加重复的 `spider.id`。
+- Rules 的 `config.spider.name` 标识这份 Rules 任务并作为本地 `task_id`，不要求等于 Rust `Spider::name()`。
 - `Task.id` 标识任务定义。持久化控制面可以用同一个 Spider 创建多个参数或周期不同的 Task。
 - `Trace.id` 标识 Task 的一次运行。周期任务每次派发都应创建新的 Trace。
 - `Request.id` 标识一条逻辑 Request；租约恢复和队列重试保持该 ID 不变。
-- 本地 Memory 没有持久化 Task 表，因此使用 `Spider.name` 作为本地 `task_id`。
+- 本地 Memory 没有持久化 Task 表：代码模式使用 Rust `Spider::name()` 作为 `task_id`，Rules 模式使用 `config.spider.name`。
 - Item ID 不在这条层级中。`Tx.item` 会为缺少 ID 的 Item 生成 UUID v7；它只是数据实例 ID，不负责业务去重。
 
 ### 4.2 运行种子
@@ -313,6 +321,13 @@ sequenceDiagram
 - HTTP Downloader 在发送每个 redirect target 前检查 `allowed_domains`；越界目标按正常过滤处理，不进入下载重试或 `error_download`，允许的跨源 redirect 也不继承 headers/cookies。
 - 同源 redirect 会把中间响应的 `Set-Cookie` 应用到下一跳；一旦跨源，之前累积的凭证会在发送前清空。
 
+Proxy 和 TLS 都是 Request 级下载配置。`Http` 使用完整 proxy URL（包括凭据）与
+`tls.accept_invalid_certs` 组成 Client 池键，直连请求使用独立的无代理键。相同键可以并发复用；
+最后一个使用句柄释放后开始计算空闲时间，空闲 90 秒的条目在后续访问时惰性清理。
+`Http::close()` 会清空池并使并发中的冷启动插入失效，close 前开始构造的 Client 不能在 close 后
+重新挂回池中。同一 Request 的 redirect 保持使用该 Request 已选择的 Client；proxy/TLS 不会变成
+Downloader 的可变全局状态。
+
 每条 Request 执行使用一个共享 `stats::Delta`，按 node 或 `items` 累积 `total / done / filter / dedup / validate / download` 计数。当前 Request task 内直接等待的 Tx 调用使用 task-local Context，并写入这份增量；移入独立 task 的 Tx clone 只保留 Trace 身份，其输出不改变已经结算的 Request，也不延迟该 Request 结算。Worker 在最终 Payload 中附带增量快照，Scheduler 只在 `success / failure` 首次结算时合并到 Trace 统计，幂等重放不会重复累计。
 
 ## 8. 两种执行模式
@@ -339,10 +354,11 @@ Item 类型。`with_rules(config)` 只表示本地创建一轮 Rules Trace 种�
 `Config::validate()` 在运行前完整校验 start/target node、Request transport、模板上下文、保留
 `idx` 以及每个 node 最多一条 Item edge 等约束，后端或 API 保存配置前可以复用同一入口。
 
-Rules Executor 只负责当前 node 的解释执行：
+统一 Executor 按固定顺序执行每条 Rules Request：
 
 ```text
 Trace Snapshot.dsl = Some(config)
+-> Rust Spider.index(response.clone())
 -> Request.node
 -> graph.nodes[node]
 -> 下载后的字段提取
@@ -350,6 +366,9 @@ Trace Snapshot.dsl = Some(config)
 -> 完整 Request Spec 和/或具体 Rust Item
 -> 共用 Tx 与 Scheduler 链路
 ```
+
+Rust `index` 是每条 Rules Request 固定经过的共享业务代码入口。只有它成功返回后，同一个 Executor
+才解释声明式 node；代码模式 Request 则直接通过 Rust Spider 注册表解析其稳定 node。
 
 `spider.start[*]` 与 request edge 共用同一完整 Request Spec。Graph node 只包含 parse、bind 和域名
 策略，Request 创建后不再从目标 node 补 transport。URL 数组按稳定顺序展开，在 transport 模板渲染前
@@ -413,7 +432,7 @@ Rules 的 `image / video / audio` 是数据处理类型，不是 validator 类�
 name, url, src, width, height, size, ext, alt
 ```
 
-相对 URL 会根据当前 Response URL 补全，重复 `src` 会在该字段内去除。普通 text 字段不执行媒体规范化。
+相对 URL 会根据当前 Response URL 补全，同一字段内按规范化后的 `url` 去重；原始 `src` 只是元数据，不作为去重键。普通 text 字段不执行媒体规范化。
 
 ## 10. Middleware 生命周期
 
@@ -445,7 +464,7 @@ after_spider
 
 `Builder::with_middleware(name, value)` 注册能力，不表示自动挂载到所有对象。Request、Response、Item 和 Spider 生命周期通过各自的 `middleware::Spec` 显式选择能力。只有 validate 的正常阶段 Spec 是 Registry 默认配置。
 
-默认 Dedup 只处理配置 key 生成的 Request fingerprint，不处理 Item，也不增加隐式 URL key。存储使用精确 `HashMap` 和过期时间堆，只从堆头惰性清理到期项；`ttl: 0` 不保留，省略或 `-1` 在进程生命周期内永久保留且不做容量淘汰。
+默认 Dedup 只处理配置 key 生成的 Request fingerprint，不处理 Item，也不增加隐式 URL key。指纹在 `before_scheduler` 观察 Request 时检查并写入，因此后续 `Scheduler::push` 失败不会回滚。SHA-256 输入是 `task_id`、Middleware key、rule name 与有序字段值组成的结构化元组，不使用可能碰撞的字符串 namespace 拼接。URL 归一化只按 query key 稳定排序，同名 key 保持原始顺序。所有启用规则先完成有限 TTL deadline 校验，再在同一把锁内统一检查并写入；任一 TTL 错误都不会留下部分指纹。某条规则的 `ttl: 0` 表示既不查询也不保存该规则指纹；省略或 `-1` 在进程生命周期内永久保留且不做容量淘汰。精确存储使用 `HashMap` 和过期时间堆，只从堆头惰性清理到期项。
 
 ## 11. Item、校验与本地持久化
 
@@ -474,7 +493,7 @@ Tx.item
 <dir>/data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
-每个 Item 写一行 JSON，JSONL 只包含 Item 的业务序列化结果。并发写入同一小时文件会串行化，写入失败时尝试回滚本次追加，`close()` 刷新打开的文件。
+每个 Item 写一行 JSON，JSONL 只包含 Item 的业务序列化结果。并发写入同一小时文件会串行化，每次完整追加后立即 flush；写入失败时尝试回滚本次追加，`close()` 再次刷新全部打开文件。
 
 `version / timezone` 是 Trace 级运行元数据，持久化 Scheduler 在 `push_items` 时可通过
 `payload.trace_id` 读取对应 Trace Snapshot，并按需要反规范化到自己的 Item 记录。列名固定为
@@ -506,6 +525,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/engine/actor/output.rs` | 接受 Tx Event、委托应答并跟踪输出完成 |
 | `spider/src/engine/actor/wait.rs` | 安排轮询与 producer 空闲通知 |
 | `spider/src/engine/actor/task.rs` | 持有任务句柄并把任务 panic 转为 Engine 错误 |
+| `spider/src/engine/builder.rs` | 装配组件并持有所有执行模式共用的 Schema Store |
 | `spider/src/engine/runtime.rs` | 组件生命周期、启动参数和 Actor 装配 |
 | `spider/src/engine/worker.rs` | 单条 Request 的 ack、租约维护和最终结算 |
 | `spider/src/engine/request.rs` | 下载、Middleware、Worker 本地重试与解析主链 |
@@ -520,6 +540,9 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/engine/rules/executor/bind.rs` | 执行有序 bind pipeline、transform 和 template |
 | `spider/src/engine/rules/executor/condition.rs` | 判断一条 edge 条件 |
 | `spider/src/engine/rules/executor/build.rs` | 从已启用 edge 构造 Request 与 Item 值 |
+| `spider/src/middleware/registry.rs` | 只注册并解析 Middleware 实现和 Spec |
+| `spider/src/downloader/http.rs` | 执行 HTTP 请求、redirect、headers、cookies 与 Response 转换 |
+| `spider/src/downloader/http/pool.rs` | 按 proxy/TLS 键管理 Client 复用、过期与关闭 |
 | `spider/src/scheduler/contract.rs` | Scheduler 公共合同 |
 | `spider/src/scheduler/init.rs` | 运行种子初始化合同 |
 | `spider/src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |

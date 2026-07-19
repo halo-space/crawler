@@ -72,7 +72,8 @@ Selector 时才读取真正的 API Key。
 
 规则模式从 YAML 加载任务入口、请求图、解析规则、数据绑定和 Item Schema，但运行时仍装载一份
 Rust Spider。多份 Rules 可以共享同一套 Spider 业务代码和同一种 Item 类型；YAML 负责表达每个
-任务不同的抓取规则。Rules 任务名不要求等于 `Spider::name()`。
+任务不同的抓取规则。Rules 的 `spider.name` 在本地作为 `task_id`，不要求等于部署侧 Rust
+`Spider::name()`。
 
 ```rust
 use spider::{config, engine};
@@ -101,6 +102,8 @@ URL、transport、priority 和 vals。URL 数组展开会在模板渲染前写�
 `vals.idx`。Rules 根据 `#[spider(item = Article)]` 关联的 Rust 类型调用 `Item::from_values`，注入
 SchemaKey，再调用默认 `item` 或 edge 的 `fn` 业务函数。规则模式与代码模式共用 Engine、
 Scheduler、Downloader、Middleware、Request、Response、Item 和 Payload，不维护第二套运行时模型。
+每条 Rules Request 都由统一 Executor 先调用 Rust Spider 的 `index(response.clone())` 业务入口，
+然后再根据 `Request.node` 解释对应 DSL node；这里不存在 Code/Rules Executor 替换。
 每个具体 Item 必须持有一份不参与序列化的 `item::State`，并实现强制的
 `from_values / state / state_mut` 合同。edge `fn` 引用的额外 Item 函数必须使用 `#[item]` 显式注册；
 本地 Rules 装配发现函数不存在时，会在运行时初始化前直接 panic。
@@ -133,9 +136,16 @@ Request 并发数、单次领取上限和 Event 容量是三个独立且只在�
 `with_concurrency`、`with_limit` 和 `with_event_limit` 设置。
 Actor 开始处理 Event 时即释放 Event 容量，但 Tx 调用仍会等待对应 Scheduler 与 Middleware 工作完成。
 
-Dedup 只处理配置 key 生成的 Request 指纹。默认精确存储使用 `HashMap + 过期时间堆`；TTL 省略或
-`-1` 表示进程生命周期内永久保留，`0` 表示不保留。同源 redirect 会把中间响应的 Cookie 带到
-下一跳；跨源 follow 和 redirect 均不继承 Request headers/cookies。
+Dedup 只处理配置 key 生成的 Request 指纹。它在 `before_scheduler` 观察到 Request 时写入指纹，
+后续 `Scheduler::push` 失败不会回滚。SHA-256 输入使用 `task_id`、Middleware key、rule name 和
+有序字段值组成的结构化元组，namespace 不会因字符串拼接发生碰撞。URL 归一化只按 query key
+稳定排序，同名 key 的原始顺序不变。所有启用规则在同一临界区内检查并原子写入；TTL 省略或
+`-1` 表示进程生命周期内永久保留，某条规则配置 `0` 时既不查询也不保存该规则的指纹。
+
+HTTP Downloader 按 Request 应用 proxy 和 TLS 配置。只有 proxy URL 与
+`accept_invalid_certs` 完全相同的请求才复用 Client；Client 空闲 90 秒后惰性清理，`Http::close()`
+清空整个池。直连请求、不同代理凭据和不同 TLS 行为不会共用同一 Client 条目。同源 redirect 会把
+中间响应的 Cookie 带到下一跳；跨源 follow 和 redirect 均不继承 Request headers/cookies。
 
 ## 当前范围
 

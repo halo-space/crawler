@@ -11,16 +11,19 @@ pub struct Builder<S = scheduler::Memory, D = downloader::Downloader, F = ()> {
     pub(super) downloader: D,
     pub(super) spider_factory: F,
     pub(super) registry: middleware::Registry,
+    pub(super) schemas: Arc<crate::item::schema::Store>,
     pub(super) middlewares: Vec<middleware::Spec>,
 }
 
 impl Builder<scheduler::Memory, downloader::Downloader, ()> {
     pub fn new() -> Self {
+        let schemas = Arc::new(crate::item::schema::Store::new());
         Self {
             scheduler: scheduler::Memory::new(DEFAULT_WORKER_ID),
             downloader: downloader::Downloader::new(),
             spider_factory: (),
-            registry: middleware::Registry::new(),
+            registry: middleware::Registry::with_schemas(schemas.clone()),
+            schemas,
             middlewares: Vec::new(),
         }
     }
@@ -39,6 +42,7 @@ impl<S, D, F> Builder<S, D, F> {
             downloader: self.downloader,
             spider_factory: self.spider_factory,
             registry: self.registry,
+            schemas: self.schemas,
             middlewares: self.middlewares,
         }
     }
@@ -49,6 +53,7 @@ impl<S, D, F> Builder<S, D, F> {
             downloader,
             spider_factory: self.spider_factory,
             registry: self.registry,
+            schemas: self.schemas,
             middlewares: self.middlewares,
         }
     }
@@ -59,6 +64,7 @@ impl<S, D, F> Builder<S, D, F> {
             downloader: self.downloader,
             spider_factory,
             registry: self.registry,
+            schemas: self.schemas,
             middlewares: self.middlewares,
         }
     }
@@ -70,6 +76,7 @@ impl<S, D, F> Builder<S, D, F> {
             spider_factory: self.spider_factory,
             config,
             registry: self.registry,
+            schemas: self.schemas,
             middlewares: self.middlewares,
         }
     }
@@ -104,8 +111,7 @@ where
             spider.tx().set_trace(task_id.clone(), trace_id.clone());
             (task_id, trace_id)
         });
-        let schemas = self.registry.schemas();
-        let executor = engine::executor::Executor::new(Arc::new(spider), schemas);
+        let executor = engine::executor::Executor::new(Arc::new(spider), self.schemas);
 
         Runtime::new(
             self.scheduler,

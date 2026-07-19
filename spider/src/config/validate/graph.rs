@@ -14,14 +14,8 @@ pub(super) fn check(config: &graph::Config, item_configured: bool) -> Result<(),
         ));
     }
     for (name, node) in &config.nodes {
-        if node
-            .allowed_domains
-            .as_ref()
-            .is_some_and(|domains| domains.iter().any(|domain| domain.trim().is_empty()))
-        {
-            return Err(config::Error::Message(format!(
-                "node {name} allowed_domains must not contain empty values"
-            )));
+        if let Some(domains) = node.allowed_domains.as_ref() {
+            super::spider::check_allowed_domains(domains, &format!("node {name} allowed_domains"))?;
         }
     }
     let mut item_sources = HashSet::new();
@@ -263,5 +257,24 @@ graph:
         )
         .unwrap_err();
         assert!(error.to_string().contains("allowed_domains"));
+    }
+
+    #[test]
+    fn node_rejects_domains_with_transport_components() {
+        let rules = r#"
+spider:
+  name: domains
+  start: [{node: index, url: https://example.com}]
+graph:
+  nodes:
+    index:
+      allowed_domains: [https://example.com]
+  edges: []
+"#;
+
+        let error = Config::from_yaml(rules).unwrap_err();
+
+        assert!(error.to_string().contains("node index allowed_domains"));
+        assert!(error.to_string().contains("without a scheme, port, path"));
     }
 }

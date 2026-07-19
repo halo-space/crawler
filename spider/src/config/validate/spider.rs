@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use crate::{config, graph, net, spider};
 
 pub(super) fn check(config: &spider::Config, graph: &graph::Config) -> Result<(), config::Error> {
@@ -30,15 +32,7 @@ pub(super) fn check(config: &spider::Config, graph: &graph::Config) -> Result<()
             "spider.start must not be empty".to_string(),
         ));
     }
-    if config
-        .allowed_domains
-        .iter()
-        .any(|domain| domain.trim().is_empty())
-    {
-        return Err(config::Error::Message(
-            "spider.allowed_domains must not contain empty values".to_string(),
-        ));
-    }
+    check_allowed_domains(&config.allowed_domains, "spider.allowed_domains")?;
     for spec in &config.start {
         if spec.node.trim().is_empty() {
             return Err(config::Error::Message(
@@ -66,6 +60,46 @@ pub(super) fn check(config: &spider::Config, graph: &graph::Config) -> Result<()
         )?;
     }
     Ok(())
+}
+
+pub(super) fn check_allowed_domains(domains: &[String], field: &str) -> Result<(), config::Error> {
+    if let Some(domain) = domains.iter().find(|domain| !is_host_only(domain)) {
+        return Err(config::Error::Message(format!(
+            "{field} must contain only host names or IP addresses without a scheme, port, path, query, or credentials: {domain}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_host_only(value: &str) -> bool {
+    if value.is_empty() || value.trim() != value {
+        return false;
+    }
+    if value.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+
+    match url::Host::parse(value) {
+        Ok(url::Host::Domain(domain)) => {
+            !value.contains('%') && is_domain_name(domain.strip_suffix('.').unwrap_or(&domain))
+        }
+        Ok(url::Host::Ipv4(_)) | Ok(url::Host::Ipv6(_)) => true,
+        Err(_) => false,
+    }
+}
+
+fn is_domain_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 fn valid_start_template(reference: &str) -> bool {
@@ -125,6 +159,7 @@ fn check_vals_path(path: &str) -> Result<(), config::Error> {
 
 #[cfg(test)]
 mod tests {
+    use super::check_allowed_domains;
     use crate::config::Config;
 
     #[test]
@@ -215,5 +250,42 @@ graph:
         assert!(error.to_string().contains("valid IANA time zone"));
 
         assert!(Config::from_yaml(&rules.replace("Mars/Olympus", "Asia/Shanghai")).is_ok());
+    }
+
+    #[test]
+    fn allowed_domains_require_host_only_domain_names_or_ip_addresses() {
+        let valid = [
+            "example.com",
+            "example.com.",
+            "Example.COM",
+            "localhost",
+            "\u{4f8b}\u{5b50}.\u{6d4b}\u{8bd5}",
+            "127.0.0.1",
+            "::1",
+            "[2001:db8::1]",
+        ]
+        .map(str::to_string);
+        assert!(check_allowed_domains(&valid, "spider.allowed_domains").is_ok());
+
+        for invalid in [
+            "",
+            " example.com",
+            "example.com ",
+            "example .com",
+            "https://example.com",
+            "example.com:443",
+            "example.com/path",
+            "example.com?source=test",
+            "user@example.com",
+            "*.example.com",
+            "bad_domain.example",
+            "-example.com",
+            "example..com",
+            "example.com..",
+        ] {
+            let error = check_allowed_domains(&[invalid.to_string()], "spider.allowed_domains")
+                .unwrap_err();
+            assert!(error.to_string().contains("without a scheme, port, path"));
+        }
     }
 }

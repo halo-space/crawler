@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 
 use serde_json::Value;
 use url::Url;
@@ -25,7 +26,7 @@ pub enum State {
     Failed,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
     pub url: String,
@@ -146,7 +147,10 @@ impl Request {
     }
 
     pub(crate) fn set_allowed_domains(&mut self, domains: Vec<String>) {
-        self.allowed_domains = domains;
+        self.allowed_domains = domains
+            .into_iter()
+            .map(|domain| canonical_host(&domain))
+            .collect();
     }
 
     pub(crate) fn allows(&self, url: &Url) -> bool {
@@ -156,6 +160,7 @@ impl Request {
         let Some(host) = url.host_str() else {
             return false;
         };
+        let host = host.strip_suffix('.').unwrap_or(host);
         self.allowed_domains.iter().any(|domain| {
             host.eq_ignore_ascii_case(domain)
                 || (host.len() > domain.len()
@@ -248,6 +253,45 @@ fn next_id() -> String {
     format!("req_{}", uuid::Uuid::now_v7())
 }
 
+fn canonical_host(value: &str) -> String {
+    if let Ok(address) = value.parse::<IpAddr>() {
+        return match address {
+            IpAddr::V4(address) => address.to_string(),
+            IpAddr::V6(address) => format!("[{address}]"),
+        };
+    }
+    match url::Host::parse(value) {
+        Ok(url::Host::Domain(domain)) => domain.strip_suffix('.').unwrap_or(&domain).to_string(),
+        Ok(url::Host::Ipv4(address)) => address.to_string(),
+        Ok(url::Host::Ipv6(address)) => format!("[{address}]"),
+        Err(_) => value.to_string(),
+    }
+}
+
+pub(super) fn debug_origin(value: &str) -> String {
+    Url::parse(value)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| "<invalid URL>".to_string())
+}
+
+pub(super) fn body_kind(body: &Body) -> &'static str {
+    match body {
+        Body::Empty => "empty",
+        Body::Bytes(_) => "bytes",
+        Body::Text(_) => "text",
+        Body::Json(_) => "json",
+    }
+}
+
+impl fmt::Debug for ProxyConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProxyConfig")
+            .field("origin", &debug_origin(&self.url))
+            .finish()
+    }
+}
+
 impl fmt::Debug for Request {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -257,28 +301,29 @@ impl fmt::Debug for Request {
             .field("trace_id", &self.trace_id)
             .field("version", &self.version)
             .field("protocol", &self.protocol)
-            .field("url", &self.url)
+            .field("origin", &debug_origin(&self.url))
             .field("node", &self.node_key())
             .field("method", &self.method)
-            .field("headers", &self.headers)
-            .field("body", &self.body)
-            .field("cookies", &self.cookies)
-            .field("vals", &self.vals)
-            .field("kwargs", &self.kwargs)
+            .field("headers_len", &self.headers.len())
+            .field("body_kind", &body_kind(&self.body))
+            .field("cookies_len", &self.cookies.len())
+            .field("vals_len", &self.vals.len())
+            .field("kwargs_len", &self.kwargs.len())
             .field("priority", &self.priority)
             .field("dont_filter", &self.dont_filter)
             .field("mode", &self.mode)
             .field("timeout", &self.timeout)
             .field("proxy", &self.proxy)
             .field("tls", &self.tls)
-            .field("middlewares", &self.middlewares)
+            .field("middlewares_len", &self.middlewares.len())
             .field("state", &self.state)
             .field("next_time", &self.next_time)
             .field("leased_by", &self.leased_by)
             .field("lease_time", &self.lease_time)
             .field("retry_count", &self.retry_count)
             .field("max_retry_count", &self.max_retry_count)
-            .field("failed_workers", &self.failed_workers)
+            .field("failed_workers_len", &self.failed_workers.len())
+            .field("allowed_domains_len", &self.allowed_domains.len())
             .finish()
     }
 }
@@ -338,5 +383,66 @@ mod tests {
         let mut rules = code;
         rules.set_node("list");
         assert_eq!(rules.node_key(), "list");
+    }
+
+    #[test]
+    fn debug_redacts_request_content_and_url_credentials() {
+        let mut request = Request::follow(
+            "https://request-user:request-password@example.com/private?api_key=url-secret",
+        )
+        .unwrap()
+        .header("authorization", "header-secret")
+        .cookie("session", "cookie-secret")
+        .body(Body::Text("body-secret".to_string()))
+        .vals("token", "vals-secret")
+        .kwargs("api_key", "kwargs-secret")
+        .with_middleware(
+            middleware::Spec::new("custom")
+                .args(serde_json::json!({"api_key": "middleware-secret"})),
+        );
+        request.proxy = Some(ProxyConfig {
+            url: "http://proxy-user:proxy-password@proxy.example:8080".to_string(),
+        });
+
+        let debug = format!("{request:?}");
+
+        for secret in [
+            "request-user",
+            "request-password",
+            "url-secret",
+            "header-secret",
+            "cookie-secret",
+            "body-secret",
+            "vals-secret",
+            "kwargs-secret",
+            "middleware-secret",
+            "proxy-user",
+            "proxy-password",
+        ] {
+            assert!(!debug.contains(secret), "Debug exposed {secret}: {debug}");
+        }
+        assert!(debug.contains("https://example.com"));
+        assert!(debug.contains("http://proxy.example:8080"));
+        assert!(debug.contains("headers_len: 1"));
+        assert!(debug.contains("body_kind: \"text\""));
+
+        let proxy = format!("{:?}", request.proxy.unwrap());
+        assert!(!proxy.contains("proxy-user"));
+        assert!(!proxy.contains("proxy-password"));
+    }
+
+    #[test]
+    fn allowed_domains_normalize_idn_and_ipv6_hosts() {
+        let mut request = Request::follow("https://example.com").unwrap();
+        request.set_allowed_domains(vec![
+            "\u{4f8b}\u{5b50}.\u{6d4b}\u{8bd5}".to_string(),
+            "::1".to_string(),
+            "Example.COM.".to_string(),
+        ]);
+
+        assert!(request.allows(&Url::parse("https://xn--fsqu00a.xn--0zwm56d").unwrap()));
+        assert!(request.allows(&Url::parse("http://[::1]").unwrap()));
+        assert!(request.allows(&Url::parse("https://sub.example.com").unwrap()));
+        assert!(request.allows(&Url::parse("https://example.com./path").unwrap()));
     }
 }

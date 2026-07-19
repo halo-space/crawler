@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
 use url::Url;
 
 use crate::middleware;
@@ -16,7 +17,7 @@ pub enum HttpVersion {
     Http3,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Response {
     pub request: Request,
     pub url: String,
@@ -30,6 +31,32 @@ pub struct Response {
     pub vals: HashMap<String, Value>,
     pub kwargs: HashMap<String, Value>,
     pub middlewares: Vec<middleware::Spec>,
+}
+
+impl fmt::Debug for Response {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Response")
+            .field("request", &self.request)
+            .field("origin", &debug_origin(&self.url))
+            .field("status", &self.status)
+            .field("has_reason", &self.reason.is_some())
+            .field("version", &self.version)
+            .field("redirects_len", &self.redirects.len())
+            .field("headers_len", &self.headers.len())
+            .field("cookies_len", &self.cookies.len())
+            .field("body_len", &self.body.len())
+            .field("vals_len", &self.vals.len())
+            .field("kwargs_len", &self.kwargs.len())
+            .field("middlewares_len", &self.middlewares.len())
+            .finish()
+    }
+}
+
+fn debug_origin(value: &str) -> String {
+    Url::parse(value)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| "<invalid URL>".to_string())
 }
 
 impl Response {
@@ -250,5 +277,70 @@ mod tests {
         let value: serde_json::Value = response.json().unwrap();
 
         assert_eq!(value.get("title"), Some(&Value::from("Book A")));
+    }
+
+    #[test]
+    fn debug_redacts_response_content_and_url_credentials() {
+        let mut response = html_response("response-body-secret");
+        response.request = Request::follow(
+            "https://request-user:request-password@example.com/private?api_key=request-secret",
+        )
+        .unwrap()
+        .header("authorization", "request-header-secret")
+        .cookie("session", "request-cookie-secret");
+        response.request.proxy = Some(crate::net::ProxyConfig {
+            url: "http://proxy-user:proxy-password@proxy.example:8080".to_string(),
+        });
+        response.url =
+            "https://response-user:response-password@example.com/path?token=response-secret"
+                .to_string();
+        response.reason = Some("reason-secret".to_string());
+        response
+            .redirects
+            .push("https://example.com/?token=redirect-secret".to_string());
+        response
+            .headers
+            .insert("set-cookie".to_string(), "header-secret".to_string());
+        response
+            .cookies
+            .insert("session".to_string(), "cookie-secret".to_string());
+        response
+            .vals
+            .insert("token".to_string(), Value::from("vals-secret"));
+        response
+            .kwargs
+            .insert("api_key".to_string(), Value::from("kwargs-secret"));
+        response.middlewares.push(
+            middleware::Spec::new("custom")
+                .args(serde_json::json!({"api_key": "middleware-secret"})),
+        );
+
+        let debug = format!("{response:?}");
+
+        for secret in [
+            "request-user",
+            "request-password",
+            "request-secret",
+            "request-header-secret",
+            "request-cookie-secret",
+            "response-user",
+            "response-password",
+            "response-secret",
+            "reason-secret",
+            "redirect-secret",
+            "header-secret",
+            "cookie-secret",
+            "response-body-secret",
+            "vals-secret",
+            "kwargs-secret",
+            "middleware-secret",
+            "proxy-user",
+            "proxy-password",
+        ] {
+            assert!(!debug.contains(secret), "Debug exposed {secret}: {debug}");
+        }
+        assert!(debug.contains("https://example.com"));
+        assert!(debug.contains("http://proxy.example:8080"));
+        assert!(debug.contains("redirects_len: 1"));
     }
 }

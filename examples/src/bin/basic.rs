@@ -43,28 +43,6 @@ impl BasicItem {
     }
 }
 
-// todo 这里可以直接写   fn from_values(mut values: spider::item::Values) -> Result<Self, spider::item::Error> {
-//         let title = values
-//             .shift_remove("title")
-//             .and_then(|value| value.as_str().map(str::to_string))
-//             .ok_or_else(|| spider::item::Error::Message("title must be a string".to_string()))?;
-//         Ok(Self::new(title))
-//     } 这个函数不,其他的都不写了,或者这样，我们尽可能从vals里面取数据，如果存在,就用vals里面的覆盖item里面的不就行了，不存在就不管，这样比你现在的优雅很多吧
-// 另外  fn state(&self) -> &spider::item::State {
-//         &self.state
-//     }
-//
-//     fn state_mut(&mut self) -> &mut spider::item::State {
-//         &mut self.state
-//     }
-//
-//     fn as_any(&self) -> &dyn Any {
-//         self
-//     }
-//
-//     fn as_any_mut(&mut self) -> &mut dyn Any {
-//         self
-//     } 这几个需要显示的写出来嘛
 impl Item for BasicItem {
     fn from_values(mut values: spider::item::Values) -> Result<Self, spider::item::Error> {
         let title = values

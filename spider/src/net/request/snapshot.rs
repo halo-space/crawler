@@ -1,9 +1,10 @@
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::{middleware, net, trace};
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub id: String,
@@ -33,6 +34,41 @@ pub struct Snapshot {
     pub retry_count: i32,
     pub max_retry_count: i32,
     pub failed_workers: Vec<String>,
+}
+
+impl fmt::Debug for Snapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Snapshot")
+            .field("id", &self.id)
+            .field("task_id", &self.task_id)
+            .field("trace_id", &self.trace_id)
+            .field("node", &self.node)
+            .field("protocol", &self.protocol)
+            .field("origin", &super::model::debug_origin(&self.url))
+            .field("method", &self.method)
+            .field("headers_len", &self.headers.len())
+            .field("body_kind", &super::model::body_kind(&self.body))
+            .field("cookies_len", &self.cookies.len())
+            .field("vals_len", &self.vals.len())
+            .field("kwargs_len", &self.kwargs.len())
+            .field("priority", &self.priority)
+            .field("dont_filter", &self.dont_filter)
+            .field("mode", &self.mode)
+            .field("timeout", &self.timeout)
+            .field("proxy", &self.proxy)
+            .field("tls", &self.tls)
+            .field("middlewares_len", &self.middlewares.len())
+            .field("state", &self.state)
+            .field("version", &self.version)
+            .field("next_time", &self.next_time)
+            .field("leased_by", &self.leased_by)
+            .field("lease_time", &self.lease_time)
+            .field("retry_count", &self.retry_count)
+            .field("max_retry_count", &self.max_retry_count)
+            .field("failed_workers_len", &self.failed_workers.len())
+            .finish()
+    }
 }
 
 impl TryFrom<net::Request> for Snapshot {
@@ -348,5 +384,41 @@ graph:
         encoded["kind"] = Value::from("code");
 
         assert!(serde_json::from_value::<Snapshot>(encoded).is_err());
+    }
+
+    #[test]
+    fn debug_redacts_snapshot_content_and_url_credentials() {
+        let mut request = net::Request::follow(
+            "https://request-user:request-password@example.com/private?api_key=url-secret",
+        )
+        .unwrap()
+        .header("authorization", "header-secret")
+        .cookie("session", "cookie-secret")
+        .body(net::Body::Text("body-secret".to_string()))
+        .vals("token", "vals-secret")
+        .kwargs("api_key", "kwargs-secret");
+        request.proxy = Some(net::ProxyConfig {
+            url: "http://proxy-user:proxy-password@proxy.example:8080".to_string(),
+        });
+        let snapshot = Snapshot::try_from(request).unwrap();
+
+        let debug = format!("{snapshot:?}");
+
+        for secret in [
+            "request-user",
+            "request-password",
+            "url-secret",
+            "header-secret",
+            "cookie-secret",
+            "body-secret",
+            "vals-secret",
+            "kwargs-secret",
+            "proxy-user",
+            "proxy-password",
+        ] {
+            assert!(!debug.contains(secret), "Debug exposed {secret}: {debug}");
+        }
+        assert!(debug.contains("https://example.com"));
+        assert!(debug.contains("http://proxy.example:8080"));
     }
 }

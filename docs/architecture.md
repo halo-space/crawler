@@ -39,7 +39,7 @@ XPath has been removed from the roadmap. CSS is the sole HTML selector path; the
 
 ## 2. Core Design Principles
 
-1. **One runtime:** Code mode and Rules mode replace only the Executor and initialization logic. Scheduling, downloading, Middleware, Events, and settlement remain shared.
+1. **One runtime:** Code mode and Rules mode use one Executor. Trace Snapshot data selects the code handler or Rules interpretation path; only run-seed initialization differs.
 2. **Scheduler as the distribution boundary:** Switching away from Memory changes only `.with_scheduler(...)` at assembly time. A replacement must implement the complete scheduling semantics, not merely wrap a storage client.
 3. **Immediate output:** Requests and Items emitted by parsing enter the Engine through `Tx` immediately. They are not held until a Trace or request graph finishes.
 4. **Identity is separate from execution ownership:** Request ID survives retry and recovery; `version`, `leased_by`, and `lease_time` describe one execution right.
@@ -62,7 +62,7 @@ flowchart LR
     MW["Middleware Registry"]
     D["Downloader"]
     H["HTTP"]
-    E["Code / Rules Executor"]
+    E["Unified Executor"]
     O["Request / Item output tasks"]
     P["JSONL Item output"]
     F["Item failure snapshots"]
@@ -93,18 +93,26 @@ The Engine uses one private Kameo Actor as its message-driven coordinator, but i
 
 ```mermaid
 flowchart LR
-    S["Spider.name<br/>unique deployed Spider name"] --> T["Task.id<br/>task definition"]
+    S["Rust Spider::name()<br/>deployed business implementation"]
+    C["Code local run<br/>task_id = Spider::name()"]
+    Y["Rules local run<br/>task_id = config.spider.name"]
+    T["Task.id / task_id<br/>task definition"]
+    S --> C
+    S -. shared business code .-> Y
+    C --> T
+    Y --> T
     T --> R["Trace.id<br/>one dispatched run"]
     R --> Q1["Request.id"]
     R --> Q2["Request.id"]
     R --> Q3["Request.id"]
 ```
 
-- `Spider.name` is the sole Spider identifier in code and Rules mode. There is no duplicate `spider.id`.
+- Rust `Spider::name()` identifies the deployed business implementation. There is no duplicate `spider.id`.
+- Rules `config.spider.name` identifies that Rules task and becomes its local `task_id`; it is not required to equal Rust `Spider::name()`.
 - `Task.id` identifies a task definition. A persistent control plane may create several parameterized or scheduled Tasks from one deployed Spider.
 - `Trace.id` identifies one Task run. Each periodic dispatch should create a new Trace.
 - `Request.id` identifies one logical Request and remains unchanged across lease recovery and queue retry.
-- Local Memory has no persistent Task table, so it uses `Spider.name` as its local `task_id`.
+- Local Memory has no persistent Task table. A code run uses Rust `Spider::name()` as `task_id`; a Rules run uses `config.spider.name`.
 - Item ID is not part of this hierarchy. `Tx.item` generates a UUID v7 when an Item has no ID. That ID identifies a data instance and does not provide business deduplication.
 
 ### 4.2 Run Seed
@@ -314,6 +322,14 @@ The important semantics are:
 - the HTTP Downloader validates every redirect target against `allowed_domains` before sending it. A disallowed redirect is a normal filter, not a download retry or `error_download`; an allowed cross-origin redirect inherits no headers or cookies.
 - same-origin redirects apply intermediate `Set-Cookie` values to the next hop; those accumulated credentials are discarded before a cross-origin hop.
 
+Proxy and TLS are Request-level download settings. `Http` pools clients by the complete proxy URL
+(including credentials) and `tls.accept_invalid_certs`; direct requests use a separate no-proxy key.
+An entry can serve concurrent matching Requests, becomes idle after its last handle is released, and
+is removed lazily after 90 idle seconds. `Http::close()` clears the pool and invalidates concurrent
+cold-build insertion, so a client constructed before close cannot be reattached afterward. Redirects
+for one Request retain that Request's selected client; proxy or TLS configuration is never mutated as
+global Downloader state.
+
 Each Request execution owns one shared `stats::Delta`, accumulating `total / done / filter / dedup / validate / download` counters by node or `items`. A directly awaited Tx call uses the current task-local Request context and updates that delta. A Tx clone moved to a detached task retains only Trace identity; its output neither changes the settled Request nor delays settlement. The Worker attaches the delta snapshot to the final Payload, and the Scheduler merges it into Trace statistics only on the first `success / failure` settlement; idempotent replay does not double-count it.
 
 ## 8. Two Execution Modes
@@ -342,10 +358,11 @@ in a remote Scheduler. The Rules task name is not required to equal `Spider::nam
 Request transport, template context, reserved `idx`, and one-Item-edge-per-node constraints. Backends and APIs
 can call the same validator before storing a configuration.
 
-The Rules Executor interprets only the current node:
+The unified Executor runs a Rules Request in this fixed order:
 
 ```text
 Trace Snapshot.dsl = Some(config)
+-> Rust Spider.index(response.clone())
 -> Request.node
 -> graph.nodes[node]
 -> post-download field extraction
@@ -353,6 +370,10 @@ Trace Snapshot.dsl = Some(config)
 -> complete Request Specs and/or typed Rust Item construction
 -> shared Tx and Scheduler paths
 ```
+
+The Rust `index` call is the shared business-code entry for every Rules Request. Only after it
+returns successfully does the same Executor interpret the declarative node. Code Requests instead
+resolve their stable node directly through the Rust Spider registry.
 
 `spider.start[*]` and request edges use the same complete Request Spec. Graph nodes contain parse, bind, and
 domain policy only; they never fill transport fields after a Request has been created. URL-array expansion is
@@ -417,7 +438,7 @@ Rules `image / video / audio` values are processing types, not validator types. 
 name, url, src, width, height, size, ext, alt
 ```
 
-Relative URLs are resolved against the current Response URL, and duplicate `src` values are removed within the field. Plain text fields are not media-normalized.
+Relative URLs are resolved against the current Response URL, and duplicate normalized `url` values are removed within the field. The original `src` remains metadata and is not the deduplication key. Plain text fields are not media-normalized.
 
 ## 10. Middleware Lifecycle
 
@@ -449,7 +470,7 @@ Built-in implementations:
 
 `Builder::with_middleware(name, value)` registers a capability; it does not attach it to every object. Request, Response, Item, and Spider lifecycle Specs opt into capabilities explicitly. Only validate Specs for the normal stages are Registry defaults.
 
-Default Dedup handles only Request fingerprints built from explicitly configured keys; it never deduplicates Items or adds an implicit URL key. Its exact in-memory store uses a `HashMap` plus an expiry heap and lazily removes only expired heap-head entries. `ttl: 0` retains nothing; omitted TTL or `-1` remains for the process lifetime without capacity eviction.
+Default Dedup handles only Request fingerprints built from explicitly configured keys; it never deduplicates Items or adds an implicit URL key. Fingerprints are observed and inserted during `before_scheduler`, so a later `Scheduler::push` failure does not roll them back. SHA-256 hashes a structured tuple of `task_id`, Middleware key, rule name, and ordered values rather than an ad hoc concatenated namespace. URL normalization stably sorts query pairs only by key, preserving the original order of repeated keys. All active rules are checked and inserted under one lock after every finite TTL deadline has been validated, so a TTL error cannot partially mutate the store. A rule with `ttl: 0` neither checks nor stores its fingerprint; omitted TTL or `-1` remains for the process lifetime without capacity eviction. The exact in-memory store uses a `HashMap` plus an expiry heap and lazily removes only expired heap-head entries.
 
 ## 11. Items, Validation, and Local Persistence
 
@@ -479,7 +500,7 @@ Normal Item output:
 <dir>/data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
-Each Item is one JSON line containing only its business serialization. Concurrent writes to the same hourly file are serialized. A failed append attempts to roll back that append, and `close()` flushes open files.
+Each Item is one JSON line containing only its business serialization. Concurrent writes to the same hourly file are serialized. Every complete append is flushed immediately; a failed append attempts to roll back that append, and `close()` flushes all open files again.
 
 `version / timezone` are Trace-level runtime metadata. A persistent Scheduler may read the
 corresponding Trace Snapshot through `payload.trace_id` during `push_items` and denormalize
@@ -513,6 +534,7 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/engine/actor/output.rs` | Accept Tx Events, delegate replies, and track output completion |
 | `spider/src/engine/actor/wait.rs` | Schedule poll and producer-idle notifications |
 | `spider/src/engine/actor/task.rs` | Own task handles and convert task panic into Engine errors |
+| `spider/src/engine/builder.rs` | Assemble components and own the Schema Store used by all execution modes |
 | `spider/src/engine/runtime.rs` | Component lifecycle, startup settings, and Actor assembly |
 | `spider/src/engine/worker.rs` | Ack, lease maintenance, and final settlement for one Request |
 | `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse path |
@@ -527,6 +549,9 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/engine/rules/executor/bind.rs` | Evaluate ordered bind pipelines, transforms, and templates |
 | `spider/src/engine/rules/executor/condition.rs` | Evaluate one edge condition |
 | `spider/src/engine/rules/executor/build.rs` | Construct Request and Item values from an enabled edge |
+| `spider/src/middleware/registry.rs` | Register and resolve Middleware implementations and Specs only |
+| `spider/src/downloader/http.rs` | Execute HTTP requests, redirects, headers, cookies, and response conversion |
+| `spider/src/downloader/http/pool.rs` | Key, reuse, expire, and close proxy/TLS-specific HTTP clients |
 | `spider/src/scheduler/contract.rs` | Public Scheduler contract |
 | `spider/src/scheduler/init.rs` | Run-seed initialization contract |
 | `spider/src/scheduler/memory.rs` | Public Memory implementation and submodule composition |

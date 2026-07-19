@@ -218,7 +218,12 @@ fn request_fingerprints(
 
     rules
         .iter()
-        .map(|(rule_name, rule)| {
+        .filter_map(|(rule_name, rule)| match parse_ttl(rule) {
+            Ok(Some(ttl)) if ttl.is_zero() => None,
+            result => Some((rule_name, rule, result)),
+        })
+        .map(|(rule_name, rule, ttl)| {
+            let ttl = ttl?;
             let paths = rule
                 .get("key")
                 .and_then(serde_json::Value::as_array)
@@ -236,7 +241,6 @@ fn request_fingerprints(
                     request_value(request, path, rule.get("normalize"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let ttl = parse_ttl(rule)?;
             let digest = fingerprint(&(
                 request.task_id.as_str(),
                 spec.key.as_deref(),
@@ -597,5 +601,63 @@ mod tests {
             ));
         }
         assert!(dedup.store().fingerprints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn zero_ttl_ignores_existing_fingerprint_without_disabling_other_rules() {
+        let dedup = Dedup::default();
+        let disabled = Spec::new("dedup").args(serde_json::json!({
+            "rules": {
+                "disabled": {
+                    "key": ["$request.url"]
+                }
+            }
+        }));
+        let mixed = Spec::new("dedup").args(serde_json::json!({
+            "rules": {
+                "disabled": {
+                    "key": ["$request.url"],
+                    "ttl": 0
+                },
+                "category": {
+                    "key": ["$vals.category"]
+                }
+            }
+        }));
+
+        let first = Request::follow("https://example.com/a").unwrap();
+        assert!(matches!(
+            dedup.before_scheduler(first, &disabled).await.unwrap(),
+            Next::Continue(_)
+        ));
+
+        let with_category = |category: &str| {
+            Request::follow("https://example.com/a")
+                .unwrap()
+                .vals("category", category)
+        };
+        assert!(matches!(
+            dedup
+                .before_scheduler(with_category("books"), &mixed)
+                .await
+                .unwrap(),
+            Next::Continue(_)
+        ));
+        assert!(matches!(
+            dedup
+                .before_scheduler(with_category("books"), &mixed)
+                .await
+                .unwrap(),
+            Next::Skip
+        ));
+        assert!(matches!(
+            dedup
+                .before_scheduler(with_category("music"), &mixed)
+                .await
+                .unwrap(),
+            Next::Continue(_)
+        ));
+
+        assert_eq!(dedup.store().fingerprints.len(), 3);
     }
 }

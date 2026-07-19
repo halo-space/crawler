@@ -21,6 +21,7 @@ pub struct Builder<S, D, F> {
     pub(super) spider_factory: F,
     pub(super) config: config::Config,
     pub(super) registry: middleware::Registry,
+    pub(super) schemas: Arc<crate::item::schema::Store>,
     pub(super) middlewares: Vec<middleware::Spec>,
 }
 
@@ -32,6 +33,7 @@ impl<S, D, F> Builder<S, D, F> {
             spider_factory,
             config: self.config,
             registry: self.registry,
+            schemas: self.schemas,
             middlewares: self.middlewares,
         }
     }
@@ -43,6 +45,7 @@ impl<S, D, F> Builder<S, D, F> {
             spider_factory: self.spider_factory,
             config: self.config,
             registry: self.registry,
+            schemas: self.schemas,
             middlewares: self.middlewares,
         }
     }
@@ -54,6 +57,7 @@ impl<S, D, F> Builder<S, D, F> {
             spider_factory: self.spider_factory,
             config: self.config,
             registry: self.registry,
+            schemas: self.schemas,
             middlewares: self.middlewares,
         }
     }
@@ -84,7 +88,7 @@ where
         let spider = self.spider_factory.build(tx);
         validate_item_functions(&spider, &self.config);
         let config = Arc::new(self.config);
-        let schemas = self.registry.schemas();
+        let schemas = self.schemas;
         let executor = super::executor::Executor::new(Arc::new(spider), schemas.clone());
         let trace_id = config.next_trace_id();
 

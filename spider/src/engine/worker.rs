@@ -1,4 +1,8 @@
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+
+use futures_util::FutureExt;
 
 use crate::{downloader, engine, middleware, payload, scheduler, stats};
 
@@ -31,8 +35,16 @@ where
     let stats = Arc::new(stats::Delta::default());
     stats.total(request.node_key(), 1);
     let execution = async {
-        let result =
-            engine::request::execute(&request, downloader, executor, registry, stats.clone()).await;
+        let result = AssertUnwindSafe(engine::request::execute(
+            &request,
+            downloader,
+            executor,
+            registry,
+            stats.clone(),
+        ))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|panic| Err(crate::Error::message(panic_message(panic))));
 
         let mut payload = payload::Payload::for_request(&request, request.leased_by.clone());
         payload.start_time = Some(start_time);
@@ -51,6 +63,16 @@ where
         }
     };
     engine::lease::run(scheduler.as_ref(), &request, execution).await
+}
+
+fn panic_message(panic: Box<dyn Any + Send>) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        format!("request execution panicked: {message}")
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        format!("request execution panicked: {message}")
+    } else {
+        "request execution panicked".to_string()
+    }
 }
 
 async fn retry_success<S: scheduler::Scheduler>(
@@ -99,4 +121,79 @@ where
         }
     }
     unreachable!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::Scheduler;
+
+    struct PanickingDownload;
+
+    impl downloader::Download for PanickingDownload {
+        async fn open(&self) -> Result<(), downloader::Error> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), downloader::Error> {
+            Ok(())
+        }
+
+        async fn fetch(
+            &self,
+            _request: crate::net::Request,
+        ) -> Result<crate::net::Response, downloader::Error> {
+            panic!("download exploded")
+        }
+    }
+
+    struct Executor;
+
+    impl engine::contract::Execute for Executor {
+        async fn allowed_domains(&self, _request: &crate::net::Request) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn validate(&self, _request: &crate::net::Request) -> Result<(), crate::Error> {
+            Ok(())
+        }
+
+        async fn parse(
+            &self,
+            _request: crate::net::Request,
+            _response: crate::net::Response,
+        ) -> Result<(), crate::Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn request_panic_is_settled_as_failure() {
+        let scheduler = Arc::new(scheduler::Memory::new("worker-1"));
+        let request = crate::net::Request::follow("https://example.com").unwrap();
+        scheduler
+            .push(payload::Payload::new().requests(vec![request]))
+            .await
+            .unwrap();
+        let request = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+
+        run(
+            request,
+            scheduler.clone(),
+            Arc::new(PanickingDownload),
+            Arc::new(Executor),
+            Arc::new(middleware::Registry::new()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(scheduler.processing_len(), 0);
+        assert_eq!(scheduler.failed_len(), 1);
+        assert!(
+            scheduler
+                .errors()
+                .iter()
+                .any(|error| error.contains("request execution panicked: download exploded"))
+        );
+    }
 }

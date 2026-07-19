@@ -1,204 +1,22 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::{downloader, net};
 
+mod pool;
+
+use pool::Clients;
+
 const MAX_REDIRECTS: usize = 10;
-const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct Key {
-    proxy: Option<String>,
-    accept_invalid_certs: bool,
-}
-
-impl From<&net::Request> for Key {
-    fn from(request: &net::Request) -> Self {
-        Self {
-            proxy: request.proxy.as_ref().map(|proxy| proxy.url.clone()),
-            accept_invalid_certs: request
-                .tls
-                .as_ref()
-                .is_some_and(|tls| tls.accept_invalid_certs),
-        }
-    }
-}
-
-struct Client {
-    inner: reqwest::Client,
-    state: Mutex<State>,
-}
-
-impl Client {
-    fn new(inner: reqwest::Client) -> Self {
-        Self {
-            inner,
-            state: Mutex::new(State::default()),
-        }
-    }
-
-    fn expired(&self, now: Instant) -> bool {
-        let state = self.state();
-        state.active == 0
-            && state
-                .idle_since
-                .and_then(|idle_since| now.checked_duration_since(idle_since))
-                .is_some_and(|idle| idle >= IDLE_TIMEOUT)
-    }
-
-    fn checkout(self: &Arc<Self>) -> Handle {
-        let mut state = self.state();
-        state.active = state
-            .active
-            .checked_add(1)
-            .expect("active HTTP client count overflow");
-        state.idle_since = None;
-        drop(state);
-        Handle {
-            client: Arc::clone(self),
-        }
-    }
-
-    fn release(&self) {
-        let mut state = self.state();
-        debug_assert!(state.active > 0, "released an inactive HTTP client");
-        if state.active == 0 {
-            return;
-        }
-        state.active -= 1;
-        if state.active == 0 {
-            state.idle_since = Some(Instant::now());
-        }
-    }
-
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
 
 #[derive(Default)]
-struct State {
-    active: usize,
-    idle_since: Option<Instant>,
-}
-
-struct Handle {
-    client: Arc<Client>,
-}
-
-impl Deref for Handle {
-    type Target = reqwest::Client;
-
-    fn deref(&self) -> &Self::Target {
-        &self.client.inner
-    }
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        self.client.release();
-    }
-}
-
-struct Pool {
-    clients: HashMap<Key, Arc<Client>>,
-    next_cleanup: Instant,
-    generation: u64,
-}
-
-impl Pool {
-    fn new(now: Instant) -> Self {
-        Self {
-            clients: HashMap::new(),
-            next_cleanup: next_cleanup(now),
-            generation: 0,
-        }
-    }
-
-    fn checkout(&mut self, key: &Key, now: Instant) -> Option<Handle> {
-        self.cleanup(now);
-        self.clients.get(key).map(Client::checkout)
-    }
-
-    fn checkout_or_insert(
-        &mut self,
-        key: Key,
-        client: Arc<Client>,
-        generation: u64,
-        now: Instant,
-    ) -> Handle {
-        self.cleanup(now);
-        if self.generation != generation {
-            return client.checkout();
-        }
-        self.clients.entry(key).or_insert(client).checkout()
-    }
-
-    fn cleanup(&mut self, now: Instant) {
-        if now < self.next_cleanup {
-            return;
-        }
-        self.clients.retain(|_, client| !client.expired(now));
-        self.next_cleanup = next_cleanup(now);
-    }
-
-    fn clear(&mut self, now: Instant) {
-        self.clients.clear();
-        self.next_cleanup = next_cleanup(now);
-        self.generation = self.generation.wrapping_add(1);
-    }
-}
-
-fn next_cleanup(now: Instant) -> Instant {
-    now.checked_add(IDLE_TIMEOUT).unwrap_or(now)
-}
-
 pub struct Http {
-    pool: Mutex<Pool>,
+    clients: Clients,
 }
 
 impl Http {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    fn client(&self, request: &net::Request) -> Result<Handle, downloader::Error> {
-        self.client_at(request, Instant::now())
-    }
-
-    fn client_at(&self, request: &net::Request, now: Instant) -> Result<Handle, downloader::Error> {
-        let key = Key::from(request);
-        let generation = {
-            let mut pool = self.pool();
-            if let Some(client) = pool.checkout(&key, now) {
-                return Ok(client);
-            }
-            pool.generation
-        };
-
-        // Build outside the pool lock so unrelated proxies do not block; duplicate cold builds
-        // are merged by the second lookup instead of using singleflight.
-        let client = Arc::new(Client::new(build_client(&key)?));
-        Ok(self.pool().checkout_or_insert(key, client, generation, now))
-    }
-
-    fn pool(&self) -> MutexGuard<'_, Pool> {
-        self.pool
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-impl Default for Http {
-    fn default() -> Self {
-        Self {
-            pool: Mutex::new(Pool::new(Instant::now())),
-        }
     }
 }
 
@@ -208,12 +26,12 @@ impl downloader::Download for Http {
     }
 
     async fn close(&self) -> Result<(), downloader::Error> {
-        self.pool().clear(Instant::now());
+        self.clients.clear();
         Ok(())
     }
 
     async fn fetch(&self, mut request: net::Request) -> Result<net::Response, downloader::Error> {
-        let client = self.client(&request)?;
+        let client = self.clients.get(&request)?;
         let mut url = url::Url::parse(&request.url)
             .map_err(|error| downloader::Error::InvalidRedirect(error.to_string()))?;
         let mut method = reqwest::Method::from(&request.method);
@@ -293,20 +111,6 @@ impl downloader::Download for Http {
             body,
         })
     }
-}
-
-fn build_client(key: &Key) -> Result<reqwest::Client, downloader::Error> {
-    let mut builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .pool_idle_timeout(IDLE_TIMEOUT);
-
-    if let Some(proxy) = &key.proxy {
-        builder = builder.proxy(reqwest::Proxy::all(proxy)?);
-    }
-
-    builder = builder.danger_accept_invalid_certs(key.accept_invalid_certs);
-
-    Ok(builder.build()?)
 }
 
 fn request_headers(
@@ -401,7 +205,7 @@ fn to_header_map(headers: &net::Headers) -> Result<HeaderMap, downloader::Error>
 mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{Barrier, mpsc};
+    use std::sync::{Arc, mpsc};
     use std::thread;
 
     use super::*;
@@ -703,8 +507,8 @@ mod tests {
         let admin = through_proxy("http://two.invalid/", &admin_proxy);
         let http = Http::new();
 
-        let user_client = http.client(&user).unwrap();
-        let admin_client = http.client(&admin).unwrap();
+        let user_client = http.clients.get(&user).unwrap();
+        let admin_client = http.clients.get(&admin).unwrap();
         assert!(!Arc::ptr_eq(&user_client.client, &admin_client.client));
         drop(user_client);
         drop(admin_client);
@@ -794,164 +598,5 @@ mod tests {
         assert_eq!(header(&second, "cookie"), None);
         assert_eq!(response.url, redirected);
         assert_eq!(response.redirects, [redirected]);
-    }
-
-    fn proxied(url: &str) -> net::Request {
-        let mut request = net::Request::follow("https://example.com").unwrap();
-        request.proxy = Some(net::ProxyConfig {
-            url: url.to_string(),
-        });
-        request
-    }
-
-    #[test]
-    fn reuses_the_same_key_and_isolates_different_proxies() {
-        let http = Http::new();
-        let request = proxied("http://127.0.0.1:8080");
-        let other = proxied("http://127.0.0.1:8081");
-
-        let first = http.client(&request).unwrap();
-        let second = http.client(&request).unwrap();
-        let other = http.client(&other).unwrap();
-
-        assert!(Arc::ptr_eq(&first.client, &second.client));
-        assert!(!Arc::ptr_eq(&first.client, &other.client));
-        assert_eq!(http.pool().clients.len(), 2);
-    }
-
-    #[test]
-    fn active_client_survives_cleanup_after_the_idle_timeout() {
-        let http = Http::new();
-        let request = proxied("http://127.0.0.1:8080");
-        let now = Instant::now();
-
-        let first = http.client_at(&request, now).unwrap();
-        let second = http.client_at(&request, now + IDLE_TIMEOUT).unwrap();
-
-        assert!(Arc::ptr_eq(&first.client, &second.client));
-        assert_eq!(http.pool().clients.len(), 1);
-        assert_eq!(first.client.state().active, 2);
-    }
-
-    #[test]
-    fn released_client_is_replaced_after_it_expires() {
-        let http = Http::new();
-        let request = proxied("http://127.0.0.1:8080");
-        let trigger = proxied("http://127.0.0.1:8081");
-        let now = Instant::now();
-        let handle = http.client_at(&request, now).unwrap();
-        let expired = Arc::clone(&handle.client);
-
-        drop(handle);
-        assert_eq!(expired.state().active, 0);
-        let idle_since = expired.state().idle_since.unwrap();
-
-        let cleanup = idle_since + IDLE_TIMEOUT;
-        let _trigger = http.client_at(&trigger, cleanup).unwrap();
-        assert!(!http.pool().clients.contains_key(&Key::from(&request)));
-
-        let replacement = http.client_at(&request, cleanup).unwrap();
-        assert!(!Arc::ptr_eq(&expired, &replacement.client));
-    }
-
-    #[tokio::test]
-    async fn close_clears_the_pool_without_invalidating_checked_out_clients() {
-        let http = Http::new();
-        let request = proxied("http://127.0.0.1:8080");
-        let client = http.client(&request).unwrap();
-        assert_eq!(http.pool().clients.len(), 1);
-
-        http.close().await.unwrap();
-
-        assert!(http.pool().clients.is_empty());
-        assert!(client.get("https://example.com").build().is_ok());
-
-        let replacement = http.client(&request).unwrap();
-        assert!(!Arc::ptr_eq(&client.client, &replacement.client));
-        drop(client);
-        assert_eq!(replacement.client.state().active, 1);
-    }
-
-    #[tokio::test]
-    async fn stale_build_after_close_is_not_inserted_into_the_new_generation() {
-        let http = Http::new();
-        let request = proxied("http://127.0.0.1:8080");
-        let key = Key::from(&request);
-        let now = Instant::now();
-        let generation = {
-            let mut pool = http.pool();
-            assert!(pool.checkout(&key, now).is_none());
-            pool.generation
-        };
-        let stale = Arc::new(Client::new(build_client(&key).unwrap()));
-
-        http.close().await.unwrap();
-        let handle =
-            http.pool()
-                .checkout_or_insert(key.clone(), Arc::clone(&stale), generation, now);
-
-        assert!(Arc::ptr_eq(&handle.client, &stale));
-        assert!(http.pool().clients.is_empty());
-        assert!(handle.get("https://example.com").build().is_ok());
-
-        let current = http.client(&request).unwrap();
-        assert!(!Arc::ptr_eq(&handle.client, &current.client));
-        drop(handle);
-        assert_eq!(current.client.state().active, 1);
-        assert!(Arc::ptr_eq(
-            http.pool().clients.get(&key).unwrap(),
-            &current.client
-        ));
-    }
-
-    #[test]
-    fn proxy_and_tls_are_both_part_of_the_key() {
-        let http = Http::new();
-        let request = proxied("http://127.0.0.1:8080");
-        let other_proxy = proxied("http://127.0.0.1:8081");
-        let mut insecure = request.clone();
-        insecure.tls = Some(net::TlsConfig {
-            accept_invalid_certs: true,
-        });
-
-        let client = http.client(&request).unwrap();
-        let proxy = http.client(&other_proxy).unwrap();
-        let tls = http.client(&insecure).unwrap();
-
-        assert!(!Arc::ptr_eq(&client.client, &proxy.client));
-        assert!(!Arc::ptr_eq(&client.client, &tls.client));
-        assert!(!Arc::ptr_eq(&proxy.client, &tls.client));
-        assert_eq!(http.pool().clients.len(), 3);
-    }
-
-    #[test]
-    fn concurrent_checkout_of_the_same_key_uses_one_client() {
-        const WORKERS: usize = 16;
-
-        let http = Arc::new(Http::new());
-        let barrier = Arc::new(Barrier::new(WORKERS));
-        let threads = (0..WORKERS)
-            .map(|_| {
-                let http = Arc::clone(&http);
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    let request = proxied("http://127.0.0.1:8080");
-                    barrier.wait();
-                    http.client(&request).unwrap()
-                })
-            })
-            .collect::<Vec<_>>();
-        let clients = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>();
-
-        assert_eq!(http.pool().clients.len(), 1);
-        assert!(
-            clients
-                .iter()
-                .skip(1)
-                .all(|client| Arc::ptr_eq(&clients[0].client, &client.client))
-        );
     }
 }
