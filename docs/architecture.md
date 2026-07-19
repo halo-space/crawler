@@ -380,7 +380,9 @@ domain policy only; they never fill transport fields after a Request has been cr
 stable, writes a reserved one-based `vals.idx` before transport templates render, and resets the index for each
 new expansion.
 
-Rules does not compile into a second Request or Item model. It builds the Spider's associated Rust Item through
+Rules does not compile into a second Request or Item model. Parse/bind provides each base field and only a
+non-empty Item-edge `vals` result overrides it; null, empty strings, arrays, and objects preserve the base while
+zero and false remain valid overrides. Rules then builds the Spider's associated Rust Item through the derived
 `Item::from_values`, assigns the current `SchemaKey`, and invokes the default `item` function or the edge's
 configured `fn`. The business function submits with `Tx.item`, so Middleware and persistence remain shared.
 
@@ -485,8 +487,9 @@ Tx.item
 -> on exhaustion call error_item and fail the current Request
 ```
 
-Every concrete Item owns one non-serialized `item::State` and implements `state / state_mut` plus the mandatory
-`Item::from_values` Rules construction boundary; code-mode Items can continue using normal Rust constructors.
+Every concrete Item owns one explicit `#[serde(skip)] item::State`, rejects unknown serde fields, and derives
+`serde::Serialize`, `serde::Deserialize`, and `macros::Item`. The Item derive generates `state / state_mut` and
+the mandatory `Item::from_values` Rules construction boundary; code-mode Items continue using normal Rust constructors.
 Additional Rules Item functions are explicitly marked with `#[item]`, and local Builder assembly rejects a missing
 function before runtime initialization. The Schema Store computes a stable SHA-256 key from the canonicalized schema, caches a
 `validator::Validator`, and validates the serialized Item. Item ID is outside the schema and does not participate

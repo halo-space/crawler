@@ -22,40 +22,12 @@ impl RulesSpider {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize, macros::Item)]
+#[serde(deny_unknown_fields)]
 struct RulesItem {
     title: String,
     #[serde(skip)]
     state: spider::item::State,
-}
-
-impl Item for RulesItem {
-    fn from_values(mut values: spider::item::Values) -> Result<Self, spider::item::Error> {
-        let title = values
-            .shift_remove("title")
-            .and_then(|value| value.as_str().map(str::to_string))
-            .ok_or_else(|| spider::item::Error::Message("title must be a string".to_string()))?;
-        Ok(Self {
-            title,
-            state: spider::item::State::default(),
-        })
-    }
-
-    fn state(&self) -> &spider::item::State {
-        &self.state
-    }
-
-    fn state_mut(&mut self) -> &mut spider::item::State {
-        &mut self.state
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }
 
 #[macros::spider]
@@ -1782,14 +1754,6 @@ impl Item for TestItem {
 
     fn state_mut(&mut self) -> &mut spider::item::State {
         &mut self.state
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 
     fn middlewares(&self) -> &[spider::middleware::Spec] {

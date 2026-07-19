@@ -346,6 +346,102 @@ graph:
         assert!(!requests[0].vals.contains_key("idx"));
     }
 
+    #[test]
+    fn empty_item_vals_preserve_parsed_and_bound_values() {
+        let config = serde_json::from_value::<crate::item::Config>(serde_json::json!({
+            "schema": {
+                "fields": {
+                    "null_value": {},
+                    "empty_string": {},
+                    "empty_array": {},
+                    "empty_object": {},
+                    "from_field": {}
+                }
+            }
+        }))
+        .unwrap();
+        let edge = serde_json::from_value::<crate::graph::edge::Spec>(serde_json::json!({
+            "from": "detail",
+            "kind": "item",
+            "vals": {
+                "null_value": null,
+                "empty_string": "",
+                "empty_array": [],
+                "empty_object": {}
+            }
+        }))
+        .unwrap();
+        let request = net::Request::follow("https://example.com/books").unwrap();
+        let response = response("");
+        let fields = IndexMap::from([
+            ("null_value".to_string(), Value::from("parsed-null")),
+            ("empty_string".to_string(), Value::from("parsed-string")),
+            ("empty_array".to_string(), Value::from("parsed-array")),
+            ("empty_object".to_string(), Value::from("parsed-object")),
+            ("from_field".to_string(), Value::from("parsed-field")),
+        ]);
+        let bind = IndexMap::from([
+            ("null_value".to_string(), Value::from("bound-null")),
+            ("empty_string".to_string(), Value::from("bound-string")),
+            ("empty_array".to_string(), Value::from("bound-array")),
+            ("empty_object".to_string(), Value::from("bound-object")),
+        ]);
+        let context = Context {
+            request: &request,
+            response: &response,
+            fields: &fields,
+            bind: &bind,
+        };
+
+        let values = build::item(&config, &edge, &context).unwrap();
+
+        assert_eq!(values["null_value"], Value::from("bound-null"));
+        assert_eq!(values["empty_string"], Value::from("bound-string"));
+        assert_eq!(values["empty_array"], Value::from("bound-array"));
+        assert_eq!(values["empty_object"], Value::from("bound-object"));
+        assert_eq!(values["from_field"], Value::from("parsed-field"));
+    }
+
+    #[test]
+    fn zero_and_false_item_vals_override_base_values() {
+        let config = serde_json::from_value::<crate::item::Config>(serde_json::json!({
+            "schema": {
+                "fields": {
+                    "count": {},
+                    "enabled": {}
+                }
+            }
+        }))
+        .unwrap();
+        let edge = serde_json::from_value::<crate::graph::edge::Spec>(serde_json::json!({
+            "from": "detail",
+            "kind": "item",
+            "vals": {
+                "count": 0,
+                "enabled": false
+            }
+        }))
+        .unwrap();
+        let request = net::Request::follow("https://example.com/books").unwrap();
+        let response = response("");
+        let fields = IndexMap::new();
+        let bind = IndexMap::from([
+            ("count".to_string(), Value::from(7)),
+            ("enabled".to_string(), Value::from(true)),
+        ]);
+        let context = Context {
+            request: &request,
+            response: &response,
+            fields: &fields,
+            bind: &bind,
+        };
+
+        let values = build::item(&config, &edge, &context).unwrap();
+
+        assert_eq!(values["count"], Value::from(0));
+        assert_eq!(values["enabled"], Value::from(false));
+    }
+
     #[tokio::test]
     async fn extractor_fallback_uses_the_first_non_empty_result() {
         let parse = serde_json::from_value::<crate::graph::rules::Parse>(serde_json::json!({

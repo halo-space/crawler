@@ -178,7 +178,6 @@ impl Writer {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use serde_json::Value;
@@ -221,14 +220,6 @@ mod tests {
 
         fn state_mut(&mut self) -> &mut crate::item::State {
             &mut self.state
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
         }
     }
 

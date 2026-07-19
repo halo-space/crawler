@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
-use spider::item::{Item, State, Values};
+use spider::item::State;
 use spider::{config, engine, net};
 
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize, macros::Item)]
+#[serde(deny_unknown_fields)]
 struct Article {
     title: String,
     content: String,
@@ -14,41 +15,6 @@ struct Article {
 }
 
 type ArticleItem = Article;
-
-impl Item for Article {
-    fn from_values(mut values: Values) -> Result<Self, spider::item::Error> {
-        Ok(Self {
-            title: string(&mut values, "title")?,
-            content: string(&mut values, "content")?,
-            url: string(&mut values, "url")?,
-            page_url: string(&mut values, "page_url")?,
-            state: State::default(),
-        })
-    }
-
-    fn state(&self) -> &State {
-        &self.state
-    }
-
-    fn state_mut(&mut self) -> &mut State {
-        &mut self.state
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-}
-
-fn string(values: &mut Values, name: &str) -> Result<String, spider::item::Error> {
-    values
-        .shift_remove(name)
-        .and_then(|value| value.as_str().map(str::to_string))
-        .ok_or_else(|| spider::item::Error::Message(format!("{name} must be a string")))
-}
 
 #[macros::spider]
 struct Newspaper;

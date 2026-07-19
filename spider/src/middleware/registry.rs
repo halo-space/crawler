@@ -295,7 +295,6 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -327,14 +326,6 @@ mod tests {
 
         fn state_mut(&mut self) -> &mut crate::item::State {
             &mut self.state
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
         }
 
         fn middlewares(&self) -> &[Spec] {

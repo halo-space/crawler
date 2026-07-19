@@ -169,8 +169,6 @@ impl Trace {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
-
     use kameo::actor::{Actor, ActorRef, Spawn};
     use kameo::message::{Context as ActorContext, Message};
     use kameo::reply::{DelegatedReply, ReplySender};
@@ -265,14 +263,6 @@ mod tests {
 
         fn state_mut(&mut self) -> &mut item::State {
             &mut self.state
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
         }
     }
 

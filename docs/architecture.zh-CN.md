@@ -374,9 +374,10 @@ Rust `index` 是每条 Rules Request 固定经过的共享业务代码入口。�
 策略，Request 创建后不再从目标 node 补 transport。URL 数组按稳定顺序展开，在 transport 模板渲染前
 写入从 `1` 开始的保留 `vals.idx`，每层新展开重新计数。
 
-Rules 不会编译成另一套 Request 或 Item 类型。它通过 `Item::from_values` 构造 Spider 关联的 Rust
-Item，注入当前 `SchemaKey`，再调用默认 `item` 或 edge `fn` 指定的函数。业务函数通过 `Tx.item`
-提交，因此 Middleware 和持久化链路完全共用。
+Rules 不会编译成另一套 Request 或 Item 类型。parse/bind 先提供基础字段，Item edge 的 `vals` 只有
+非空结果才覆盖同名值；null、空字符串、空数组和空对象保留基础值，`0` 与 `false` 仍是有效覆盖。
+随后通过 derive 生成的 `Item::from_values` 构造 Spider 关联的 Rust Item，注入当前 `SchemaKey`，
+再调用默认 `item` 或 edge `fn` 指定的函数。业务函数通过 `Tx.item` 提交，因此 Middleware 和持久化链路完全共用。
 
 字段 extractor 按声明顺序尝试。空结果继续下一个 extractor；最终结果按匹配数量折叠：
 
@@ -479,8 +480,9 @@ Tx.item
 -> 最终失败时 error_item，并使当前 Request 失败
 ```
 
-每个具体 Item 必须持有一份不参与序列化的 `item::State`，实现 `state / state_mut`，并实现强制的
-`Item::from_values` Rules 构造入口；代码模式 Item 仍可使用普通 Rust 构造函数。额外 Rules Item
+每个具体 Item 必须显式持有一份 `#[serde(skip)] item::State`，拒绝 serde 未知字段，并同时 derive
+`serde::Serialize`、`serde::Deserialize` 与 `macros::Item`。Item derive 生成 `state / state_mut` 和
+强制的 `Item::from_values` Rules 构造入口；代码模式 Item 仍可使用普通 Rust 构造函数。额外 Rules Item
 函数必须用 `#[item]` 显式注册，本地 Builder 在运行时初始化前拒绝缺失的函数。Schema Store 对
 规范化后的 schema 计算稳定 SHA-256 key、缓存 `validator::Validator`，再对序列化后的 Item 执行
 校验。Item ID 不进入 schema，也不参与业务去重。

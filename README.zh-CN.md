@@ -99,14 +99,16 @@ cargo run -p examples --bin rules
 
 `spider.start[*]` 和 request edge 使用同一套完整 Request Spec；Request 在入队前已经拥有 node、
 URL、transport、priority 和 vals。URL 数组展开会在模板渲染前写入从 `1` 开始的保留
-`vals.idx`。Rules 根据 `#[spider(item = Article)]` 关联的 Rust 类型调用 `Item::from_values`，注入
+`vals.idx`。Rules 先形成 parse/bind 基础字段，Item edge 的 `vals` 只有非空值才覆盖同名字段；随后
+根据 `#[spider(item = Article)]` 关联的 Rust 类型调用 derive 生成的 `Item::from_values`，注入
 SchemaKey，再调用默认 `item` 或 edge 的 `fn` 业务函数。规则模式与代码模式共用 Engine、
 Scheduler、Downloader、Middleware、Request、Response、Item 和 Payload，不维护第二套运行时模型。
 每条 Rules Request 都由统一 Executor 先调用 Rust Spider 的 `index(response.clone())` 业务入口，
 然后再根据 `Request.node` 解释对应 DSL node；这里不存在 Code/Rules Executor 替换。
-每个具体 Item 必须持有一份不参与序列化的 `item::State`，并实现强制的
-`from_values / state / state_mut` 合同。edge `fn` 引用的额外 Item 函数必须使用 `#[item]` 显式注册；
-本地 Rules 装配发现函数不存在时，会在运行时初始化前直接 panic。
+每个具体 Item 同时 derive `serde::Serialize`、`serde::Deserialize` 和 `macros::Item`，启用 serde
+未知字段拒绝，并显式持有一份 `#[serde(skip)] item::State`。Item derive 自动生成
+`from_values / state / state_mut`，业务代码不再手写这些适配函数。edge `fn` 引用的额外 Item 函数
+必须使用 `#[item]` 显式注册；本地 Rules 装配发现函数不存在时，会在运行时初始化前直接 panic。
 
 ## Item 与输出
 

@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -272,14 +271,6 @@ impl Item for TestItem {
 
     fn state_mut(&mut self) -> &mut spider::item::State {
         &mut self.state
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 
     fn middlewares(&self) -> &[Spec] {

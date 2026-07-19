@@ -118,14 +118,18 @@ pub(super) fn item(
     let mut fields = IndexMap::new();
     let schema_fields = config.schema_fields().map_err(crate::Error::Item)?;
     for name in schema_fields.keys() {
-        let value = edge
-            .vals
+        let mut value = context
+            .bind
             .get(name)
-            .map(|value_ref| value::resolve(value_ref, context))
-            .transpose()?
-            .or_else(|| context.bind.get(name).cloned())
+            .cloned()
             .or_else(|| context.fields.get(name).cloned())
             .unwrap_or(Value::Null);
+        if let Some(value_ref) = edge.vals.get(name) {
+            let replacement = value::resolve(value_ref, context)?;
+            if !value::is_empty(&replacement) {
+                value = replacement;
+            }
+        }
         let value = crate::item::media::normalize(value, config.kind(name), &context.response.url);
         fields.insert(name.clone(), value);
     }

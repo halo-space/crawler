@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::middleware;
 
-pub trait Item: erased_serde::Serialize + Send + Sync {
+pub trait Item: erased_serde::Serialize + Any + Send + Sync {
     fn from_values(values: crate::item::Values) -> Result<Self, crate::item::Error>
     where
         Self: Sized;
@@ -26,10 +26,6 @@ pub trait Item: erased_serde::Serialize + Send + Sync {
         self.state().schema()
     }
 
-    fn as_any(&self) -> &dyn Any;
-
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-
     fn vals(&self) -> &HashMap<String, Value> {
         self.state().vals()
     }
@@ -40,6 +36,22 @@ pub trait Item: erased_serde::Serialize + Send + Sync {
 
     fn middlewares(&self) -> &[middleware::Spec] {
         &[]
+    }
+}
+
+impl dyn Item {
+    pub fn downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: Any,
+    {
+        (self as &dyn Any).downcast_ref()
+    }
+
+    pub fn downcast_mut<T>(&mut self) -> Option<&mut T>
+    where
+        T: Any,
+    {
+        (self as &mut dyn Any).downcast_mut()
     }
 }
 

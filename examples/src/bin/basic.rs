@@ -1,5 +1,4 @@
-use spider::{Item, engine, net};
-use std::any::Any;
+use spider::{engine, net};
 
 #[macros::spider]
 struct BasicSpider;
@@ -27,7 +26,8 @@ impl BasicSpider {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize, macros::Item)]
+#[serde(deny_unknown_fields)]
 struct BasicItem {
     title: String,
     #[serde(skip)]
@@ -40,32 +40,6 @@ impl BasicItem {
             title,
             state: spider::item::State::default(),
         }
-    }
-}
-
-impl Item for BasicItem {
-    fn from_values(mut values: spider::item::Values) -> Result<Self, spider::item::Error> {
-        let title = values
-            .shift_remove("title")
-            .and_then(|value| value.as_str().map(str::to_string))
-            .ok_or_else(|| spider::item::Error::Message("title must be a string".to_string()))?;
-        Ok(Self::new(title))
-    }
-
-    fn state(&self) -> &spider::item::State {
-        &self.state
-    }
-
-    fn state_mut(&mut self) -> &mut spider::item::State {
-        &mut self.state
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }
 

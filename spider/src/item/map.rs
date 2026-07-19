@@ -1,7 +1,6 @@
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
-use std::any::Any;
 
 use crate::{item, middleware};
 
@@ -45,13 +44,6 @@ impl item::Item for Map {
 
     fn state_mut(&mut self) -> &mut item::State {
         &mut self.state
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 
     fn middlewares(&self) -> &[middleware::Spec] {

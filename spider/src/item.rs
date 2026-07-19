@@ -17,3 +17,12 @@ pub use schema::SchemaKey;
 pub use state::State;
 
 pub type Values = indexmap::IndexMap<String, serde_json::Value>;
+
+#[doc(hidden)]
+pub fn deserialize<T>(values: Values) -> Result<T, Error>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::Object(values.into_iter().collect());
+    serde_json::from_value(value).map_err(Error::Deserialize)
+}

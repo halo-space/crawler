@@ -76,15 +76,17 @@ let mut engine = engine::Engine::new()
 
 `spider.start[*]` and request edges use one complete Request Spec. Requests have their node, URL,
 transport, priority, and vals before entering Tx or Scheduler. URL-array expansion writes a reserved
-one-based `vals.idx` before transport templates render. Rules constructs the Spider's Rust Item via
-`Item::from_values`, assigns its SchemaKey, and calls the default `item` function or the edge's `fn`.
+one-based `vals.idx` before transport templates render. Rules composes parse/bind fields first; only a
+non-empty Item-edge `vals` value overrides the same field. It then constructs the Spider's Rust Item via
+the derived `Item::from_values`, assigns its SchemaKey, and calls the default `item` function or the edge's `fn`.
 For every Rules Request, the shared Executor first calls the Rust Spider's `index(response.clone())`
 business entry and then interprets the DSL node selected by `Request.node`; this is one Executor path,
 not a Code/Rules Executor swap.
-Every concrete Item owns one non-serialized `item::State` and implements the mandatory
-`from_values / state / state_mut` contract. Additional Item functions referenced by edge `fn` are
-marked with `#[item]`; local Rules assembly panics before runtime initialization when a referenced
-function is not registered.
+Every concrete Item derives `serde::Serialize`, `serde::Deserialize`, and `macros::Item`, rejects unknown
+serde fields, and explicitly owns one `#[serde(skip)] item::State`. The Item derive generates
+`from_values / state / state_mut`; business code does not write those adapter methods. Additional Item
+functions referenced by edge `fn` are marked with `#[item]`; local Rules assembly panics before runtime
+initialization when a referenced function is not registered.
 The complete executable example is in [examples/src/bin/rules.rs](examples/src/bin/rules.rs).
 
 The default Memory Scheduler writes one JSON value per line below

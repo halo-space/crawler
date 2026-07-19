@@ -201,8 +201,6 @@ fn request_url_is_valid(request: &Request) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
-
     use serde_json::Value;
 
     use super::*;
@@ -230,14 +228,6 @@ mod tests {
 
         fn state_mut(&mut self) -> &mut crate::item::State {
             &mut self.state
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
         }
     }
 

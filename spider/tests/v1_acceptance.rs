@@ -1,48 +1,19 @@
-use std::any::Any;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
-use spider::{Item, engine, net};
+use spider::{engine, net};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize, macros::Item)]
+#[serde(deny_unknown_fields)]
 struct Book {
     #[serde(skip)]
     state: spider::item::State,
     title: String,
-}
-
-impl Item for Book {
-    fn from_values(mut values: spider::item::Values) -> Result<Self, spider::item::Error> {
-        let title = values
-            .shift_remove("title")
-            .and_then(|value| value.as_str().map(str::to_string))
-            .ok_or_else(|| spider::item::Error::Message("title must be a string".to_string()))?;
-        Ok(Self {
-            state: spider::item::State::default(),
-            title,
-        })
-    }
-
-    fn state(&self) -> &spider::item::State {
-        &self.state
-    }
-
-    fn state_mut(&mut self) -> &mut spider::item::State {
-        &mut self.state
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
 }
 
 #[macros::spider]
