@@ -3,6 +3,7 @@ pub use crate::error::config::Error;
 mod validate;
 
 use std::collections::HashMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,13 +12,25 @@ use crate::graph;
 use crate::net::Request;
 use crate::spider;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub spider: spider::Config,
     pub graph: graph::Config,
     #[serde(default)]
     pub item: Option<crate::item::Config>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("spider", &self.spider.name)
+            .field("nodes", &self.graph.nodes.len())
+            .field("edges", &self.graph.edges.len())
+            .field("has_item", &self.item.is_some())
+            .finish()
+    }
 }
 
 impl Config {
@@ -132,6 +145,7 @@ spider:
       download_mode: http
       method: POST
       timeout: 30000
+      max_body_bytes: 1048576
       dont_filter: true
       headers:
         Accept: text/html
@@ -289,9 +303,15 @@ graph:
         assert_eq!(request.priority, 7);
         assert_eq!(request.method, Method::Post);
         assert_eq!(request.timeout, Some(30_000));
+        assert_eq!(request.max_body_bytes, Some(1_048_576));
         assert!(request.dont_filter);
-        assert_eq!(request.headers["Accept"], "text/html");
-        assert_eq!(request.cookies["region"], "cn");
+        assert_eq!(request.headers.get("Accept").unwrap(), "text/html");
+        assert_eq!(
+            request
+                .cookies
+                .get(&url::Url::parse(&request.url).unwrap(), "region"),
+            Some("cn")
+        );
         assert!(matches!(request.body, Body::Json(_)));
     }
 
@@ -395,8 +415,16 @@ graph:
 
         let requests = config.initial_requests("task-1", "trace-1", vals).unwrap();
 
-        assert_eq!(requests[0].headers["Accept"], "application/json");
-        assert_eq!(requests[0].cookies["region"], "cn");
+        assert_eq!(
+            requests[0].headers.get("Accept").unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            requests[0]
+                .cookies
+                .get(&url::Url::parse(&requests[0].url).unwrap(), "region"),
+            Some("cn")
+        );
         let Body::Json(body) = &requests[0].body else {
             panic!("expected a JSON body");
         };

@@ -153,12 +153,33 @@ URL 归一化只按 query key 稳定排序，同名 key 的原始顺序不变。
 `-1` 表示进程生命周期内永久保留，某条规则配置 `0` 时既不查询也不保存该规则的指纹。
 
 HTTP Downloader 按 Request 应用 proxy 和 TLS 配置。只有 proxy URL 与
-`accept_invalid_certs` 完全相同的请求才复用 Client；Client 空闲 90 秒后惰性清理，`Http::close()`
-清空整个池。直连请求、不同代理凭据和不同 TLS 行为不会共用同一 Client 条目。同源 redirect 会把
-中间响应的 Cookie 带到下一跳；跨源 follow 和 redirect 均不继承 Request headers/cookies。
+`accept_invalid_certs` 完全相同的请求才复用 Client；默认最多保留 64 个空闲 Client，
+空闲 90 秒后惰性过期。容量压力下淘汰最早空闲的 Client，正在使用的 Client 不会被淘汰，
+因此可以暂时超过该上限。`Http::with_max_idle_clients` 在 Worker 启动时替换默认值，
+`Http::close()` 清空整个池。直连请求、不同代理凭据和不同 TLS 行为不会共用同一 Client 条目。
 
-v3 的响应文本合同保持 `Response.body` 为下载得到的原始 bytes，并把字符解码统一放在
-`Response::text()`。编码优先级固定为 BOM、合法的 `Content-Type` charset、HTML 或缺失 MIME 时前
+每个 Worker 默认最多接收 64 MiB 解码后响应体。`Http::with_max_body_bytes` 可以替换这个硬上限；
+代码或 Rules 中的 `Request.max_body_bytes` 只能选择小于或等于 Worker 上限的正数值，超过时在网络 I/O
+前失败。Downloader 按解码后 chunk 读取且不预分配上限大小，但成功结果仍是一个有界的
+`Response.body: Bytes`；本合同不增加公开 stream 或文件写入 API。`Request.timeout` 覆盖连接、
+所有 redirect 和最终 body 读取的一次完整下载；redirect 不重置超时，每次新的下载重试从零开始新预算。
+
+`Headers` 直接包装标准 `http::HeaderMap`，保留大小写不敏感的名称、响应原始值和重复字段。
+`set` 替换该名称的所有值，`append` 追加新值；Rules 输入仍是单值 map。Request Snapshot
+把规范化名称序列化为值数组，不可表示为字符串的 Request header 值在 Snapshot 边界被拒绝。
+
+每条 Request 都携带可序列化的 CookieStore 快照。Downloader 在解析前按标准 Domain、Path、Secure、
+Max-Age 和 Expires 规则应用所有响应 Cookie，后代 Request 通过 Snapshot 和 Scheduler 恢复继承这条谱系。
+已入队的并行兄弟各自保留独立快照，后续 Cookie 变更不会反向修改它。跨源 follow 或 redirect 会移除
+源站 headers，并把 CookieStore 缩减为目标 URL 可用的 Cookie，无关凭据不会进入目标 Request Snapshot。
+跨站 Public Suffix Domain 会被拒绝；与当前 Request host 完全相同的 Public Suffix 会规范化为
+HostOnly。原始 `Cookie` header 不作为第二套会话来源，代码与 Rules 必须使用 Request cookie API。
+
+每个 `rate_limit` group 在活跃期间固定一个 interval，同组使用冲突 QPS 会返回非法配置错误。
+只有当该 group 无持有者且下一次允许时间已过，后续查找才会惰性清理它。
+
+v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符转码前的 Downloader 交付 bytes，
+并把字符解码统一放在 `Response::text()`。编码优先级固定为 BOM、合法的 `Content-Type` charset、HTML 或缺失 MIME 时前
 1024 bytes 内的 HTML meta，最后回退 UTF-8。非法字节使用 Unicode replacement 语义，运行时不做
 统计字符集猜测；`Response::json<T>()` 复用同一条文本解码路径。
 

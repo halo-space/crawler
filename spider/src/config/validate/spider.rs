@@ -115,7 +115,7 @@ fn check_start_url(reference: &graph::rules::ValueRef) -> Result<(), config::Err
         (Some(path), None) => check_vals_path(path),
         (None, Some(serde_json::Value::String(url))) if !url.is_empty() => {
             net::Request::follow(url).map_err(|error| {
-                config::Error::Message(format!("invalid spider.start URL {url}: {error}"))
+                config::Error::Message(format!("invalid spider.start URL: {error}"))
             })?;
             Ok(())
         }

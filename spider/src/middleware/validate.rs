@@ -46,8 +46,9 @@ impl Middleware for Validate {
         Box::pin(async move {
             if !request_url_is_valid(&request) {
                 return Err(crate::middleware::Error::Message(format!(
-                    "request is not executable: {}",
-                    request.url
+                    "request {} at node {} is not executable",
+                    request.id,
+                    request.node_key()
                 )));
             }
             if request.protocol != Protocol::Http {

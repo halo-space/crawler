@@ -6,16 +6,19 @@ pub enum Error {
     UnsupportedMode(String),
 
     #[error("http request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[source] reqwest::Error),
 
-    #[error("invalid header name: {0}")]
-    InvalidHeaderName(#[from] reqwest::header::InvalidHeaderName),
+    #[error("invalid HTTP Downloader configuration: {0}")]
+    InvalidConfig(String),
+
+    #[error("HTTP download timed out")]
+    Timeout,
+
+    #[error("decoded response body exceeds the {limit}-byte limit")]
+    BodyTooLarge { limit: u64 },
 
     #[error("invalid header value: {0}")]
     InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
-
-    #[error("duplicate header name with different casing: {0}")]
-    DuplicateHeader(String),
 
     #[error("redirect target is outside allowed domains: {0}")]
     DisallowedRedirect(String),
@@ -25,4 +28,10 @@ pub enum Error {
 
     #[error("too many redirects")]
     TooManyRedirects,
+}
+
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http(error.without_url())
+    }
 }

@@ -22,6 +22,20 @@ struct AcceptanceSpider {
 }
 
 #[macros::spider]
+struct RulesCookieSpider;
+
+#[macros::spider]
+impl RulesCookieSpider {
+    fn name(&self) -> &str {
+        "rules-cookie-acceptance"
+    }
+
+    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+        Ok(())
+    }
+}
+
+#[macros::spider]
 impl AcceptanceSpider {
     fn name(&self) -> &str {
         "v1-acceptance"
@@ -94,6 +108,46 @@ async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
     tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
 }
 
+#[tokio::test]
+async fn rules_mode_carries_response_cookies_through_memory_scheduler() {
+    let (start_url, server) = serve_rules_cookie_pages();
+    let rules = r#"
+spider:
+  name: rules-cookie
+  start:
+    - node: index
+      url: START_URL
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          link:
+            extractors:
+              - {kind: css, expr: "a::attr(href)"}
+    detail: {}
+  edges:
+    - from: index
+      kind: request
+      request:
+        node: detail
+        url: {from: $fields.link}
+"#
+    .replace("START_URL", &start_url);
+    let config = spider::config::Config::from_yaml(&rules).unwrap();
+    let mut engine = engine::Builder::new()
+        .with_rules(config)
+        .with_spider(RulesCookieSpider::new())
+        .build()
+        .with_concurrency(1);
+
+    engine.start().await.unwrap();
+    server.join().unwrap();
+
+    assert_eq!(engine.scheduler().done_len(), 2);
+    assert_eq!(engine.scheduler().failed_len(), 0);
+}
+
 fn serve_pages() -> (String, std::thread::JoinHandle<()>) {
     const LIST: &[u8] = b"<html><a href=\"/detail\">Detail</a></html>";
     const DETAIL: &[u8] = b"<!doctype html><html><head><meta charset=\"gbk\"><title>\xB9\xF0\xC1\xD6\xC3\xD7\xB7\xDB</title></head><body><main><article><h1>\xB9\xF0\xC1\xD6\xC3\xD7\xB7\xDB</h1></article></main></body></html>";
@@ -105,13 +159,55 @@ fn serve_pages() -> (String, std::thread::JoinHandle<()>) {
             let mut request = [0; 2048];
             let size = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);
-            let (body, content_type) = if request.starts_with("GET /detail ") {
-                (DETAIL, "text/html; charset=gbk")
+            let (body, content_type, set_cookie) = if request.starts_with("GET /detail ") {
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("cookie: session=abc\r\n")
+                );
+                (DETAIL, "text/html; charset=gbk", "")
             } else {
-                (LIST, "text/html; charset=utf-8")
+                (
+                    LIST,
+                    "text/html; charset=utf-8",
+                    "Set-Cookie: session=abc; Path=/\r\n",
+                )
             };
             let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{set_cookie}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        }
+    });
+    (format!("http://{address}/list"), server)
+}
+
+fn serve_rules_cookie_pages() -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            let (body, set_cookie) = if request.starts_with("GET /detail ") {
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("cookie: rules-session=abc\r\n")
+                );
+                (b"done".as_slice(), "")
+            } else {
+                (
+                    b"<html><a href=\"/detail\">Detail</a></html>".as_slice(),
+                    "Set-Cookie: rules-session=abc; Path=/\r\n",
+                )
+            };
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{set_cookie}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             stream.write_all(headers.as_bytes()).unwrap();

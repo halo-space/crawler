@@ -346,9 +346,7 @@ mod tests {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(self.name);
                 self.calls.lock().unwrap().push(name.to_string());
-                request
-                    .headers
-                    .insert(self.name.to_string(), "called".to_string());
+                request.headers.try_set(self.name, "called").unwrap();
                 Ok(Next::Continue(request))
             })
         }
@@ -410,11 +408,17 @@ mod tests {
 
         assert_eq!(calls.lock().unwrap().as_slice(), ["first", "second"]);
         assert_eq!(
-            request.headers.get("first").map(String::as_str),
+            request
+                .headers
+                .get("first")
+                .and_then(|value| value.to_str().ok()),
             Some("called")
         );
         assert_eq!(
-            request.headers.get("second").map(String::as_str),
+            request
+                .headers
+                .get("second")
+                .and_then(|value| value.to_str().ok()),
             Some("called")
         );
     }

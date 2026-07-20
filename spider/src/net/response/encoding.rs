@@ -29,9 +29,9 @@ pub(super) fn decode(body: &[u8], headers: &Headers) -> String {
 
 fn content_type(headers: &Headers) -> Option<mime::Mime> {
     headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-        .and_then(|(_, value)| value.parse().ok())
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
 }
 
 fn charset(content_type: &mime::Mime) -> Option<&'static Encoding> {
@@ -87,7 +87,9 @@ mod tests {
     use super::*;
 
     fn headers(content_type: &str) -> Headers {
-        Headers::from([("Content-Type".to_string(), content_type.to_string())])
+        let mut headers = Headers::new();
+        headers.try_set("Content-Type", content_type).unwrap();
+        headers
     }
 
     #[test]

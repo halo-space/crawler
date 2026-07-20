@@ -5,17 +5,32 @@ use std::time::{Duration, Instant};
 
 use crate::{downloader, net};
 
+pub(super) const MAX_IDLE_CLIENTS: usize = 64;
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub(super) struct Clients {
-    pool: Mutex<Pool>,
+    pool: Arc<Mutex<Pool>>,
 }
 
 impl Clients {
     pub(super) fn new() -> Self {
         Self {
-            pool: Mutex::new(Pool::new(Instant::now())),
+            pool: Arc::new(Mutex::new(Pool::new(MAX_IDLE_CLIENTS))),
         }
+    }
+
+    pub(super) fn set_max_idle_clients(
+        &self,
+        max_idle_clients: usize,
+    ) -> Result<(), downloader::Error> {
+        if max_idle_clients == 0 {
+            return Err(downloader::Error::InvalidConfig(
+                "max idle HTTP client count must be positive".to_string(),
+            ));
+        }
+        self.pool()
+            .set_max_idle_clients(max_idle_clients, Instant::now());
+        Ok(())
     }
 
     pub(super) fn get(&self, request: &net::Request) -> Result<Handle, downloader::Error> {
@@ -27,18 +42,21 @@ impl Clients {
         let generation = {
             let mut pool = self.pool();
             if let Some(client) = pool.checkout(&key, now) {
-                return Ok(client);
+                return Ok(Handle::new(client, key, Arc::downgrade(&self.pool)));
             }
             pool.generation
         };
 
         // Building outside the lock keeps unrelated proxy configurations independent.
         let client = Arc::new(Client::new(build(&key)?));
-        Ok(self.pool().checkout_or_insert(key, client, generation, now))
+        let client = self
+            .pool()
+            .checkout_or_insert(key.clone(), client, generation, now);
+        Ok(Handle::new(client, key, Arc::downgrade(&self.pool)))
     }
 
     pub(super) fn clear(&self) {
-        self.pool().clear(Instant::now());
+        self.pool().clear();
     }
 
     fn pool(&self) -> MutexGuard<'_, Pool> {
@@ -85,38 +103,43 @@ impl Client {
         }
     }
 
-    fn expired(&self, now: Instant) -> bool {
+    fn expires_at(&self) -> Option<Instant> {
         let state = self.state();
-        state.active == 0
-            && state
-                .idle_since
-                .and_then(|idle_since| now.checked_duration_since(idle_since))
-                .is_some_and(|idle| idle >= IDLE_TIMEOUT)
+        if state.active > 0 {
+            return None;
+        }
+        state.idle_since.and_then(idle_expiry)
     }
 
-    fn checkout(self: &Arc<Self>) -> Handle {
+    fn expired(&self, now: Instant) -> bool {
+        self.expires_at()
+            .is_some_and(|expires_at| expires_at <= now)
+    }
+
+    fn checkout(&self) -> (bool, Option<Instant>) {
         let mut state = self.state();
+        let was_idle = state.active == 0 && state.idle_since.is_some();
+        let expires_at = state.idle_since.and_then(idle_expiry);
         state.active = state
             .active
             .checked_add(1)
             .expect("active HTTP client count overflow");
         state.idle_since = None;
-        drop(state);
-        Handle {
-            client: Arc::clone(self),
-        }
+        (was_idle, expires_at)
     }
 
-    fn release(&self) {
+    fn release(&self, now: Instant) -> bool {
         let mut state = self.state();
         debug_assert!(state.active > 0, "released an inactive HTTP client");
         if state.active == 0 {
-            return;
+            return false;
         }
         state.active -= 1;
         if state.active == 0 {
-            state.idle_since = Some(Instant::now());
+            state.idle_since = Some(now);
+            return true;
         }
+        false
     }
 
     pub(super) fn state(&self) -> MutexGuard<'_, State> {
@@ -134,6 +157,37 @@ pub(super) struct State {
 
 pub(super) struct Handle {
     pub(super) client: Arc<Client>,
+    key: Key,
+    pool: Option<std::sync::Weak<Mutex<Pool>>>,
+}
+
+impl Handle {
+    fn new(client: Arc<Client>, key: Key, pool: std::sync::Weak<Mutex<Pool>>) -> Self {
+        Self {
+            client,
+            key,
+            pool: Some(pool),
+        }
+    }
+
+    fn release(&mut self, now: Instant) {
+        let Some(pool) = self.pool.take() else {
+            return;
+        };
+        let Some(pool) = pool.upgrade() else {
+            self.client.release(now);
+            return;
+        };
+        let mut pool = pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pool.release(&self.key, &self.client, now);
+    }
+
+    #[cfg(test)]
+    fn release_at(mut self, now: Instant) {
+        self.release(now);
+    }
 }
 
 impl Deref for Handle {
@@ -146,28 +200,44 @@ impl Deref for Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        self.client.release();
+        self.release(Instant::now());
     }
 }
 
 struct Pool {
     clients: HashMap<Key, Arc<Client>>,
-    next_cleanup: Instant,
+    idle_clients: usize,
+    max_idle_clients: usize,
+    next_expiry: Option<Instant>,
     generation: u64,
 }
 
 impl Pool {
-    fn new(now: Instant) -> Self {
+    fn new(max_idle_clients: usize) -> Self {
         Self {
             clients: HashMap::new(),
-            next_cleanup: next_cleanup(now),
+            idle_clients: 0,
+            max_idle_clients,
+            next_expiry: None,
             generation: 0,
         }
     }
 
-    fn checkout(&mut self, key: &Key, now: Instant) -> Option<Handle> {
+    fn checkout(&mut self, key: &Key, now: Instant) -> Option<Arc<Client>> {
         self.cleanup(now);
-        self.clients.get(key).map(Client::checkout)
+        let client = Arc::clone(self.clients.get(key)?);
+        let (was_idle, expires_at) = client.checkout();
+        if was_idle {
+            debug_assert!(
+                self.idle_clients > 0,
+                "idle HTTP client count is inconsistent"
+            );
+            self.idle_clients -= 1;
+            if self.next_expiry == expires_at {
+                self.refresh_expiry();
+            }
+        }
+        Some(client)
     }
 
     fn checkout_or_insert(
@@ -176,31 +246,119 @@ impl Pool {
         client: Arc<Client>,
         generation: u64,
         now: Instant,
-    ) -> Handle {
+    ) -> Arc<Client> {
         self.cleanup(now);
         if self.generation != generation {
-            return client.checkout();
+            let _ = client.checkout();
+            return client;
         }
-        self.clients.entry(key).or_insert(client).checkout()
+        let client = Arc::clone(self.clients.entry(key).or_insert(client));
+        let (was_idle, expires_at) = client.checkout();
+        if was_idle {
+            debug_assert!(
+                self.idle_clients > 0,
+                "idle HTTP client count is inconsistent"
+            );
+            self.idle_clients -= 1;
+            if self.next_expiry == expires_at {
+                self.refresh_expiry();
+            }
+        }
+        client
     }
 
     fn cleanup(&mut self, now: Instant) {
-        if now < self.next_cleanup {
+        if self.next_expiry.is_none_or(|next| now < next) {
             return;
         }
-        self.clients.retain(|_, client| !client.expired(now));
-        self.next_cleanup = next_cleanup(now);
+        let mut removed = 0;
+        self.clients.retain(|_, client| {
+            let retain = !client.expired(now);
+            removed += usize::from(!retain);
+            retain
+        });
+        debug_assert!(
+            removed <= self.idle_clients,
+            "idle HTTP client count is inconsistent"
+        );
+        self.idle_clients -= removed;
+        self.refresh_expiry();
     }
 
-    fn clear(&mut self, now: Instant) {
+    fn release(&mut self, key: &Key, client: &Arc<Client>, now: Instant) {
+        let pooled = self
+            .clients
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, client));
+        let became_idle = client.release(now);
+        if !pooled || !became_idle {
+            return;
+        }
+        self.idle_clients = self
+            .idle_clients
+            .checked_add(1)
+            .expect("idle HTTP client count overflow");
+        self.next_expiry = earliest(self.next_expiry, idle_expiry(now));
+        self.cleanup(now);
+        self.enforce_max_idle();
+    }
+
+    fn set_max_idle_clients(&mut self, max_idle_clients: usize, now: Instant) {
+        self.max_idle_clients = max_idle_clients;
+        self.cleanup(now);
+        self.enforce_max_idle();
+    }
+
+    fn enforce_max_idle(&mut self) {
+        let mut evicted = false;
+        while self.idle_clients > self.max_idle_clients {
+            let key = self
+                .clients
+                .iter()
+                .filter_map(|(key, client)| {
+                    client
+                        .state()
+                        .idle_since
+                        .map(|idle_since| (key.clone(), idle_since))
+                })
+                .min_by_key(|(_, idle_since)| *idle_since)
+                .map(|(key, _)| key)
+                .expect("idle HTTP client count is inconsistent");
+            self.clients.remove(&key);
+            self.idle_clients -= 1;
+            evicted = true;
+        }
+        if evicted {
+            self.refresh_expiry();
+        }
+    }
+
+    fn refresh_expiry(&mut self) {
+        self.next_expiry = self
+            .clients
+            .values()
+            .filter_map(|client| client.expires_at())
+            .min();
+    }
+
+    fn clear(&mut self) {
         self.clients.clear();
-        self.next_cleanup = next_cleanup(now);
+        self.idle_clients = 0;
+        self.next_expiry = None;
         self.generation = self.generation.wrapping_add(1);
     }
 }
 
-fn next_cleanup(now: Instant) -> Instant {
-    now.checked_add(IDLE_TIMEOUT).unwrap_or(now)
+fn idle_expiry(now: Instant) -> Option<Instant> {
+    now.checked_add(IDLE_TIMEOUT)
+}
+
+fn earliest(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 pub(super) fn build(key: &Key) -> Result<reqwest::Client, downloader::Error> {
@@ -269,11 +427,9 @@ mod tests {
         let handle = clients.get_at(&request, now).unwrap();
         let expired = Arc::clone(&handle.client);
 
-        drop(handle);
+        handle.release_at(now);
         assert_eq!(expired.state().active, 0);
-        let idle_since = expired.state().idle_since.unwrap();
-
-        let cleanup = idle_since + IDLE_TIMEOUT;
+        let cleanup = now + IDLE_TIMEOUT;
         let _trigger = clients.get_at(&trigger, cleanup).unwrap();
         assert!(!clients.pool().clients.contains_key(&Key::from(&request)));
 
@@ -313,10 +469,11 @@ mod tests {
         let stale = Arc::new(Client::new(build(&key).unwrap()));
 
         clients.clear();
-        let handle =
+        let client =
             clients
                 .pool()
                 .checkout_or_insert(key.clone(), Arc::clone(&stale), generation, now);
+        let handle = Handle::new(client, key.clone(), Arc::downgrade(&clients.pool));
 
         assert!(Arc::ptr_eq(&handle.client, &stale));
         assert!(clients.pool().clients.is_empty());
@@ -330,6 +487,109 @@ mod tests {
             clients.pool().clients.get(&key).unwrap(),
             &current.client
         ));
+    }
+
+    #[test]
+    fn defaults_to_sixty_four_idle_clients() {
+        let clients = Clients::new();
+
+        assert_eq!(clients.pool().max_idle_clients, MAX_IDLE_CLIENTS);
+    }
+
+    #[test]
+    fn http_builder_replaces_the_idle_limit() {
+        let http = super::super::Http::new().with_max_idle_clients(3).unwrap();
+
+        assert_eq!(http.clients.pool().max_idle_clients, 3);
+    }
+
+    #[test]
+    fn rejects_a_zero_idle_limit() {
+        assert!(matches!(
+            Clients::new().set_max_idle_clients(0),
+            Err(downloader::Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn evicts_the_oldest_idle_client_when_the_limit_is_exceeded() {
+        let clients = Clients::new();
+        clients.set_max_idle_clients(2).unwrap();
+        let first_request = proxied("http://127.0.0.1:8080");
+        let second_request = proxied("http://127.0.0.1:8081");
+        let third_request = proxied("http://127.0.0.1:8082");
+        let now = Instant::now();
+        let first = clients.get_at(&first_request, now).unwrap();
+        let second = clients.get_at(&second_request, now).unwrap();
+        let third = clients.get_at(&third_request, now).unwrap();
+
+        first.release_at(now);
+        second.release_at(now + Duration::from_secs(1));
+        third.release_at(now + Duration::from_secs(2));
+
+        let pool = clients.pool();
+        assert_eq!(pool.idle_clients, 2);
+        assert_eq!(pool.clients.len(), 2);
+        assert!(!pool.clients.contains_key(&Key::from(&first_request)));
+        assert!(pool.clients.contains_key(&Key::from(&second_request)));
+        assert!(pool.clients.contains_key(&Key::from(&third_request)));
+    }
+
+    #[test]
+    fn active_clients_survive_capacity_pressure_until_they_become_idle() {
+        let clients = Clients::new();
+        clients.set_max_idle_clients(1).unwrap();
+        let first_request = proxied("http://127.0.0.1:8080");
+        let second_request = proxied("http://127.0.0.1:8081");
+        let now = Instant::now();
+        let first = clients.get_at(&first_request, now).unwrap();
+        let second = clients.get_at(&second_request, now).unwrap();
+
+        first.release_at(now);
+        {
+            let pool = clients.pool();
+            assert_eq!(pool.clients.len(), 2);
+            assert!(pool.clients.contains_key(&Key::from(&second_request)));
+        }
+
+        second.release_at(now + Duration::from_secs(1));
+        let pool = clients.pool();
+        assert_eq!(pool.idle_clients, 1);
+        assert_eq!(pool.clients.len(), 1);
+        assert!(!pool.clients.contains_key(&Key::from(&first_request)));
+        assert!(pool.clients.contains_key(&Key::from(&second_request)));
+    }
+
+    #[test]
+    fn cleanup_tracks_the_earliest_idle_expiry() {
+        let clients = Clients::new();
+        let first_request = proxied("http://127.0.0.1:8080");
+        let second_request = proxied("http://127.0.0.1:8081");
+        let trigger = proxied("http://127.0.0.1:8082");
+        let now = Instant::now();
+        let first = clients.get_at(&first_request, now).unwrap();
+        let second = clients.get_at(&second_request, now).unwrap();
+
+        first.release_at(now);
+        second.release_at(now + Duration::from_secs(10));
+        assert_eq!(clients.pool().next_expiry, Some(now + IDLE_TIMEOUT));
+
+        let first = clients
+            .get_at(&first_request, now + Duration::from_secs(20))
+            .unwrap();
+        assert_eq!(
+            clients.pool().next_expiry,
+            Some(now + Duration::from_secs(10) + IDLE_TIMEOUT)
+        );
+
+        let _trigger = clients
+            .get_at(&trigger, now + Duration::from_secs(10) + IDLE_TIMEOUT)
+            .unwrap();
+        let pool = clients.pool();
+        assert!(pool.clients.contains_key(&Key::from(&first_request)));
+        assert!(!pool.clients.contains_key(&Key::from(&second_request)));
+        drop(pool);
+        drop(first);
     }
 
     #[test]

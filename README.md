@@ -126,14 +126,41 @@ or `-1` lasts for the process lifetime, while a rule with TTL `0` neither checks
 fingerprint.
 
 The HTTP downloader applies proxy and TLS settings per Request. It reuses clients only for the same
-proxy URL and `accept_invalid_certs` setting, lazily removes clients after 90 idle seconds, and clears
-the pool on `Http::close()`. Direct requests, different proxy credentials, and different TLS behavior
-therefore never share a client entry.
-Same-origin redirects carry intermediate response cookies into the next hop. Cross-origin follow and
-redirect handling never inherit Request headers or cookies.
+proxy URL and `accept_invalid_certs` setting, retains at most 64 idle clients by default, lazily
+expires them after 90 idle seconds, and clears the pool on `Http::close()`. The oldest idle client is
+evicted under pressure; active clients are never evicted and may temporarily exceed the idle bound.
+`Http::with_max_idle_clients` replaces this startup-time Worker setting.
+Direct requests, distinct proxy credentials, and different TLS behavior never share a client entry.
 
-The v3 response-text contract keeps `Response.body` as the downloaded bytes and centralizes character
-decoding in `Response::text()`. Encoding precedence is BOM, a valid `Content-Type` charset, an HTML
+One Worker accepts at most 64 MiB of decoded response body by default. `Http::with_max_body_bytes`
+can replace that ceiling, while code or Rules `Request.max_body_bytes` may only select a positive limit
+less than or equal to it; a value above the Worker ceiling fails before network I/O. Bodies are consumed as
+decoded chunks without preallocating the limit, but the successful result remains one bounded
+`Response.body: Bytes`; this contract does not expose a public stream or file sink. `Request.timeout`
+is one budget for connection, every redirect, and the final body. A redirect never resets it, while
+each new download retry receives a fresh full budget.
+
+`Headers` wraps the standard `http::HeaderMap`, preserving case-insensitive names, raw response
+values, and repeated fields. `set` replaces a name and `append` adds another value; Rules input stays
+single-valued. Request Snapshots normalize names and serialize every name to a value array, while
+non-string Request values are rejected at the Snapshot boundary.
+
+Each Request carries a serializable CookieStore snapshot. Every response cookie is applied with
+standard Domain, Path, Secure, Max-Age, and Expires rules before parsing, and descendant Requests
+carry the resulting lineage through Scheduler recovery. Parallel siblings keep independent snapshots.
+On a cross-origin follow or redirect, source headers are removed and the store is reduced to cookies
+applicable to the target URL, so unrelated credentials cannot enter the target Request Snapshot.
+Cross-site public-suffix Domain attributes are rejected; an identical public-suffix Request host is
+normalized to HostOnly. A raw `Cookie` header is never a second session source, so code and Rules
+must use the Request cookie API.
+
+Each `rate_limit` group fixes its interval while active. Reusing the group with a conflicting QPS is
+invalid configuration; an inactive group is removed lazily only after its next permitted instant has
+passed.
+
+The v3 response-text contract keeps `Response.body` as the Downloader-delivered bytes after HTTP
+content decoding and before character transcoding, and centralizes character decoding in
+`Response::text()`. Encoding precedence is BOM, a valid `Content-Type` charset, an HTML
 meta declaration within the first 1024 bytes for HTML or a missing MIME type, then UTF-8. Malformed
 sequences use Unicode replacement semantics; the runtime performs no statistical charset guessing.
 `Response::json<T>()` uses the same decoded text path.

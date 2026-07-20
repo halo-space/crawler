@@ -1,55 +1,86 @@
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use http::header::HeaderMap;
 use std::time::Duration;
 
 use crate::{downloader, net};
 
+mod body;
 mod pool;
 
 use pool::Clients;
 
 const MAX_REDIRECTS: usize = 10;
+const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Default)]
 pub struct Http {
     clients: Clients,
+    max_body_bytes: u64,
+}
+
+impl Default for Http {
+    fn default() -> Self {
+        Self {
+            clients: Clients::default(),
+            max_body_bytes: MAX_BODY_BYTES,
+        }
+    }
 }
 
 impl Http {
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-impl downloader::Download for Http {
-    async fn open(&self) -> Result<(), downloader::Error> {
-        Ok(())
+    pub fn with_max_idle_clients(self, max_idle_clients: usize) -> Result<Self, downloader::Error> {
+        self.clients.set_max_idle_clients(max_idle_clients)?;
+        Ok(self)
     }
 
-    async fn close(&self) -> Result<(), downloader::Error> {
-        self.clients.clear();
-        Ok(())
+    pub fn with_max_body_bytes(mut self, max_body_bytes: u64) -> Result<Self, downloader::Error> {
+        if max_body_bytes == 0 {
+            return Err(downloader::Error::InvalidConfig(
+                "max_body_bytes must be positive".to_string(),
+            ));
+        }
+        self.max_body_bytes = max_body_bytes;
+        Ok(self)
     }
 
-    async fn fetch(&self, mut request: net::Request) -> Result<net::Response, downloader::Error> {
+    fn body_limit(&self, request: &net::Request) -> Result<u64, downloader::Error> {
+        match request.max_body_bytes {
+            Some(0) => Err(downloader::Error::InvalidConfig(
+                "Request max_body_bytes must be positive".to_string(),
+            )),
+            Some(limit) if limit > self.max_body_bytes => {
+                Err(downloader::Error::InvalidConfig(format!(
+                    "Request max_body_bytes ({limit}) exceeds the Worker limit ({})",
+                    self.max_body_bytes
+                )))
+            }
+            Some(limit) => Ok(limit),
+            None => Ok(self.max_body_bytes),
+        }
+    }
+
+    async fn download(
+        &self,
+        mut request: net::Request,
+        body_limit: u64,
+    ) -> Result<net::Response, downloader::Error> {
         let client = self.clients.get(&request)?;
         let mut url = url::Url::parse(&request.url)
             .map_err(|error| downloader::Error::InvalidRedirect(error.to_string()))?;
         let mut method = reqwest::Method::from(&request.method);
-        let mut body = request.body.clone();
+        let mut request_body = request.body.clone();
         let mut inherit_headers = true;
         let mut cookies = request.cookies.clone();
         let mut redirects = Vec::new();
 
         let response = loop {
-            let headers = request_headers(&request, inherit_headers, &cookies, &method)?;
-            let mut builder = client.request(method.clone(), url.clone()).headers(headers);
-            if let Some(timeout) = request.timeout {
-                builder = builder.timeout(Duration::from_millis(timeout));
-            }
-            builder = with_body(builder, &body);
-
-            let response = builder.send().await?;
-            merge_response_cookies(&mut cookies, &response);
+            let headers = request_headers(&request, inherit_headers, &cookies, &method, &url)?;
+            let builder = client.request(method.clone(), url.clone()).headers(headers);
+            let response = with_body(builder, &request_body).send().await?;
+            let response_headers = net::Headers::from(response.headers().clone());
+            cookies.store_response(response.url(), &response_headers);
             let Some(location) = redirect_location(&response)? else {
                 break response;
             };
@@ -60,14 +91,17 @@ impl downloader::Download for Http {
                 .url()
                 .join(&location)
                 .map_err(|error| downloader::Error::InvalidRedirect(error.to_string()))?;
+            validate_redirect(&target)?;
             if !request.allows(&target) {
-                return Err(downloader::Error::DisallowedRedirect(target.to_string()));
+                return Err(downloader::Error::DisallowedRedirect(
+                    target.origin().ascii_serialization(),
+                ));
             }
             if response.url().origin() != target.origin() {
                 inherit_headers = false;
-                cookies.clear();
+                cookies = cookies.for_url(&target);
             }
-            redirect_method(response.status(), &mut method, &mut body);
+            redirect_method(response.status(), &mut method, &mut request_body);
             redirects.push(target.to_string());
             url = target;
         };
@@ -81,17 +115,8 @@ impl downloader::Download for Http {
             reqwest::Version::HTTP_3 => net::HttpVersion::Http3,
             _ => net::HttpVersion::Http11,
         };
-        let headers = response
-            .headers()
-            .iter()
-            .filter_map(|(key, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (key.to_string(), value.to_string()))
-            })
-            .collect();
-        let body = response.bytes().await?;
+        let headers = net::Headers::from(response.headers().clone());
+        let body = body::read(response, body_limit).await?;
         if !inherit_headers {
             request.headers.clear();
         }
@@ -113,14 +138,43 @@ impl downloader::Download for Http {
     }
 }
 
+impl downloader::Download for Http {
+    async fn open(&self) -> Result<(), downloader::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), downloader::Error> {
+        self.clients.clear();
+        Ok(())
+    }
+
+    async fn fetch(&self, request: net::Request) -> Result<net::Response, downloader::Error> {
+        let body_limit = self.body_limit(&request)?;
+        let Some(timeout) = request.timeout else {
+            return self.download(request, body_limit).await;
+        };
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_millis(timeout))
+            .ok_or_else(|| {
+                downloader::Error::InvalidConfig(
+                    "Request timeout exceeds the supported duration".to_string(),
+                )
+            })?;
+        tokio::time::timeout_at(deadline, self.download(request, body_limit))
+            .await
+            .map_err(|_| downloader::Error::Timeout)?
+    }
+}
+
 fn request_headers(
     request: &net::Request,
     inherit_headers: bool,
     cookies: &net::Cookies,
     method: &reqwest::Method,
+    url: &url::Url,
 ) -> Result<HeaderMap, downloader::Error> {
     let mut headers = if inherit_headers {
-        to_header_map(&request.headers)?
+        request.headers.clone().into_map()
     } else {
         HeaderMap::new()
     };
@@ -129,26 +183,11 @@ fn request_headers(
         headers.remove(reqwest::header::CONTENT_TYPE);
         headers.remove(reqwest::header::TRANSFER_ENCODING);
     }
-    if !cookies.is_empty() {
-        let value = cookies
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        headers.remove(reqwest::header::COOKIE);
-        headers.insert(reqwest::header::COOKIE, HeaderValue::from_str(&value)?);
+    headers.remove(reqwest::header::COOKIE);
+    if let Some(value) = cookies.request_header(url)? {
+        headers.insert(reqwest::header::COOKIE, value);
     }
     Ok(headers)
-}
-
-fn merge_response_cookies(cookies: &mut net::Cookies, response: &reqwest::Response) {
-    for cookie in response.cookies() {
-        if cookie.value().is_empty() {
-            cookies.remove(cookie.name());
-        } else {
-            cookies.insert(cookie.name().to_string(), cookie.value().to_string());
-        }
-    }
 }
 
 fn with_body(builder: reqwest::RequestBuilder, body: &net::Body) -> reqwest::RequestBuilder {
@@ -188,18 +227,19 @@ fn redirect_method(
     }
 }
 
-fn to_header_map(headers: &net::Headers) -> Result<HeaderMap, downloader::Error> {
-    let mut map = HeaderMap::new();
-
-    for (key, value) in headers {
-        let name = HeaderName::from_bytes(key.as_bytes())?;
-        if map.contains_key(&name) {
-            return Err(downloader::Error::DuplicateHeader(name.to_string()));
-        }
-        map.insert(name, HeaderValue::from_str(value)?);
+fn validate_redirect(target: &url::Url) -> Result<(), downloader::Error> {
+    if !matches!(target.scheme(), "http" | "https") {
+        return Err(downloader::Error::InvalidRedirect(format!(
+            "unsupported protocol: {}",
+            target.scheme()
+        )));
     }
-
-    Ok(map)
+    if !target.has_host() {
+        return Err(downloader::Error::InvalidRedirect(
+            "redirect URL must have a host".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -251,16 +291,52 @@ mod tests {
     }
 
     #[test]
-    fn rejects_case_insensitive_duplicate_headers_at_transport_boundary() {
-        let headers = net::Headers::from([
-            ("Authorization".to_string(), "old".to_string()),
-            ("authorization".to_string(), "new".to_string()),
-        ]);
+    fn request_headers_preserve_repeated_values() {
+        let mut request = net::Request::follow("https://example.com").unwrap();
+        request.headers.try_append("x-value", "one").unwrap();
+        request.headers.try_append("X-Value", "two").unwrap();
+        let url = url::Url::parse(&request.url).unwrap();
 
-        assert!(matches!(
-            to_header_map(&headers),
-            Err(downloader::Error::DuplicateHeader(name)) if name == "authorization"
-        ));
+        let headers = request_headers(
+            &request,
+            true,
+            &request.cookies,
+            &reqwest::Method::GET,
+            &url,
+        )
+        .unwrap();
+
+        assert_eq!(
+            headers
+                .get_all("x-value")
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+    }
+
+    #[test]
+    fn request_headers_accept_cookies_only_from_the_cookie_store() {
+        let mut request = net::Request::follow("https://example.com").unwrap();
+        request.headers.try_set("cookie", "raw=stale").unwrap();
+        let url = url::Url::parse(&request.url).unwrap();
+
+        let headers = request_headers(
+            &request,
+            true,
+            &request.cookies,
+            &reqwest::Method::GET,
+            &url,
+        )
+        .unwrap();
+
+        assert!(!headers.contains_key(reqwest::header::COOKIE));
+    }
+
+    #[test]
+    fn default_body_limit_is_64_mib() {
+        assert_eq!(Http::new().max_body_bytes, 64 * 1024 * 1024);
     }
 
     fn through_proxy(target: &str, proxy: &str) -> net::Request {
@@ -285,11 +361,10 @@ mod tests {
                 .unwrap();
         });
 
+        let request_url = url::Url::parse(&base_url).unwrap();
         let mut request = net::Request::follow(base_url).unwrap();
-        request
-            .headers
-            .insert("cookie".to_string(), "manual=old".to_string());
-        request.cookies.insert("sid".to_string(), "1".to_string());
+        request.headers.try_set("cookie", "manual=old").unwrap();
+        request.cookies.insert(&request_url, "sid", "1").unwrap();
 
         let response = Http::new().fetch(request).await.unwrap();
         let raw_request = request_rx.recv().unwrap().to_ascii_lowercase();
@@ -297,10 +372,8 @@ mod tests {
 
         assert!(raw_request.contains("cookie: sid=1\r\n"));
         assert!(!raw_request.contains("manual=old"));
-        assert_eq!(
-            response.cookies.get("token").map(String::as_str),
-            Some("abc")
-        );
+        let response_url = url::Url::parse(&response.url).unwrap();
+        assert_eq!(response.cookies.get(&response_url, "token"), Some("abc"));
         assert_eq!(response.body.as_ref(), b"ok");
     }
 
@@ -331,7 +404,10 @@ mod tests {
             "桂林米粉"
         );
         assert_eq!(
-            response.headers.get("content-type").map(String::as_str),
+            response
+                .headers
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
             Some("text/html; charset=gbk")
         );
     }
@@ -395,12 +471,10 @@ mod tests {
         let redirected = request_rx.recv().unwrap().to_ascii_lowercase();
 
         assert!(redirected.contains("cookie: session=abc\r\n"));
+        let response_url = url::Url::parse(&response.url).unwrap();
+        assert_eq!(response.cookies.get(&response_url, "session"), Some("abc"));
         assert_eq!(
-            response.cookies.get("session").map(String::as_str),
-            Some("abc")
-        );
-        assert_eq!(
-            response.request.cookies.get("session").map(String::as_str),
+            response.request.cookies.get(&response_url, "session"),
             Some("abc")
         );
     }
@@ -438,6 +512,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_a_redirect_to_an_unsupported_protocol() {
+        let (listener, base_url) = listener();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: file:///private/data\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let error = Http::new()
+            .fetch(net::Request::follow(base_url).unwrap())
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+
+        assert!(matches!(
+            error,
+            downloader::Error::InvalidRedirect(message)
+                if message == "unsupported protocol: file"
+        ));
+    }
+
+    #[tokio::test]
     async fn cross_origin_redirect_sends_no_inherited_credentials() {
         let (source, source_url) = listener();
         let (target, target_url) = listener();
@@ -462,11 +562,10 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .unwrap();
         });
+        let request_url = url::Url::parse(&source_url).unwrap();
         let mut request = net::Request::follow(source_url).unwrap();
-        request
-            .headers
-            .insert("x-secret".to_string(), "hidden".to_string());
-        request.cookies.insert("sid".to_string(), "1".to_string());
+        request.headers.try_set("x-secret", "hidden").unwrap();
+        request.cookies.insert(&request_url, "sid", "1").unwrap();
         request.set_allowed_domains(vec!["127.0.0.1".to_string(), "localhost".to_string()]);
 
         Http::new().fetch(request).await.unwrap();
@@ -494,7 +593,7 @@ mod tests {
         let error = Http::new().fetch(request).await.unwrap_err();
         server.join().unwrap();
 
-        assert!(matches!(error, downloader::Error::Http(error) if error.is_timeout()));
+        assert!(matches!(error, downloader::Error::Timeout));
     }
 
     #[tokio::test]
@@ -614,10 +713,11 @@ mod tests {
                 .unwrap();
         });
         let mut request = through_proxy(target, &proxy_url);
+        request.headers.try_set("x-secret", "hidden").unwrap();
         request
-            .headers
-            .insert("x-secret".to_string(), "hidden".to_string());
-        request.cookies.insert("sid".to_string(), "1".to_string());
+            .cookies
+            .insert(&url::Url::parse(target).unwrap(), "sid", "1")
+            .unwrap();
         request.set_allowed_domains(vec![
             "first.invalid".to_string(),
             "second.invalid".to_string(),
@@ -644,5 +744,53 @@ mod tests {
         assert_eq!(header(&second, "cookie"), None);
         assert_eq!(response.url, redirected);
         assert_eq!(response.redirects, [redirected]);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_redirect_keeps_an_applicable_domain_cookie() {
+        let (proxy, proxy_url) = listener();
+        let source = "http://www.example.test/start";
+        let target = "http://api.example.test/final";
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut first, _) = proxy.accept().unwrap();
+            request_tx.send(read_request(&mut first)).unwrap();
+            first
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {target}\r\nSet-Cookie: shared=one; Domain=example.test; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+
+            let (mut second, _) = proxy.accept().unwrap();
+            request_tx.send(read_request(&mut second)).unwrap();
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let mut request = through_proxy(source, &proxy_url);
+        request.headers.try_set("x-secret", "hidden").unwrap();
+        request.set_allowed_domains(vec![
+            "www.example.test".to_string(),
+            "api.example.test".to_string(),
+        ]);
+
+        let response = Http::new().fetch(request).await.unwrap();
+        server.join().unwrap();
+        let first = request_rx.recv().unwrap();
+        let second = request_rx.recv().unwrap();
+
+        assert_eq!(header(&first, "x-secret"), Some("hidden"));
+        assert_eq!(header(&first, "cookie"), None);
+        assert_eq!(header(&second, "x-secret"), None);
+        assert_eq!(header(&second, "cookie"), Some("shared=one"));
+        assert_eq!(
+            response
+                .cookies
+                .get(&url::Url::parse(target).unwrap(), "shared"),
+            Some("one")
+        );
     }
 }

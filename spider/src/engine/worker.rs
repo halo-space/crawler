@@ -50,7 +50,11 @@ where
         payload.start_time = Some(start_time);
         payload.end_time = Some(crate::utils::time::now_millis());
         if let Err(error) = result {
-            payload = payload.failed(format!("{}: {error}", request.url));
+            payload = payload.failed(format!(
+                "request {} at node {} failed: {error}",
+                request.id,
+                request.node_key()
+            ));
         } else {
             stats.done(request.node_key(), 1);
         }
@@ -178,7 +182,10 @@ mod tests {
     #[tokio::test]
     async fn request_panic_is_settled_as_failure() {
         let scheduler = Arc::new(scheduler::Memory::new("worker-1"));
-        let request = crate::net::Request::follow("https://example.com").unwrap();
+        let request = crate::net::Request::follow(
+            "https://user:password@example.com/private?api_key=url-secret",
+        )
+        .unwrap();
         scheduler
             .push(payload::Payload::new().requests(vec![request]))
             .await
@@ -203,5 +210,12 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("request execution panicked: download exploded"))
         );
+        let errors = scheduler.errors().join("\n");
+        for secret in ["user", "password", "api_key", "url-secret"] {
+            assert!(
+                !errors.contains(secret),
+                "failure settlement exposed {secret}: {errors}"
+            );
+        }
     }
 }

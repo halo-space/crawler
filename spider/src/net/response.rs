@@ -88,15 +88,17 @@ impl Response {
 
     pub fn follow(&self, url: &str) -> Result<Request, Error> {
         let target = self.urljoin(url)?;
-        let same_origin = Url::parse(&self.url)?.origin() == Url::parse(&target)?.origin();
+        let target_url = Url::parse(&target)?;
+        let same_origin = Url::parse(&self.url)?.origin() == target_url.origin();
         let mut request = Request::follow(target)?;
         request.task_id = self.request.task_id.clone();
         request.trace_id = self.request.trace_id.clone();
         request.vals = self.vals.clone();
         if same_origin {
             request.headers = self.request.headers.clone();
-            request.cookies = self.request.cookies.clone();
-            request.cookies.extend(self.cookies.clone());
+            request.cookies = self.cookies.clone();
+        } else {
+            request.cookies = self.cookies.for_url(&target_url);
         }
         Ok(request)
     }
@@ -127,7 +129,8 @@ mod tests {
         let mut response = html_response("");
         response
             .headers
-            .insert("content-type".to_string(), content_type.to_string());
+            .try_set("content-type", content_type)
+            .unwrap();
         response.body = Bytes::from_static(body);
         response
     }
@@ -138,15 +141,19 @@ mod tests {
         source
             .kwargs
             .insert("arg".to_string(), Value::from("keep-out"));
-        source
-            .headers
-            .insert("accept".to_string(), "text/html".to_string());
+        source.headers.try_set("accept", "text/html").unwrap();
 
         let mut headers = Headers::new();
-        headers.insert("content-type".to_string(), "text/html".to_string());
+        headers.try_set("content-type", "text/html").unwrap();
 
         let mut cookies = Cookies::new();
-        cookies.insert("sid".to_string(), "1".to_string());
+        cookies
+            .insert(
+                &Url::parse("https://example.com/list/").unwrap(),
+                "sid",
+                "1",
+            )
+            .unwrap();
 
         let mut vals = HashMap::new();
         vals.insert("category".to_string(), Value::from("books"));
@@ -171,10 +178,15 @@ mod tests {
         assert_eq!(next.url, "https://example.com/detail/1");
         assert_eq!(next.vals.get("category"), Some(&Value::from("books")));
         assert_eq!(
-            next.headers.get("accept").map(String::as_str),
+            next.headers
+                .get("accept")
+                .and_then(|value| value.to_str().ok()),
             Some("text/html")
         );
-        assert_eq!(next.cookies.get("sid").map(String::as_str), Some("1"));
+        assert_eq!(
+            next.cookies.get(&Url::parse(&next.url).unwrap(), "sid"),
+            Some("1")
+        );
         assert!(next.kwargs.is_empty());
         assert_eq!(next.priority, 0);
         assert!(!next.dont_filter);
@@ -187,14 +199,18 @@ mod tests {
         response
             .request
             .headers
-            .insert("authorization".to_string(), "secret".to_string());
+            .try_set("authorization", "secret")
+            .unwrap();
+        let source_url = Url::parse(&response.url).unwrap();
         response
             .request
             .cookies
-            .insert("sid".to_string(), "1".to_string());
+            .insert(&source_url, "sid", "1")
+            .unwrap();
         response
             .cookies
-            .insert("response".to_string(), "2".to_string());
+            .insert(&source_url, "response", "2")
+            .unwrap();
 
         let next = response.follow("https://other.example/detail").unwrap();
 
@@ -202,6 +218,50 @@ mod tests {
         assert!(next.cookies.is_empty());
         assert_eq!(next.task_id, response.request.task_id);
         assert_eq!(next.trace_id, response.request.trace_id);
+    }
+
+    #[test]
+    fn cross_origin_follow_keeps_only_target_applicable_domain_cookies() {
+        let mut response = html_response("");
+        response
+            .request
+            .headers
+            .try_set("authorization", "secret")
+            .unwrap();
+        let mut set_cookie = Headers::new();
+        set_cookie
+            .try_append("set-cookie", "shared=1; Domain=example.com; Path=/")
+            .unwrap();
+        response
+            .cookies
+            .store_response(&Url::parse(&response.url).unwrap(), &set_cookie);
+
+        let next = response.follow("https://api.example.com/detail").unwrap();
+        let next_url = Url::parse(&next.url).unwrap();
+
+        assert!(next.headers.is_empty());
+        assert_eq!(next.cookies.get(&next_url, "shared"), Some("1"));
+        assert_eq!(next.cookies.len(), 1);
+    }
+
+    #[test]
+    fn queued_siblings_keep_independent_cookie_snapshots() {
+        let mut response = html_response("");
+        let origin = Url::parse(&response.url).unwrap();
+        response.cookies.insert(&origin, "sid", "one").unwrap();
+
+        let first = response.follow("/detail/1").unwrap();
+        response.cookies.insert(&origin, "sid", "two").unwrap();
+        let second = response.follow("/detail/2").unwrap();
+
+        assert_eq!(
+            first.cookies.get(&Url::parse(&first.url).unwrap(), "sid"),
+            Some("one")
+        );
+        assert_eq!(
+            second.cookies.get(&Url::parse(&second.url).unwrap(), "sid"),
+            Some("two")
+        );
     }
 
     #[test]
@@ -321,7 +381,9 @@ mod tests {
         )
         .unwrap()
         .header("authorization", "request-header-secret")
-        .cookie("session", "request-cookie-secret");
+        .unwrap()
+        .cookie("session", "request-cookie-secret")
+        .unwrap();
         response.request.proxy = Some(crate::net::ProxyConfig {
             url: "http://proxy-user:proxy-password@proxy.example:8080".to_string(),
         });
@@ -334,10 +396,13 @@ mod tests {
             .push("https://example.com/?token=redirect-secret".to_string());
         response
             .headers
-            .insert("set-cookie".to_string(), "header-secret".to_string());
+            .try_set("set-cookie", "header-secret")
+            .unwrap();
+        let response_url = Url::parse(&response.url).unwrap();
         response
             .cookies
-            .insert("session".to_string(), "cookie-secret".to_string());
+            .insert(&response_url, "session", "cookie-secret")
+            .unwrap();
         response
             .vals
             .insert("token".to_string(), Value::from("vals-secret"));

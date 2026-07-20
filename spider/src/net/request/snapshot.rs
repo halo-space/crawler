@@ -23,6 +23,7 @@ pub struct Snapshot {
     pub dont_filter: bool,
     pub mode: net::Mode,
     pub timeout: Option<u64>,
+    pub max_body_bytes: Option<u64>,
     pub proxy: Option<net::ProxyConfig>,
     pub tls: Option<net::TlsConfig>,
     pub middlewares: Vec<middleware::Spec>,
@@ -56,6 +57,7 @@ impl fmt::Debug for Snapshot {
             .field("dont_filter", &self.dont_filter)
             .field("mode", &self.mode)
             .field("timeout", &self.timeout)
+            .field("max_body_bytes", &self.max_body_bytes)
             .field("proxy", &self.proxy)
             .field("tls", &self.tls)
             .field("middlewares_len", &self.middlewares.len())
@@ -93,6 +95,7 @@ impl TryFrom<net::Request> for Snapshot {
             dont_filter: request.dont_filter,
             mode: request.mode,
             timeout: request.timeout,
+            max_body_bytes: request.max_body_bytes,
             proxy: request.proxy,
             tls: request.tls,
             middlewares: request.middlewares,
@@ -140,29 +143,18 @@ impl Snapshot {
         if self.protocol != protocol {
             return Err("Request Snapshot protocol does not match its URL".to_string());
         }
-        for (name, value) in &self.headers {
-            reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|error| format!("Request Snapshot header name is invalid: {error}"))?;
-            reqwest::header::HeaderValue::from_str(value)
-                .map_err(|error| format!("Request Snapshot header value is invalid: {error}"))?;
-        }
-        if !self.cookies.is_empty() {
-            for name in self.cookies.keys() {
-                reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|error| format!("Request Snapshot cookie name is invalid: {error}"))?;
-            }
-            let cookies = self
-                .cookies
-                .iter()
-                .map(|(name, value)| format!("{name}={value}"))
-                .collect::<Vec<_>>()
-                .join("; ");
-            reqwest::header::HeaderValue::from_str(&cookies)
-                .map_err(|error| format!("Request Snapshot cookie is invalid: {error}"))?;
+        self.headers.validate_snapshot()?;
+        if self.headers.contains(http::header::COOKIE) {
+            return Err(
+                "Request Snapshot Cookie header is reserved; use cookies instead".to_string(),
+            );
         }
         if let Some(proxy) = &self.proxy {
             super::transport::validate_proxy_url(&proxy.url)
                 .map_err(|message| format!("Request Snapshot proxy URL {message}"))?;
+        }
+        if self.max_body_bytes == Some(0) {
+            return Err("Request Snapshot max_body_bytes must be positive".to_string());
         }
         if self.state != net::State::Pending {
             return Err("queued Request Snapshot state must be pending".to_string());
@@ -249,6 +241,7 @@ impl Snapshot {
         request.dont_filter = self.dont_filter;
         request.mode = self.mode;
         request.timeout = self.timeout;
+        request.max_body_bytes = self.max_body_bytes;
         request.proxy = self.proxy;
         request.tls = self.tls;
         request.middlewares = self.middlewares;
@@ -295,6 +288,13 @@ graph:
         request.trace_id = "trace-1".to_string();
         request.priority = 7;
         request.timeout = Some(3_000);
+        request.max_body_bytes = Some(1_048_576);
+        request.headers.try_append("X-Test", "one").unwrap();
+        request.headers.try_append("x-test", "two").unwrap();
+        request
+            .cookies
+            .insert(&url::Url::parse(&request.url).unwrap(), "sid", "session")
+            .unwrap();
         request
             .vals
             .insert("category".to_string(), Value::String("rust".to_string()));
@@ -306,6 +306,11 @@ graph:
         assert_eq!(encoded["method"], "GET");
         assert_eq!(encoded["mode"], "http");
         assert_eq!(encoded["state"], "pending");
+        assert_eq!(
+            encoded["headers"]["x-test"],
+            serde_json::json!(["one", "two"])
+        );
+        assert!(encoded["cookies"].is_array());
         assert!(encoded.get("schema_version").is_none());
         assert!(encoded.get("created_time").is_none());
         assert!(encoded.get("updated_time").is_none());
@@ -318,6 +323,22 @@ graph:
         assert_eq!(restored.node_key(), "detail");
         assert_eq!(restored.priority, 7);
         assert_eq!(restored.timeout, Some(3_000));
+        assert_eq!(restored.max_body_bytes, Some(1_048_576));
+        assert_eq!(
+            restored
+                .headers
+                .get_all("x-test")
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+        assert_eq!(
+            restored
+                .cookies
+                .get(&url::Url::parse(&restored.url).unwrap(), "sid"),
+            Some("session")
+        );
         assert_eq!(restored.vals["category"], "rust");
         assert!(restored.snapshot().is_some());
     }
@@ -354,6 +375,17 @@ graph:
     }
 
     #[test]
+    fn snapshot_rejects_a_zero_response_body_limit() {
+        let request = net::Request::follow("https://example.com").unwrap();
+        let mut snapshot = Snapshot::try_from(request).unwrap();
+        snapshot.max_body_bytes = Some(0);
+
+        let error = snapshot.restore(None).unwrap_err();
+
+        assert!(error.contains("max_body_bytes must be positive"));
+    }
+
+    #[test]
     fn restore_rejects_an_unsupported_proxy_protocol() {
         let request = net::Request::follow("https://example.com").unwrap();
         let mut snapshot = Snapshot::try_from(request).unwrap();
@@ -367,14 +399,85 @@ graph:
     }
 
     #[test]
-    fn snapshot_rejects_an_invalid_cookie_name() {
-        let request = net::Request::follow("https://example.com")
+    fn request_rejects_an_invalid_cookie_name_before_snapshotting() {
+        let error = net::Request::follow("https://example.com")
             .unwrap()
-            .cookie("bad;name", "value");
+            .cookie("bad;name", "value")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid cookie name"));
+    }
+
+    #[test]
+    fn snapshot_rejects_an_opaque_request_header() {
+        let mut request = net::Request::follow("https://example.com").unwrap();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::HeaderName::from_static("x-opaque"),
+            http::header::HeaderValue::from_bytes(b"\xFF").unwrap(),
+        );
+        request.headers = net::Headers::from(headers);
 
         let error = Snapshot::try_from(request).unwrap_err();
 
-        assert!(error.contains("cookie name is invalid"));
+        assert!(error.contains("is not a string"));
+    }
+
+    #[test]
+    fn snapshot_rejects_a_raw_cookie_header() {
+        let request = net::Request::follow("https://example.com").unwrap();
+        let mut snapshot = Snapshot::try_from(request).unwrap();
+        snapshot.headers.try_set("Cookie", "sid=one").unwrap();
+
+        let error = snapshot.restore(None).unwrap_err();
+
+        assert!(error.contains("Cookie header is reserved"));
+    }
+
+    #[test]
+    fn cookie_scope_survives_snapshot_recovery() {
+        let mut request = net::Request::follow("https://www.example.com/admin/page").unwrap();
+        let origin = url::Url::parse(&request.url).unwrap();
+        let mut headers = net::Headers::new();
+        headers
+            .try_append(
+                "set-cookie",
+                "shared=one; Domain=example.com; Path=/; Secure; Expires=Thu, 01 Jan 2099 00:00:00 GMT",
+            )
+            .unwrap();
+        headers
+            .try_append("set-cookie", "admin=two; Path=/admin")
+            .unwrap();
+        headers
+            .try_append("set-cookie", "public=three; Path=/public")
+            .unwrap();
+        request.cookies.store_response(&origin, &headers);
+
+        let encoded = serde_json::to_value(Snapshot::try_from(request).unwrap()).unwrap();
+        let restored = serde_json::from_value::<Snapshot>(encoded)
+            .unwrap()
+            .restore(None)
+            .unwrap();
+
+        let admin = url::Url::parse("https://www.example.com/admin/next").unwrap();
+        assert_eq!(
+            restored.cookies.request_header(&admin).unwrap().unwrap(),
+            "admin=two; shared=one"
+        );
+        let insecure = url::Url::parse("http://www.example.com/admin/next").unwrap();
+        assert_eq!(
+            restored.cookies.request_header(&insecure).unwrap().unwrap(),
+            "admin=two"
+        );
+        let subdomain = url::Url::parse("https://api.example.com/admin/next").unwrap();
+        assert_eq!(
+            restored
+                .cookies
+                .request_header(&subdomain)
+                .unwrap()
+                .unwrap(),
+            "shared=one"
+        );
     }
 
     #[test]
@@ -393,7 +496,9 @@ graph:
         )
         .unwrap()
         .header("authorization", "header-secret")
+        .unwrap()
         .cookie("session", "cookie-secret")
+        .unwrap()
         .body(net::Body::Text("body-secret".to_string()))
         .vals("token", "vals-secret")
         .kwargs("api_key", "kwargs-secret");

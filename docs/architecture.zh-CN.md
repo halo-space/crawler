@@ -22,8 +22,8 @@
 | 代码模式 | 已实现 | 使用 `#[spider]`、异步 handler、`Tx.request` 和 `Tx.item` |
 | YAML Rules 模式 | 已实现 | 配置校验、请求图、字段提取、绑定、转换、Item Schema 与下一跳 Request |
 | Memory Scheduler | 已实现 | 优先级/FIFO 队列、延迟请求、租约、续租、重试、终态、Trace 与统计 |
-| HTTP Downloader | 已实现 | headers、cookies、body、timeout、redirect、proxy 和 TLS 配置 |
-| Response 字符集解码 | 已实现 | `Response::text()` 按 BOM/header/HTML meta/UTF-8 确定性选择，并保留原 body |
+| HTTP Downloader | 已实现 | 有界解码 body、完整 fetch 超时、结构化 headers/cookies、redirect、proxy/TLS 隔离和有界空闲 Client |
+| Response 字符集解码 | 已实现 | `Response::text()` 按 BOM/header/HTML meta/UTF-8 确定性选择，并保留 HTTP 内容解码后 bytes |
 | Browser Downloader | 未实现 | 当前为明确返回 `UnsupportedMode("browser")` 的占位实现，计划在 v5 完成 |
 | CSS Selector | 已实现 | `Response::css()` 返回原生 `scrape_core::Soup` |
 | CSS Healing | 已实现 | 普通 CSS 失败后执行确定性全文档候选评分；需要显式开启 |
@@ -326,20 +326,47 @@ sequenceDiagram
 - Scheduler `failure` 是唯一的队列层 Request 重试入口。只有本地执行重试耗尽后，Worker 才提交 failure。
 - `Tx.request` 和 `Tx.item` 都等待其 Event 真正处理完成，因此解析成功不会早于输出被 Scheduler 接受。
 - Item 提交最终失败会返回到当前解析调用，并使当前 Request 走失败结算。
-- `Response::follow` 始终继承 vals 与 Trace 身份，只在同源目标继承 headers/cookies；跨源目标从空凭据开始。
-- HTTP Downloader 在发送每个 redirect target 前检查 `allowed_domains`；越界目标按正常过滤处理，不进入下载重试或 `error_download`，允许的跨源 redirect 也不继承 headers/cookies。
-- 同源 redirect 会把中间响应的 `Set-Cookie` 应用到下一跳；一旦跨源，之前累积的凭证会在发送前清空。
+- `Response::follow` 始终继承 vals 与 Trace 身份。同源目标复制已更新的 Headers 和 CookieStore；跨源目标移除源站 headers，只保留目标 URL 可用的 Cookie。
+- HTTP Downloader 在发送每个 redirect target 前检查 `allowed_domains`；越界目标按正常过滤处理，不进入下载重试或 `error_download`；允许的跨源 redirect 移除源站 headers，只保留目标 URL 可用的 Cookie。
+- 每个 redirect 都会在下一跳前应用中间响应的全部 `Set-Cookie`。跨源时移除源站 headers，并在发送前把 CookieStore 缩减为目标 URL 可用的 Cookie。
 
 Proxy 和 TLS 都是 Request 级下载配置。`Http` 使用完整 proxy URL（包括凭据）与
 `tls.accept_invalid_certs` 组成 Client 池键，直连请求使用独立的无代理键。相同键可以并发复用；
-最后一个使用句柄释放后开始计算空闲时间，空闲 90 秒的条目在后续访问时惰性清理。
-`Http::close()` 会清空池并使并发中的冷启动插入失效，close 前开始构造的 Client 不能在 close 后
-重新挂回池中。同一 Request 的 redirect 保持使用该 Request 已选择的 Client；proxy/TLS 不会变成
-Downloader 的可变全局状态。
+最后一个使用句柄释放后开始计算空闲时间，空闲 90 秒的条目在后续访问时惰性清理。默认最多保留
+64 个空闲 Client，容量压力下淘汰最早空闲的条目。活跃条目不会被淘汰，可以暂时超过空闲容量；
+`Http::with_max_idle_clients` 替换这个启动后固定的正数上限。`Http::close()` 会清空池并使并发中的
+冷启动插入失效，close 前开始构造的 Client 不能在 close 后重新挂回池中。同一 Request 的 redirect
+保持使用该 Request 已选择的 Client；proxy/TLS 不会变成 Downloader 的可变全局状态。
 
-### 7.1 Response 字符解码
+### 7.1 HTTP 传输上限与状态
 
-v3 响应字符集合同保持 `Response.body` 为 Downloader 交付、字符转码前的 payload bytes。
+`Http` 默认对每个 Worker 强制 64 MiB 解码后响应体上限，`Http::with_max_body_bytes` 替换这个启动后
+固定的正数值。代码或 Rules Request 可以将正数 `max_body_bytes` 设为小于等于 Worker 上限；超过 Worker
+上限时在网络 I/O 前失败，不静默截断。Downloader 按解码后 chunk 消费并统计实际 bytes，不预分配上限大小。
+刚好等于上限时成功，第一个超出字节终止 stream 并返回明确错误。`Content-Length` 可以提前拒绝明显过大的
+未压缩响应，但不能取代解码后实际字节数。
+
+`Request.timeout` 是一次完整 `Http::fetch` 的单调预算：连接建立、所有允许的 redirect 与最终解码后
+body stream 共享一个 deadline。redirect 不重置该预算。Middleware 或 Scheduler 下载重试再次调用 fetch 时使用
+一份新的完整预算；parse 重试复用已有 Response，不重新下载。最终 body 仍是已有的有界
+`Response.body: Bytes`，不新增公开 streaming Response、文件 sink 或附件 API。
+
+`Headers` 包装 `http::HeaderMap<HeaderValue>`。名称使用标准大小写不敏感身份，Response 保留原始字节与
+收到的重复值；`set` 替换同名的所有值，`append` 保留原值并追加。Rules Request headers 仍是单值 map，
+因此通过 `set` 应用。Request Snapshot 把规范化名称序列化为非空字符串数组；Request 中的非字符串
+header 值会使 Snapshot 构建失败。Response 不序列化，可以保留原始非字符串值。
+
+`Cookies` 包装 `cookie_store::CookieStore`。Request 携带完整谱系快照，Downloader 只为每个实际 URL 选择适用的
+Cookie，并在业务解析前用全部响应 `Set-Cookie` 更新 store。Domain、Path、Secure、Max-Age 和 Expires
+由标准 store 处理。`Response::follow` 与 Rules edge 构造把更新后的 store 复制到后代 Request，包括 Request Snapshot
+与跨 Worker 恢复。已入队的兄弟 Request 是独立不可变快照，不观察后续变更。跨源构造移除源站 headers，
+并把复制的 store 缩减为目标 URL 可用的 Cookie，防止无关凭据进入新 Snapshot；不增加 Trace 级实时或
+分布式 CookieStore。跨站 Public Suffix Domain 会被拒绝，与当前 Request host 完全相同的
+Public Suffix 会规范化为 HostOnly；发送前无条件移除原始 `Cookie` header，保证 CookieStore 是唯一会话来源。
+
+### 7.2 Response 字符解码
+
+v3 响应字符集合同保持 `Response.body` 为 HTTP 内容解码后、字符转码前的 Downloader 交付 payload bytes。
 `Response::text()` 是 CSS、Regex、AI 与 JSON 消费者唯一的字符解码边界，按以下顺序选择第一个
 可识别编码：
 
@@ -495,6 +522,10 @@ after_spider
 `Builder::with_middleware(name, value)` 注册能力，不表示自动挂载到所有对象。Request、Response、Item 和 Spider 生命周期通过各自的 `middleware::Spec` 显式选择能力。只有 validate 的正常阶段 Spec 是 Registry 默认配置。
 
 默认 Dedup 只处理配置 key 生成的 Request fingerprint，不处理 Item，也不增加隐式 URL key。Rules 初始 Request 与 Tx 输出都经过 `before_scheduler`；指纹在这里检查并写入，因此后续 `Scheduler::push` 或运行种子 `init` 失败都不会回滚。SHA-256 输入是 `task_id`、Middleware key、rule name 与有序字段值组成的结构化元组，不使用可能碰撞的字符串 namespace 拼接。URL 归一化只按 query key 稳定排序，同名 key 保持原始顺序。所有启用规则先完成有限 TTL deadline 校验，再在同一把锁内统一检查并写入；任一 TTL 错误都不会留下部分指纹。某条规则的 `ttl: 0` 表示既不查询也不保存该规则指纹；省略或 `-1` 在进程生命周期内永久保留且不做容量淘汰。精确存储使用 `HashMap` 和过期时间堆，只从堆头惰性清理到期项。
+
+每个 RateLimit group 在活跃期间固定一个 interval。后续 Spec 以不同 QPS 复用同组时立即返回非法配置错误，
+不等待该组延迟。只有当 group 没有调用方持有且下一次允许时刻已过，才能在后续查找中惰性移除；
+不需要后台任务或热更新语义。
 
 ## 11. Item、校验与本地持久化
 

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use serde_json::Value;
 
@@ -8,7 +9,7 @@ use crate::net::{Method, Mode, Request};
 
 use super::{body, template, transport};
 
-#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -19,6 +20,8 @@ pub struct Config {
     pub method: Option<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
+    #[serde(default)]
+    pub max_body_bytes: Option<u64>,
     #[serde(default)]
     pub dont_filter: Option<bool>,
     #[serde(default)]
@@ -33,6 +36,26 @@ pub struct Config {
     pub tls: Option<Value>,
     #[serde(default)]
     pub middlewares: Vec<middleware::Spec>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("protocol", &self.protocol)
+            .field("download_mode", &self.download_mode)
+            .field("method", &self.method)
+            .field("timeout", &self.timeout)
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("dont_filter", &self.dont_filter)
+            .field("headers_len", &self.headers.len())
+            .field("cookies_len", &self.cookies.len())
+            .field("has_body", &self.body.is_some())
+            .field("has_proxy", &self.proxy.is_some())
+            .field("has_tls", &self.tls.is_some())
+            .field("middlewares_len", &self.middlewares.len())
+            .finish()
+    }
 }
 
 impl Config {
@@ -59,14 +82,24 @@ impl Config {
                 Error::Message(format!("node {node} uses unsupported method: {method}"))
             })?;
         }
+        if self.max_body_bytes == Some(0) {
+            return Err(Error::Message(format!(
+                "node {node} max_body_bytes must be positive"
+            )));
+        }
         let mut header_names = HashSet::with_capacity(self.headers.len());
         for (name, value) in &self.headers {
             let header_name =
-                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                http::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
                     Error::Message(format!(
                         "node {node} has an invalid header name {name}: {error}"
                     ))
                 })?;
+            if header_name == http::header::COOKIE {
+                return Err(Error::Message(format!(
+                    "node {node} header {name} is reserved; use cookies instead"
+                )));
+            }
             if !header_names.insert(header_name) {
                 return Err(Error::Message(format!(
                     "node {node} contains duplicate header name: {name}"
@@ -77,14 +110,9 @@ impl Config {
             check_header_value(node, &format!("header {name}"), value)?;
         }
         for (name, value) in &self.cookies {
-            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
-                Error::Message(format!(
-                    "node {node} has an invalid cookie name {name}: {error}"
-                ))
-            })?;
             check_scalar(node, &format!("cookie {name}"), value)?;
             template::check(node, &format!("cookie {name}"), value)?;
-            check_header_value(node, &format!("cookie {name}"), value)?;
+            check_cookie(node, name, value)?;
         }
         body::check(node, self.body.as_ref())?;
         transport::check_proxy(node, self.proxy.as_ref())?;
@@ -137,6 +165,7 @@ impl Config {
             .map_err(|_| Error::Message("invalid request method".to_string()))?
             .unwrap_or_default();
         request.timeout = self.timeout;
+        request.max_body_bytes = self.max_body_bytes;
         request.dont_filter = self.dont_filter.unwrap_or(false);
         if let Some(mode) = self.download_mode.as_deref() {
             request.mode = match mode.to_ascii_lowercase().as_str() {
@@ -147,19 +176,25 @@ impl Config {
         }
 
         for (key, value) in &self.headers {
+            if key.eq_ignore_ascii_case("cookie") {
+                return Err(Error::Message(
+                    "Cookie header is reserved; use cookies instead".to_string(),
+                ));
+            }
             let value = template::render(value, &resolve)?;
-            crate::net::headers::insert(
-                &mut request.headers,
-                key.clone(),
-                template::scalar(&value, &format!("header {key}"))?,
-            );
+            let value = template::scalar(&value, &format!("header {key}"))?;
+            request.headers.try_set(key, &value).map_err(|error| {
+                Error::Message(format!("invalid request header {key}: {error}"))
+            })?;
         }
+        let url = url::Url::parse(&request.url)
+            .map_err(|error| Error::Message(format!("invalid request URL: {error}")))?;
         for (key, value) in &self.cookies {
             let value = template::render(value, &resolve)?;
-            request.cookies.insert(
-                key.clone(),
-                template::scalar(&value, &format!("cookie {key}"))?,
-            );
+            let value = template::scalar(&value, &format!("cookie {key}"))?;
+            request.cookies.insert(&url, key, &value).map_err(|error| {
+                Error::Message(format!("invalid request cookie {key}: {error}"))
+            })?;
         }
 
         request.body = self
@@ -189,10 +224,18 @@ fn check_scalar(node: &str, name: &str, value: &Value) -> Result<(), Error> {
 fn check_header_value(node: &str, name: &str, value: &Value) -> Result<(), Error> {
     let value = template::render(value, &|_| Some(Value::String("value".to_string())))?;
     let value = template::scalar(&value, name)?;
-    reqwest::header::HeaderValue::from_str(&value).map_err(|error| {
+    http::header::HeaderValue::from_str(&value).map_err(|error| {
         Error::Message(format!("node {node} has an invalid {name} value: {error}"))
     })?;
     Ok(())
+}
+
+fn check_cookie(node: &str, name: &str, value: &Value) -> Result<(), Error> {
+    let value = template::render(value, &|_| Some(Value::String("value".to_string())))?;
+    let value = template::scalar(&value, &format!("cookie {name}"))?;
+    crate::net::cookies::validate(name, &value).map_err(|error| {
+        Error::Message(format!("node {node} has an invalid cookie {name}: {error}"))
+    })
 }
 
 #[cfg(test)]
@@ -211,6 +254,33 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_transport_values() {
+        let config = serde_json::from_value::<Config>(serde_json::json!({
+            "headers": {"Authorization": "header-secret"},
+            "cookies": {"session": "cookie-secret"},
+            "body": {"token": "body-secret"},
+            "proxy": {"url": "http://proxy-user:proxy-password@localhost:8080"},
+            "tls": {"verify": false}
+        }))
+        .unwrap();
+
+        let debug = format!("{config:?}");
+
+        for secret in [
+            "header-secret",
+            "cookie-secret",
+            "body-secret",
+            "proxy-user",
+            "proxy-password",
+        ] {
+            assert!(!debug.contains(secret), "Debug exposed {secret}: {debug}");
+        }
+        assert!(debug.contains("headers_len: 1"));
+        assert!(debug.contains("cookies_len: 1"));
+        assert!(debug.contains("has_body: true"));
+    }
+
+    #[test]
     fn rejects_invalid_literal_header_and_cookie_values() {
         let header = serde_json::from_value::<Config>(serde_json::json!({
             "headers": {"X-Test": "line one\nline two"}
@@ -223,6 +293,37 @@ mod tests {
         }))
         .unwrap();
         assert!(cookie.validate("index").is_err());
+    }
+
+    #[test]
+    fn rejects_cookie_header_in_favor_of_the_cookie_store() {
+        let config = serde_json::from_value::<Config>(serde_json::json!({
+            "headers": {"COOKIE": "sid=one"}
+        }))
+        .unwrap();
+
+        let error = config.validate("index").unwrap_err();
+
+        assert!(error.to_string().contains("use cookies instead"));
+    }
+
+    #[test]
+    fn validates_and_applies_the_response_body_limit() {
+        let invalid = serde_json::from_value::<Config>(serde_json::json!({
+            "max_body_bytes": 0
+        }))
+        .unwrap();
+        assert!(invalid.validate("detail").is_err());
+
+        let config = serde_json::from_value::<Config>(serde_json::json!({
+            "max_body_bytes": 4_096
+        }))
+        .unwrap();
+        let mut request = Request::follow("https://example.com").unwrap();
+
+        config.apply_with(&mut request, |_| None).unwrap();
+
+        assert_eq!(request.max_body_bytes, Some(4_096));
     }
 
     #[test]
@@ -259,13 +360,17 @@ mod tests {
         .unwrap();
         let mut request = Request::follow("https://example.com")
             .unwrap()
-            .header("Authorization", "old");
+            .header("Authorization", "old")
+            .unwrap();
 
         config.apply_with(&mut request, |_| None).unwrap();
 
         assert_eq!(request.headers.len(), 1);
         assert_eq!(
-            request.headers.get("authorization").map(String::as_str),
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
             Some("new")
         );
     }

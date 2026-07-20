@@ -60,6 +60,7 @@ pub struct Request {
 
     pub mode: Mode,
     pub timeout: Option<u64>,
+    pub max_body_bytes: Option<u64>,
     pub proxy: Option<ProxyConfig>,
     pub tls: Option<TlsConfig>,
 
@@ -84,7 +85,7 @@ impl Request {
         let parsed = Url::parse(&url)?;
 
         if !parsed.has_host() {
-            return Err(Error::UrlNotAbsolute(url));
+            return Err(Error::UrlNotAbsolute);
         }
 
         let protocol = match parsed.scheme() {
@@ -109,6 +110,7 @@ impl Request {
             dont_filter: false,
             mode: Mode::Http,
             timeout: None,
+            max_body_bytes: None,
             proxy: None,
             tls: None,
             middlewares: Vec::new(),
@@ -169,14 +171,18 @@ impl Request {
         })
     }
 
-    pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        crate::net::headers::insert(&mut self.headers, key.into(), value.into());
-        self
+    pub fn header(mut self, key: impl AsRef<str>, value: impl AsRef<str>) -> Result<Self, Error> {
+        if key.as_ref().eq_ignore_ascii_case("cookie") {
+            return Err(Error::CookieHeader);
+        }
+        self.headers.try_set(key.as_ref(), value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn cookie(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.cookies.insert(key.into(), value.into());
-        self
+    pub fn cookie(mut self, key: impl AsRef<str>, value: impl AsRef<str>) -> Result<Self, Error> {
+        let url = Url::parse(&self.url)?;
+        self.cookies.insert(&url, key, value)?;
+        Ok(self)
     }
 
     pub fn method(mut self, method: Method) -> Self {
@@ -191,6 +197,11 @@ impl Request {
 
     pub fn mode(mut self, mode: Mode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    pub fn max_body_bytes(mut self, max_body_bytes: u64) -> Self {
+        self.max_body_bytes = Some(max_body_bytes);
         self
     }
 
@@ -313,6 +324,7 @@ impl fmt::Debug for Request {
             .field("dont_filter", &self.dont_filter)
             .field("mode", &self.mode)
             .field("timeout", &self.timeout)
+            .field("max_body_bytes", &self.max_body_bytes)
             .field("proxy", &self.proxy)
             .field("tls", &self.tls)
             .field("middlewares_len", &self.middlewares.len())
@@ -350,6 +362,15 @@ mod tests {
     }
 
     #[test]
+    fn body_limit_builder_sets_the_request_limit() {
+        let request = Request::follow("https://example.com")
+            .unwrap()
+            .max_body_bytes(1_024);
+
+        assert_eq!(request.max_body_bytes, Some(1_024));
+    }
+
+    #[test]
     fn middleware_helpers_write_specs() {
         let request = Request::follow("https://example.com")
             .unwrap()
@@ -374,6 +395,16 @@ mod tests {
     }
 
     #[test]
+    fn cookie_header_must_use_the_cookie_api() {
+        let error = Request::follow("https://example.com")
+            .unwrap()
+            .header("COOKIE", "sid=one")
+            .unwrap_err();
+
+        assert!(matches!(error, Error::CookieHeader));
+    }
+
+    #[test]
     fn node_is_a_single_stable_key() {
         let code = Request::follow("https://example.com")
             .unwrap()
@@ -392,7 +423,9 @@ mod tests {
         )
         .unwrap()
         .header("authorization", "header-secret")
+        .unwrap()
         .cookie("session", "cookie-secret")
+        .unwrap()
         .body(Body::Text("body-secret".to_string()))
         .vals("token", "vals-secret")
         .kwargs("api_key", "kwargs-secret")

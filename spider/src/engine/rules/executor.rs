@@ -188,6 +188,64 @@ graph:
     }
 
     #[test]
+    fn rules_descendants_receive_independent_cookie_snapshots() {
+        let config = Arc::new(
+            config::Config::from_yaml(
+                r#"
+spider:
+  name: books
+  start: [{node: index, url: https://example.com/books}]
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          links: {}
+    detail: {}
+  edges:
+    - from: index
+      kind: request
+      request:
+        node: detail
+        url: {from: $fields.links}
+"#,
+            )
+            .unwrap(),
+        );
+        let request = net::Request::follow("https://example.com/books").unwrap();
+        let mut response = response("");
+        let response_url = url::Url::parse(&response.url).unwrap();
+        response
+            .cookies
+            .insert(&response_url, "sid", "shared")
+            .unwrap();
+        let fields = IndexMap::from([(
+            "links".to_string(),
+            serde_json::json!(["https://example.com/one", "https://example.com/two"]),
+        )]);
+        let bind = IndexMap::new();
+        let context = Context {
+            request: &request,
+            response: &response,
+            fields: &fields,
+            bind: &bind,
+        };
+
+        let mut requests = build::requests(&config, &config.graph.edges[0], &context).unwrap();
+        let first_url = url::Url::parse(&requests[0].url).unwrap();
+        let second_url = url::Url::parse(&requests[1].url).unwrap();
+        assert_eq!(requests[0].cookies.get(&first_url, "sid"), Some("shared"));
+        assert_eq!(requests[1].cookies.get(&second_url, "sid"), Some("shared"));
+
+        requests[0]
+            .cookies
+            .insert(&first_url, "sid", "changed")
+            .unwrap();
+        assert_eq!(requests[0].cookies.get(&first_url, "sid"), Some("changed"));
+        assert_eq!(requests[1].cookies.get(&second_url, "sid"), Some("shared"));
+    }
+
+    #[test]
     fn request_array_renders_target_templates_after_alignment() {
         let config = Arc::new(
             config::Config::from_yaml(
@@ -241,8 +299,8 @@ graph:
 
         let requests = build::requests(&config, &config.graph.edges[0], &context).unwrap();
 
-        assert_eq!(requests[0].headers["X-Row"], "1:One");
-        assert_eq!(requests[1].headers["X-Row"], "2:Two");
+        assert_eq!(requests[0].headers.get("X-Row").unwrap(), "1:One");
+        assert_eq!(requests[1].headers.get("X-Row").unwrap(), "2:Two");
         let net::Body::Json(first_body) = &requests[0].body else {
             panic!("expected a JSON body");
         };

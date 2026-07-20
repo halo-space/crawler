@@ -22,8 +22,8 @@ The workspace contains four crates:
 | Code mode | Implemented | `#[spider]`, asynchronous handlers, `Tx.request`, and `Tx.item` |
 | YAML Rules mode | Implemented | Validation, request graph, extraction, binding, transforms, Item Schema, and downstream Requests |
 | Memory Scheduler | Implemented | Priority/FIFO queue, delayed Requests, leases, lease refresh, retry, terminal states, Traces, and statistics |
-| HTTP Downloader | Implemented | Headers, cookies, body, timeout, redirects, proxy, and TLS settings |
-| Response charset decoding | Implemented | Deterministic BOM/header/HTML-meta/UTF-8 selection in `Response::text()` with raw-body preservation |
+| HTTP Downloader | Implemented | Bounded decoded body, whole-fetch timeout, structured headers/cookies, redirects, proxy/TLS isolation, and bounded idle clients |
+| Response charset decoding | Implemented | Deterministic BOM/header/HTML-meta/UTF-8 selection in `Response::text()` while preserving post-content-decoding bytes |
 | Browser Downloader | Not implemented | The current stub returns `UnsupportedMode("browser")`; implementation is planned for v5 |
 | CSS Selector | Implemented | `Response::css()` returns the native `scrape_core::Soup` |
 | CSS Healing | Implemented | Deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
@@ -329,23 +329,59 @@ The important semantics are:
 - Scheduler `failure` is the only queue-level Request retry. The Worker submits it only after local execution retries are exhausted.
 - `Tx.request` and `Tx.item` wait for actual Event handling, so parsing cannot report success before the Scheduler accepts its output.
 - exhausted Item submission returns into the current parser call and causes the current Request to settle as failed.
-- `Response::follow` always inherits vals and Trace identity, but inherits headers and cookies only for a same-origin target.
-- the HTTP Downloader validates every redirect target against `allowed_domains` before sending it. A disallowed redirect is a normal filter, not a download retry or `error_download`; an allowed cross-origin redirect inherits no headers or cookies.
-- same-origin redirects apply intermediate `Set-Cookie` values to the next hop; those accumulated credentials are discarded before a cross-origin hop.
+- `Response::follow` always inherits vals and Trace identity. A same-origin target clones the updated Headers and CookieStore; a cross-origin target drops source headers and retains only cookies applicable to the target URL.
+- the HTTP Downloader validates every redirect target against `allowed_domains` before sending it. A disallowed redirect is a normal filter, not a download retry or `error_download`; an allowed cross-origin redirect drops source headers and retains only target-applicable cookies.
+- every redirect applies all intermediate `Set-Cookie` values before the next hop. On a cross-origin hop, source headers are removed and the CookieStore is reduced to target-applicable cookies before sending.
 
 Proxy and TLS are Request-level download settings. `Http` pools clients by the complete proxy URL
 (including credentials) and `tls.accept_invalid_certs`; direct requests use a separate no-proxy key.
 An entry can serve concurrent matching Requests, becomes idle after its last handle is released, and
-is removed lazily after 90 idle seconds. `Http::close()` clears the pool and invalidates concurrent
-cold-build insertion, so a client constructed before close cannot be reattached afterward. Redirects
-for one Request retain that Request's selected client; proxy or TLS configuration is never mutated as
-global Downloader state.
+is removed lazily after 90 idle seconds. The pool retains at most 64 idle Clients by default and evicts
+the oldest idle entry under pressure. Active entries are never evicted and may temporarily exceed the
+idle capacity; `Http::with_max_idle_clients` replaces the positive startup-frozen bound. `Http::close()`
+clears the pool and invalidates concurrent cold-build insertion, so a client constructed before close
+cannot be reattached afterward. Redirects for one Request retain that Request's selected client; proxy
+or TLS configuration is never mutated as global Downloader state.
 
-### 7.1 Response Character Decoding
+### 7.1 HTTP Transport Bounds and State
+
+`Http` enforces a Worker-level decoded-body ceiling of 64 MiB by default.
+`Http::with_max_body_bytes` replaces this positive startup setting. A code or Rules Request may set a
+positive `max_body_bytes` no greater than the Worker ceiling; a value above that ceiling fails before
+network I/O instead of being clamped. The Downloader consumes decoded chunks and counts their actual
+bytes without preallocating the ceiling. An exact-limit body succeeds, while the first byte over the
+limit terminates the stream with an explicit error. `Content-Length` may reject an obviously oversized
+unencoded response early, but never overrides the actual decoded count.
+
+`Request.timeout` is one monotonic budget for a complete `Http::fetch`: connection establishment, every
+allowed redirect, and the final decoded body stream share one deadline. Redirects do not reset it. A
+Middleware or Scheduler download retry invokes a new fetch and receives a fresh full budget; parse
+retry reuses the existing Response and performs no download. The completed body remains the existing
+bounded `Response.body: Bytes`; no public streaming Response, file sink, or attachment API is added.
+
+`Headers` is a wrapper over `http::HeaderMap<HeaderValue>`. Names use standard case-insensitive identity,
+Response values retain their raw bytes and received multiplicity, `set` replaces every value for a name,
+and `append` preserves existing values. Rules Request headers remain a single-value map and therefore
+apply through `set`. Request Snapshot serializes normalized names to non-empty arrays of string values;
+a non-string Request value makes Snapshot creation fail. Response is not serialized and may retain raw
+non-string values.
+
+`Cookies` wraps `cookie_store::CookieStore`. A Request carries its complete lineage snapshot, the
+Downloader selects only values applicable to each actual URL, and every response `Set-Cookie` updates
+the store before business parsing. Domain, Path, Secure, Max-Age, and Expires behavior comes from the
+standard store. `Response::follow` and Rules edge construction copy the updated store into descendants,
+including Request Snapshot and cross-Worker recovery. Already queued siblings are immutable copies and
+do not observe later mutations. Cross-origin construction removes source headers and reduces the copied
+store to target-applicable cookies, preventing unrelated credentials from entering the new Snapshot;
+cross-site public-suffix Domain attributes are rejected, while an identical public-suffix Request host
+is normalized to HostOnly. Raw `Cookie` headers are removed before transport so CookieStore remains
+the only session source. There is no Trace-wide live or distributed CookieStore.
+
+### 7.2 Response Character Decoding
 
 The v3 response charset contract keeps `Response.body` as the Downloader-delivered payload bytes
-before character transcoding. `Response::text()` is the single decoding boundary for CSS, Regex, AI,
-and JSON consumers. It selects the first recognized encoding in this order:
+after HTTP content decoding and before character transcoding. `Response::text()` is the single decoding
+boundary for CSS, Regex, AI, and JSON consumers. It selects the first recognized encoding in this order:
 
 ```text
 recognized BOM
@@ -505,6 +541,11 @@ Built-in implementations:
 `Builder::with_middleware(name, value)` registers a capability; it does not attach it to every object. Request, Response, Item, and Spider lifecycle Specs opt into capabilities explicitly. Only validate Specs for the normal stages are Registry defaults.
 
 Default Dedup handles only Request fingerprints built from explicitly configured keys; it never deduplicates Items or adds an implicit URL key. Both Rules initial Requests and Tx output pass through `before_scheduler`. Fingerprints are observed and inserted there, so a later `Scheduler::push` or run-seed `init` failure does not roll them back. SHA-256 hashes a structured tuple of `task_id`, Middleware key, rule name, and ordered values rather than an ad hoc concatenated namespace. URL normalization stably sorts query pairs only by key, preserving the original order of repeated keys. All active rules are checked and inserted under one lock after every finite TTL deadline has been validated, so a TTL error cannot partially mutate the store. A rule with `ttl: 0` neither checks nor stores its fingerprint; omitted TTL or `-1` remains for the process lifetime without capacity eviction. The exact in-memory store uses a `HashMap` plus an expiry heap and lazily removes only expired heap-head entries.
+
+Each RateLimit group fixes one interval while it is active. A later Spec using the same group with a
+different QPS fails immediately as invalid configuration rather than waiting behind the group's delay.
+The group can be removed lazily only when no caller retains it and its next permitted instant has
+passed; cleanup needs no background task or hot-reload behavior.
 
 ## 11. Items, Validation, and Local Persistence
 
