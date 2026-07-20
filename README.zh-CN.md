@@ -2,8 +2,9 @@
 
 简体中文 | [English](README.md)
 
-`crawler` 是一个使用 Rust 编写的单进程爬虫运行时。当前 v2 提供内存调度器、HTTP 下载器、
-中间件生命周期、异步 Spider 处理器、规则模式、CSS Healing、AI Selector 以及本地 JSONL 数据输出。
+`crawler` 是一个使用 Rust 编写的单进程爬虫运行时。v3 提供内存调度器、HTTP 下载器、中间件生命周期、
+异步 Spider 处理器、规则模式、CSS Healing、AI Selector 和本地 JSONL 数据输出，并完成 Task/Trace
+运行种子、按 Worker 能力领取 Request，以及确定性的响应字符集解码。
 
 完整的当前功能、运行模型与扩展边界见[架构与功能说明](docs/architecture.zh-CN.md)。
 
@@ -34,6 +35,10 @@ cargo run -p examples --bin basic
 不可变 Trace Snapshot 和初始 Request。远程 Scheduler 可以声明只消费已有运行种子；此时 Engine
 不会在 Worker 本地创建 Trace，也不会调用 `Spider.start()`。代码 Request 只持久化稳定 node，
 Worker 通过本地 Spider node 注册表恢复处理函数，不保存 Rust 函数指针。
+
+Rules 启动时，每条初始 Request 都先经过 `before_scheduler`，再把 Trace Snapshot 与准入后的
+Requests 原子写入 Scheduler。所有初始 Request 都被过滤仍是一轮有效运行：Trace Snapshot 会被
+保存，Engine 正常结束。
 
 在处理函数中通过 `self.tx.request(...)` 提交的新请求会进入同一个 Scheduler 队列；通过
 `self.tx.item(...)` 提交的数据经过 Item 中间件后由 Scheduler 提交。
@@ -129,19 +134,22 @@ Scheduler 时由新实现完整实现相同的 Request 与 Item 提交合同。
 Request 进入本地执行槽后先通过 `Scheduler::ack` 确认执行权，长任务运行期间通过
 `Scheduler::refresh_lease` 独立续租，提交最终结果期间也保持续租，最后分别调用 `Scheduler::success` 或
 `Scheduler::failure`。租约超时和续租间隔由具体 Scheduler 自己提供；Memory 默认超时 30 秒、
-每 10 秒续租。已确认执行失败时会保留有序且不重复的失败 Worker；未 ack 的领取过期不消费尝试次数。
+每 10 秒续租。最终 Payload 生成前明确丢失执行权时，Engine 终止执行且不提交结算；Payload 生成后
+以 `success / failure` 为最终依据，并发续租错误不能取消结算，临时结算错误只重试同一个 Payload，
+不会重新执行 Request。已确认执行失败时会保留有序且不重复的失败 Worker；未 ack 的领取过期不消费尝试次数。
 Memory 只从进程内不可变映射读取 Trace Snapshot。Engine 直接跟踪克隆出来的 Tx 生产者，不再通过固定空闲等待窗口猜测是否仍有输出。
 Engine 内部由一个 Kameo Actor 统一协调，Request 和输出 I/O 仍在独立 Tokio 任务中执行。
 当前 Request 内直接 await 的 Tx 调用可以使用完整 Request 上下文；移动到独立任务中的 Tx clone
 只保留 `task_id / trace_id`，不会继承 Request 执行权、租约身份、node、version 或 stats。
 Request 并发数、单次领取上限和 Event 容量是三个独立且只在启动时加载的配置，分别通过
-`with_concurrency`、`with_limit` 和 `with_event_limit` 设置。
+`with_concurrency`、`with_claim_limit` 和 `with_event_limit` 设置。
 Actor 开始处理 Event 时即释放 Event 容量，但 Tx 调用仍会等待对应 Scheduler 与 Middleware 工作完成。
 
 Dedup 只处理配置 key 生成的 Request 指纹。它在 `before_scheduler` 观察到 Request 时写入指纹，
-后续 `Scheduler::push` 失败不会回滚。SHA-256 输入使用 `task_id`、Middleware key、rule name 和
-有序字段值组成的结构化元组，namespace 不会因字符串拼接发生碰撞。URL 归一化只按 query key
-稳定排序，同名 key 的原始顺序不变。所有启用规则在同一临界区内检查并原子写入；TTL 省略或
+后续 `Scheduler::push` 或运行种子 `init` 失败都不会回滚。SHA-256 输入使用 `task_id`、
+Middleware key、rule name 和有序字段值组成的结构化元组，namespace 不会因字符串拼接发生碰撞。
+URL 归一化只按 query key 稳定排序，同名 key 的原始顺序不变。所有启用规则在同一临界区内检查并
+原子写入；TTL 省略或
 `-1` 表示进程生命周期内永久保留，某条规则配置 `0` 时既不查询也不保存该规则的指纹。
 
 HTTP Downloader 按 Request 应用 proxy 和 TLS 配置。只有 proxy URL 与
@@ -149,9 +157,14 @@ HTTP Downloader 按 Request 应用 proxy 和 TLS 配置。只有 proxy URL 与
 清空整个池。直连请求、不同代理凭据和不同 TLS 行为不会共用同一 Client 条目。同源 redirect 会把
 中间响应的 Cookie 带到下一跳；跨源 follow 和 redirect 均不继承 Request headers/cookies。
 
+v3 的响应文本合同保持 `Response.body` 为下载得到的原始 bytes，并把字符解码统一放在
+`Response::text()`。编码优先级固定为 BOM、合法的 `Content-Type` charset、HTML 或缺失 MIME 时前
+1024 bytes 内的 HTML meta，最后回退 UTF-8。非法字节使用 Unicode replacement 语义，运行时不做
+统计字符集猜测；`Response::json<T>()` 复用同一条文本解码路径。
+
 ## 当前范围
 
-v2 当前聚焦于：
+当前 v3 运行时包含：
 
 - 单进程运行
 - Memory Scheduler
@@ -162,7 +175,14 @@ v2 当前聚焦于：
 - 代码模式与 YAML 规则模式
 - 本地 JSONL Item 输出
 
-Browser 下载器、分布式/API Scheduler 和 Master 控制面不在当前 v2 范围内。
+v3 Scheduler 合同要求 `next_requests` 与待处理判断只作用于当前 Worker 支持的下载模式，能力筛选
+必须和领取原子完成。真实 Browser Downloader 与 HTTP/browser 混合端到端执行属于 v5；可选的
+API/Redis/MySQL Scheduler 与 Master 控制面属于 v4，且 v4 不依赖 Browser 实现。
+`Memory::new(worker_id)` 默认只领取 HTTP Request；`Memory::with_modes(...)` 用于替换该能力集合，
+并拒绝空集合。
+
+媒体对象规范化不会下载文件。Item 附件下载尚未实现，也没有分配版本，后续必须由独立 OpenSpec
+确定合同。
 
 后端或 API 在保存配置前，可以通过 `Config::validate()` 校验完整规则，也可以通过
 `middleware::check(&spec)` 单独校验一条中间件配置。

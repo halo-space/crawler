@@ -5,36 +5,44 @@ use crate::{net, payload, scheduler};
 
 const RETRY_DELAY: Duration = Duration::from_millis(25);
 
-/// Runs one Request execution while its acknowledged lease remains valid.
+/// Runs one Request execution and submits its final settlement while the
+/// acknowledged lease remains valid.
 ///
-/// Ownership loss, lease expiry, or a terminal refresh error stops the
-/// execution and returns a Scheduler error.
-pub(super) async fn run<S, T>(
+/// Ownership loss before execution completes prevents settlement. Once the
+/// final Payload exists, the settlement response is authoritative and a
+/// concurrent refresh error only stops further refreshes.
+pub(super) async fn run<S, F>(
     scheduler: &S,
     request: &net::Request,
-    execution: impl Future<Output = Result<T, crate::Error>>,
-) -> Result<T, crate::Error>
+    execution: impl Future<Output = payload::Payload>,
+    settle: impl FnOnce(payload::Payload) -> F,
+) -> Result<(), crate::Error>
 where
     S: scheduler::Scheduler,
+    F: Future<Output = Result<(), crate::Error>>,
 {
     let Some(policy) = scheduler.lease() else {
-        return execution.await;
+        return settle(execution.await).await;
     };
 
     let mut payload = payload::Payload::for_request(request, request.leased_by.clone());
     payload.state = net::State::Processing;
-    let refresh = refresh(
-        scheduler,
-        payload,
-        policy,
-        claimed_deadline(request.lease_time, policy.timeout()),
-    );
+    let deadline = claimed_deadline(request.lease_time, policy.timeout(), request.id.as_str())?;
+    let refresh = refresh(scheduler, payload, policy, deadline);
     tokio::pin!(execution);
     tokio::pin!(refresh);
+    let payload = tokio::select! {
+        biased;
+        error = &mut refresh => return Err(crate::Error::Scheduler(error)),
+        payload = &mut execution => payload,
+    };
+
+    let settlement = settle(payload);
+    tokio::pin!(settlement);
     tokio::select! {
         biased;
-        error = &mut refresh => Err(crate::Error::Scheduler(error)),
-        result = &mut execution => result,
+        result = &mut settlement => result,
+        _ = &mut refresh => settlement.await,
     }
 }
 
@@ -50,7 +58,12 @@ where
 {
     loop {
         match refresh_until(scheduler, &payload, deadline, policy.interval()).await {
-            Ok(refreshed_at) => deadline = refreshed_at + policy.timeout(),
+            Ok(refreshed_at) => {
+                deadline = match checked_deadline(refreshed_at, policy.timeout(), &payload.id) {
+                    Ok(deadline) => deadline,
+                    Err(error) => return error,
+                };
+            }
             Err(error) => return error,
         }
         tokio::time::sleep(policy.interval()).await;
@@ -77,7 +90,11 @@ where
                 if now >= deadline {
                     return Err(scheduler::Error::LeaseExpired(payload.id.clone()));
                 }
-                tokio::time::sleep_until((now + RETRY_DELAY.min(interval)).min(deadline)).await;
+                let retry_at = now
+                    .checked_add(RETRY_DELAY.min(interval))
+                    .unwrap_or(deadline)
+                    .min(deadline);
+                tokio::time::sleep_until(retry_at).await;
             }
             Ok(Err(error)) => return Err(error),
             Err(_) => return Err(scheduler::Error::LeaseExpired(payload.id.clone())),
@@ -85,11 +102,31 @@ where
     }
 }
 
-fn claimed_deadline(lease_time: i64, timeout: Duration) -> tokio::time::Instant {
+fn claimed_deadline(
+    lease_time: i64,
+    timeout: Duration,
+    request_id: &str,
+) -> Result<tokio::time::Instant, scheduler::Error> {
     let elapsed = crate::utils::time::now_millis()
         .saturating_sub(lease_time)
         .max(0) as u64;
-    tokio::time::Instant::now() + timeout.saturating_sub(Duration::from_millis(elapsed))
+    checked_deadline(
+        tokio::time::Instant::now(),
+        timeout.saturating_sub(Duration::from_millis(elapsed)),
+        request_id,
+    )
+}
+
+fn checked_deadline(
+    start: tokio::time::Instant,
+    timeout: Duration,
+    request_id: &str,
+) -> Result<tokio::time::Instant, scheduler::Error> {
+    start.checked_add(timeout).ok_or_else(|| {
+        scheduler::Error::Message(format!(
+            "lease duration exceeds the runtime clock range for Request {request_id}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -103,6 +140,13 @@ mod tests {
         refreshes: AtomicUsize,
         successes: usize,
         first_delay: Duration,
+        refresh_failure: RefreshFailure,
+    }
+
+    #[derive(Clone, Copy)]
+    enum RefreshFailure {
+        Unavailable,
+        LeaseMismatch,
     }
 
     impl TestScheduler {
@@ -112,6 +156,7 @@ mod tests {
                 refreshes: AtomicUsize::new(0),
                 successes: usize::MAX,
                 first_delay: Duration::ZERO,
+                refresh_failure: RefreshFailure::Unavailable,
             }
         }
 
@@ -121,6 +166,7 @@ mod tests {
                 refreshes: AtomicUsize::new(0),
                 successes: 0,
                 first_delay: Duration::ZERO,
+                refresh_failure: RefreshFailure::Unavailable,
             }
         }
 
@@ -130,6 +176,17 @@ mod tests {
                 refreshes: AtomicUsize::new(0),
                 successes: 1,
                 first_delay: delay,
+                refresh_failure: RefreshFailure::Unavailable,
+            }
+        }
+
+        fn ownership_loss_after(policy: scheduler::Lease, successes: usize) -> Self {
+            Self {
+                policy,
+                refreshes: AtomicUsize::new(0),
+                successes,
+                first_delay: Duration::ZERO,
+                refresh_failure: RefreshFailure::LeaseMismatch,
             }
         }
     }
@@ -181,10 +238,17 @@ mod tests {
             Ok(())
         }
 
-        async fn refresh_lease(&self, _payload: &payload::Payload) -> Result<(), scheduler::Error> {
+        async fn refresh_lease(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
             let attempt = self.refreshes.fetch_add(1, Ordering::SeqCst);
             if attempt >= self.successes {
-                return Err(scheduler::Error::Unavailable("offline".to_string()));
+                return match self.refresh_failure {
+                    RefreshFailure::Unavailable => {
+                        Err(scheduler::Error::Unavailable("offline".to_string()))
+                    }
+                    RefreshFailure::LeaseMismatch => {
+                        Err(scheduler::Error::LeaseMismatch(payload.id.clone()))
+                    }
+                };
             }
             if attempt == 0 {
                 tokio::time::sleep(self.first_delay).await;
@@ -210,6 +274,10 @@ mod tests {
         request
     }
 
+    async fn settle(_payload: payload::Payload) -> Result<(), crate::Error> {
+        Ok(())
+    }
+
     #[tokio::test]
     async fn starts_refresh_before_immediate_execution_completes() {
         let policy =
@@ -217,7 +285,13 @@ mod tests {
         let scheduler = TestScheduler::new(policy);
         let request = claimed_request();
 
-        let result = run(&scheduler, &request, async { Ok::<_, crate::Error>(()) }).await;
+        let result = run(
+            &scheduler,
+            &request,
+            async { payload::Payload::new() },
+            settle,
+        )
+        .await;
 
         result.unwrap();
         assert_eq!(scheduler.refreshes.load(Ordering::SeqCst), 1);
@@ -232,7 +306,12 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_millis(25),
-            run(&scheduler, &request, async { Ok::<_, crate::Error>(()) }),
+            run(
+                &scheduler,
+                &request,
+                async { payload::Payload::new() },
+                settle,
+            ),
         )
         .await
         .expect("lease refresh must run alongside request execution")
@@ -254,7 +333,8 @@ mod tests {
             run(
                 &scheduler,
                 &request,
-                std::future::pending::<Result<(), crate::Error>>(),
+                std::future::pending::<payload::Payload>(),
+                settle,
             ),
         )
         .await
@@ -279,7 +359,8 @@ mod tests {
             run(
                 &scheduler,
                 &request,
-                std::future::pending::<Result<(), crate::Error>>(),
+                std::future::pending::<payload::Payload>(),
+                settle,
             ),
         )
         .await
@@ -290,5 +371,66 @@ mod tests {
             Err(crate::Error::Scheduler(scheduler::Error::LeaseExpired(id))) if id == request.id
         ));
         assert!(scheduler.refreshes.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn settlement_continues_after_refresh_loses_ownership() {
+        let policy =
+            scheduler::Lease::new(Duration::from_millis(200), Duration::from_millis(5)).unwrap();
+        let scheduler = TestScheduler::ownership_loss_after(policy, 1);
+        let request = claimed_request();
+
+        let result = run(
+            &scheduler,
+            &request,
+            async { payload::Payload::new() },
+            |_| async {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                Ok(())
+            },
+        )
+        .await;
+
+        result.unwrap();
+        assert!(scheduler.refreshes.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn settlement_error_wins_after_refresh_loses_ownership() {
+        let policy =
+            scheduler::Lease::new(Duration::from_millis(200), Duration::from_millis(5)).unwrap();
+        let scheduler = TestScheduler::ownership_loss_after(policy, 1);
+        let request = claimed_request();
+
+        let result = run(
+            &scheduler,
+            &request,
+            async { payload::Payload::new() },
+            |_| async {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                Err(crate::Error::Scheduler(scheduler::Error::VersionMismatch(
+                    "settlement".to_string(),
+                )))
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(crate::Error::Scheduler(scheduler::Error::VersionMismatch(id)))
+                if id == "settlement"
+        ));
+        assert!(scheduler.refreshes.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[test]
+    fn deadline_overflow_is_returned_as_a_scheduler_error() {
+        let request_id = "request-overflow";
+
+        let error =
+            checked_deadline(tokio::time::Instant::now(), Duration::MAX, request_id).unwrap_err();
+
+        assert!(matches!(error, scheduler::Error::Message(message)
+            if message.contains(request_id) && message.contains("runtime clock range")));
     }
 }

@@ -12,34 +12,15 @@ pub(super) async fn handle<S>(
 where
     S: scheduler::Scheduler + Send,
 {
-    let mut ready = Vec::with_capacity(requests.len());
-    for request in requests {
-        let node = request.node_key().to_string();
-        match registry
-            .before_scheduler(request)
-            .await
-            .map_err(crate::Error::Middleware)?
-        {
-            middleware::registry::Output::Continue(request) => ready.push(request),
-            middleware::registry::Output::Skip { middleware } => {
-                if let Some(context) = context
-                    && let Some(stats) = context.stats()
-                {
-                    stats.total(&node, 1);
-                    super::record_skip(stats, &node, &middleware);
-                }
-            }
-        }
-    }
-
-    if ready.is_empty() {
+    let requests = crate::engine::admission::apply(requests, context, registry.as_ref()).await?;
+    if requests.is_empty() {
         return Ok(());
     }
 
     let payload = context
         .map(Context::payload)
         .unwrap_or_default()
-        .requests(ready);
+        .requests(requests);
 
     scheduler
         .push(payload)

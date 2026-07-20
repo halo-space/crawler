@@ -248,7 +248,7 @@ async fn claim_limit_fills_concurrency_in_multiple_single_claims() {
         .with_spider(EmptySpider::new())
         .build()
         .with_concurrency(16)
-        .with_limit(4);
+        .with_claim_limit(4);
 
     runtime.start().await.unwrap();
 
@@ -275,7 +275,7 @@ async fn transient_claim_failure_is_retried_without_losing_requests() {
         .with_spider(EmptySpider::new())
         .build()
         .with_concurrency(1)
-        .with_limit(1);
+        .with_claim_limit(1);
 
     runtime.start().await.unwrap();
 
@@ -301,7 +301,7 @@ async fn pending_state_failure_drains_an_active_request_before_returning() {
         .with_spider(EmptySpider::new())
         .build()
         .with_concurrency(2)
-        .with_limit(1);
+        .with_claim_limit(1);
 
     let error = runtime.start().await.unwrap_err();
 
@@ -377,7 +377,7 @@ async fn zero_runtime_limits_are_rejected_before_startup() {
     let mut claim = engine::Builder::new()
         .with_spider(EmptySpider::new())
         .build()
-        .with_limit(0);
+        .with_claim_limit(0);
     assert!(
         claim
             .start()

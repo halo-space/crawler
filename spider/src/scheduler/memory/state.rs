@@ -29,8 +29,21 @@ impl State {
         self.queue.push(snapshot, now);
     }
 
-    pub(super) fn pop(&mut self, now: i64) -> Option<net::request::Snapshot> {
-        self.queue.pop(now)
+    pub(super) fn take(
+        &mut self,
+        now: i64,
+        limit: usize,
+        supported_modes: &[net::Mode],
+    ) -> Vec<net::request::Snapshot> {
+        self.queue.take(now, limit, supported_modes)
+    }
+
+    pub(super) fn has_pending_requests(&self, supported_modes: &[net::Mode]) -> bool {
+        self.queue.contains_supported(supported_modes)
+            || self
+                .processing
+                .values()
+                .any(|request| supported_modes.contains(&request.mode))
     }
 
     pub(super) fn fail_request(&mut self, request: &net::Request, error: impl Into<String>) {

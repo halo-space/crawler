@@ -37,7 +37,9 @@ impl Middleware for RateLimit {
             if *next > now {
                 tokio::time::sleep(*next - now).await;
             }
-            *next = Instant::now() + interval;
+            *next = Instant::now()
+                .checked_add(interval)
+                .ok_or_else(|| invalid_config("qps exceeds the runtime clock range"))?;
 
             Ok(Next::Continue(request))
         })
@@ -100,6 +102,9 @@ fn interval(spec: &Spec) -> Result<Duration, crate::middleware::Error> {
     if interval.is_zero() {
         return Err(invalid_config("qps exceeds the supported timer precision"));
     }
+    if Instant::now().checked_add(interval).is_none() {
+        return Err(invalid_config("qps exceeds the runtime clock range"));
+    }
     Ok(interval)
 }
 
@@ -146,5 +151,15 @@ mod tests {
 
         assert!(check(&too_small).is_err());
         assert!(check(&too_large).is_err());
+    }
+
+    #[test]
+    fn rejects_qps_outside_the_runtime_clock_range() {
+        let qps = 1e-19;
+        let duration = Duration::try_from_secs_f64(1.0 / qps).unwrap();
+        if Instant::now().checked_add(duration).is_none() {
+            let spec = Spec::new("rate_limit").args(serde_json::json!({"qps": qps}));
+            assert!(check(&spec).is_err());
+        }
     }
 }

@@ -1,4 +1,5 @@
 mod actor;
+mod admission;
 pub mod builder;
 pub mod code;
 #[doc(hidden)]

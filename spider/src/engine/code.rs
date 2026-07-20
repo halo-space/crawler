@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::scheduler;
+use crate::{middleware, scheduler};
 
 #[doc(hidden)]
 pub struct Init {
@@ -17,7 +17,11 @@ impl<S> super::init::Init<S> for Init
 where
     S: scheduler::Scheduler + scheduler::Init + 'static,
 {
-    async fn init(&self, scheduler: Arc<S>) -> Result<super::init::Output, crate::Error> {
+    async fn init(
+        &self,
+        scheduler: Arc<S>,
+        _registry: Arc<middleware::Registry>,
+    ) -> Result<super::init::Output, crate::Error> {
         let Some((task_id, trace_id)) = &self.seed else {
             return Ok(super::init::Output::Consume);
         };

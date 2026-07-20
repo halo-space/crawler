@@ -13,6 +13,7 @@ use state::State;
 #[derive(Debug)]
 pub struct Memory {
     worker_id: String,
+    supported_modes: Vec<net::Mode>,
     lease: scheduler::Lease,
     state: Mutex<State>,
     writer: item::local::Writer,
@@ -27,10 +28,27 @@ impl Memory {
         );
         Self {
             worker_id,
+            supported_modes: vec![net::Mode::Http],
             lease: scheduler::Lease::default(),
             state: Mutex::new(State::default()),
             writer: item::local::Writer::default(),
         }
+    }
+
+    /// Replaces the download modes this Worker can claim. Memory defaults to HTTP only.
+    pub fn with_modes(mut self, modes: impl IntoIterator<Item = net::Mode>) -> Self {
+        let mut supported_modes = Vec::new();
+        for mode in modes {
+            if !supported_modes.contains(&mode) {
+                supported_modes.push(mode);
+            }
+        }
+        assert!(
+            !supported_modes.is_empty(),
+            "Memory supported_modes must not be empty"
+        );
+        self.supported_modes = supported_modes;
+        self
     }
 
     pub fn with_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
@@ -197,16 +215,11 @@ impl scheduler::Scheduler for Memory {
     async fn next_requests(&self, limit: usize) -> Result<Vec<net::Request>, scheduler::Error> {
         let mut state = self.state();
         claim::reclaim(&mut state, self.lease);
-        let mut requests = Vec::new();
-        let mut remaining = state.queued_len();
+        let now = crate::utils::time::now_millis();
+        let queued = state.take(now, limit, &self.supported_modes);
+        let mut requests = Vec::with_capacity(queued.len());
 
-        while requests.len() < limit && remaining != 0 {
-            remaining -= 1;
-            let now = crate::utils::time::now_millis();
-            let Some(queued) = state.pop(now) else {
-                break;
-            };
-
+        for queued in queued {
             let Some(mut request) = claim::restore(&mut state, queued, &self.worker_id) else {
                 continue;
             };
@@ -231,7 +244,7 @@ impl scheduler::Scheduler for Memory {
 
     async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
         let state = self.state();
-        Ok(state.queued_len() != 0 || !state.processing.is_empty())
+        Ok(state.has_pending_requests(&self.supported_modes))
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
@@ -367,11 +380,6 @@ impl scheduler::Init for Memory {
                 id: trace_id.clone(),
                 message,
             })?;
-        if requests.is_empty() && snapshot.dsl.is_some() {
-            return Err(scheduler::Error::Message(
-                "Rules initial requests must not be empty".to_string(),
-            ));
-        }
         if requests.iter().any(|request| request.trace_id != trace_id) {
             return Err(scheduler::Error::Message(
                 "all initial requests must reference the initialized trace_id".to_string(),

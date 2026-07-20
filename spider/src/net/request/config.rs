@@ -148,7 +148,8 @@ impl Config {
 
         for (key, value) in &self.headers {
             let value = template::render(value, &resolve)?;
-            request.headers.insert(
+            crate::net::headers::insert(
+                &mut request.headers,
                 key.clone(),
                 template::scalar(&value, &format!("header {key}"))?,
             );
@@ -248,5 +249,24 @@ mod tests {
         let error = config.validate("index").unwrap_err();
 
         assert!(error.to_string().contains("duplicate header name"));
+    }
+
+    #[test]
+    fn request_header_config_overrides_inherited_name_case_insensitively() {
+        let config = serde_json::from_value::<Config>(serde_json::json!({
+            "headers": {"authorization": "new"}
+        }))
+        .unwrap();
+        let mut request = Request::follow("https://example.com")
+            .unwrap()
+            .header("Authorization", "old");
+
+        config.apply_with(&mut request, |_| None).unwrap();
+
+        assert_eq!(request.headers.len(), 1);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("new")
+        );
     }
 }

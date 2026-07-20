@@ -192,10 +192,11 @@ fn to_header_map(headers: &net::Headers) -> Result<HeaderMap, downloader::Error>
     let mut map = HeaderMap::new();
 
     for (key, value) in headers {
-        map.insert(
-            HeaderName::from_bytes(key.as_bytes())?,
-            HeaderValue::from_str(value)?,
-        );
+        let name = HeaderName::from_bytes(key.as_bytes())?;
+        if map.contains_key(&name) {
+            return Err(downloader::Error::DuplicateHeader(name.to_string()));
+        }
+        map.insert(name, HeaderValue::from_str(value)?);
     }
 
     Ok(map)
@@ -249,6 +250,19 @@ mod tests {
         proxy.to_string()
     }
 
+    #[test]
+    fn rejects_case_insensitive_duplicate_headers_at_transport_boundary() {
+        let headers = net::Headers::from([
+            ("Authorization".to_string(), "old".to_string()),
+            ("authorization".to_string(), "new".to_string()),
+        ]);
+
+        assert!(matches!(
+            to_header_map(&headers),
+            Err(downloader::Error::DuplicateHeader(name)) if name == "authorization"
+        ));
+    }
+
     fn through_proxy(target: &str, proxy: &str) -> net::Request {
         let mut request = net::Request::follow(target).unwrap();
         request.proxy = Some(net::ProxyConfig {
@@ -288,6 +302,38 @@ mod tests {
             Some("abc")
         );
         assert_eq!(response.body.as_ref(), b"ok");
+    }
+
+    #[tokio::test]
+    async fn preserves_encoded_body_and_exposes_decoded_text() {
+        const BODY: &[u8] = b"<html><h1>\xB9\xF0\xC1\xD6\xC3\xD7\xB7\xDB</h1></html>";
+        let (listener, base_url) = listener();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request(&mut stream);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=gbk\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                BODY.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(BODY).unwrap();
+        });
+
+        let response = Http::new()
+            .fetch(net::Request::follow(base_url).unwrap())
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.body().as_ref(), BODY);
+        assert_eq!(
+            response.css().unwrap().find("h1").unwrap().unwrap().text(),
+            "桂林米粉"
+        );
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some("text/html; charset=gbk")
+        );
     }
 
     #[tokio::test]

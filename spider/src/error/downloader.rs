@@ -14,6 +14,9 @@ pub enum Error {
     #[error("invalid header value: {0}")]
     InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
 
+    #[error("duplicate header name with different casing: {0}")]
+    DuplicateHeader(String),
+
     #[error("redirect target is outside allowed domains: {0}")]
     DisallowedRedirect(String),
 

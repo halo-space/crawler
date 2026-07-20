@@ -170,7 +170,7 @@ impl Request {
     }
 
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(key.into(), value.into());
+        crate::net::headers::insert(&mut self.headers, key.into(), value.into());
         self
     }
 

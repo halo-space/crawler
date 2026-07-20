@@ -38,13 +38,13 @@ pub trait Scheduler: Send + Sync {
         trace_id: &str,
     ) -> impl Future<Output = Result<Option<trace::Snapshot>, crate::scheduler::Error>> + Send;
 
-    /// 领取并恢复下一批可执行 Request，`limit` 是本次最多领取条数。
+    /// 按当前 Worker 能力领取并恢复下一批可执行 Request，`limit` 是本次最多领取条数。
     fn next_requests(
         &self,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<net::Request>, crate::scheduler::Error>> + Send;
 
-    /// 判断是否仍有排队中或执行中的 Request。
+    /// 判断当前 Worker 能力范围内是否仍有排队中或执行中的 Request。
     fn has_pending_requests(
         &self,
     ) -> impl Future<Output = Result<bool, crate::scheduler::Error>> + Send;

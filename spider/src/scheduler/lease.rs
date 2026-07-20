@@ -10,19 +10,26 @@ pub struct Lease {
 
 impl Lease {
     pub fn new(timeout: Duration, interval: Duration) -> Result<Self, scheduler::Error> {
-        if timeout.is_zero() {
+        if timeout.is_zero() || !is_whole_millisecond(timeout) {
             return Err(scheduler::Error::Message(
-                "lease timeout must be greater than zero".to_string(),
+                "lease timeout must be a positive whole number of milliseconds".to_string(),
             ));
         }
-        if interval.is_zero() || interval >= timeout {
+        if interval.is_zero() || !is_whole_millisecond(interval) || interval >= timeout {
             return Err(scheduler::Error::Message(
-                "lease interval must be greater than zero and shorter than timeout".to_string(),
+                "lease interval must be a positive whole number of milliseconds shorter than timeout"
+                    .to_string(),
             ));
         }
         if timeout.as_millis() > i64::MAX as u128 {
             return Err(scheduler::Error::Message(
                 "lease timeout exceeds the supported millisecond range".to_string(),
+            ));
+        }
+        let now = std::time::Instant::now();
+        if now.checked_add(timeout).is_none() || now.checked_add(interval).is_none() {
+            return Err(scheduler::Error::Message(
+                "lease duration exceeds the runtime clock range".to_string(),
             ));
         }
         Ok(Self { timeout, interval })
@@ -39,6 +46,10 @@ impl Lease {
     pub(crate) fn timeout_millis(self) -> i64 {
         self.timeout.as_millis() as i64
     }
+}
+
+fn is_whole_millisecond(duration: Duration) -> bool {
+    duration.subsec_nanos().is_multiple_of(1_000_000)
 }
 
 impl Default for Lease {
@@ -59,6 +70,8 @@ mod tests {
         assert!(Lease::new(Duration::ZERO, Duration::from_secs(1)).is_err());
         assert!(Lease::new(Duration::from_secs(1), Duration::ZERO).is_err());
         assert!(Lease::new(Duration::from_secs(1), Duration::from_secs(1)).is_err());
+        assert!(Lease::new(Duration::from_nanos(500_000), Duration::from_nanos(250_000)).is_err());
+        assert!(Lease::new(Duration::from_millis(2), Duration::from_micros(1500)).is_err());
         assert_eq!(
             Lease::new(Duration::from_secs(2), Duration::from_secs(1)).unwrap(),
             Lease {
@@ -66,5 +79,13 @@ mod tests {
                 interval: Duration::from_secs(1),
             }
         );
+    }
+
+    #[test]
+    fn rejects_durations_outside_the_runtime_clock_range() {
+        let timeout = Duration::from_millis(i64::MAX as u64);
+        if std::time::Instant::now().checked_add(timeout).is_none() {
+            assert!(Lease::new(timeout, Duration::from_millis(1)).is_err());
+        }
     }
 }

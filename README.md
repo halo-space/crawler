@@ -2,9 +2,10 @@
 
 [简体中文](README.zh-CN.md) | English
 
-`crawler` is a single-process Rust crawler runtime. The v2 runtime uses the in-memory Scheduler,
-the HTTP downloader, middleware hooks, async Spider handlers, CSS healing, explicit AI selectors,
-and local JSONL item output.
+`crawler` is a single-process Rust crawler runtime. The v3 runtime uses the in-memory Scheduler, the
+HTTP downloader, middleware hooks, async Spider handlers, CSS healing, explicit AI selectors, and
+local JSONL item output. It also includes Task/Trace run seeds, capability-aware Scheduler claims,
+and deterministic response charset decoding.
 
 See the [architecture and feature overview](docs/architecture.md) for the complete runtime model,
 current capabilities, and extension boundaries.
@@ -27,6 +28,10 @@ For the default Memory Scheduler, each start creates one run seed from `Spider.n
 that it consumes an existing run; in that mode Engine neither creates a local Trace nor calls
 `Spider.start()`. Persisted code Requests contain only the stable node name, and the Worker resolves
 that node through its local Spider registry.
+
+Rules startup runs every generated initial Request through `before_scheduler`, then atomically stores
+the Trace Snapshot with the accepted Requests. A run whose initial Requests are all filtered remains
+valid: its Trace Snapshot is stored and the Engine exits normally.
 
 In rules mode, extractor expressions determine result cardinality directly: zero matches produce
 `null`, one match produces a scalar or element object, and multiple matches produce an array.
@@ -95,20 +100,25 @@ The default Memory Scheduler writes one JSON value per line below
 The current Request is acknowledged before execution, has its lease refreshed through
 `Scheduler::refresh_lease` while it is running and while completion is being submitted, and then
 completed through `Scheduler::success` or `Scheduler::failure`. Each Scheduler owns its lease timeout
-and refresh interval; Memory defaults to a 30-second timeout and a 10-second interval. Acknowledged
-lease failures preserve ordered, duplicate-free failed Worker history; unacknowledged claim expiry
-does not consume an attempt. Memory reads Trace Snapshots only from its immutable in-process map.
+and refresh interval; Memory defaults to a 30-second timeout and a 10-second interval. Definitive
+ownership loss before the final Payload exists stops execution without settlement. Once that Payload
+exists, `success / failure` is authoritative: a concurrent refresh error cannot cancel settlement,
+and transient settlement errors retry the same Payload without re-executing the Request.
+Failures after acknowledgment preserve ordered, duplicate-free failed Worker history; claim expiry
+before acknowledgment does not consume an attempt. Memory reads Trace Snapshots only from its
+immutable in-process map.
 Engine tracks cloned Tx producers directly, so delayed output is drained without a fixed idle timeout.
 Its internal coordinator is one Kameo Actor; Request and output I/O remains in independent Tokio tasks.
 An awaited Tx call can use the current Request context. A Tx clone moved into a detached task retains
 only `task_id / trace_id`; it never retains Request ownership, lease identity, node, version, or stats.
 Request concurrency, the per-call claim limit, and Event capacity are independent startup-frozen
-settings exposed by `with_concurrency`, `with_limit`, and `with_event_limit`.
+settings exposed by `with_concurrency`, `with_claim_limit`, and `with_event_limit`.
 Event capacity is released when the Actor starts handling an Event, while the Tx call continues waiting
 for the corresponding Scheduler and Middleware work to finish.
 
 Dedup is Request-only and uses explicitly configured keys. It records fingerprints when
-`before_scheduler` observes a Request; a later `Scheduler::push` failure does not roll them back.
+`before_scheduler` observes a Request; a later `Scheduler::push` or run-seed `init` failure does not
+roll them back.
 The SHA-256 input is a structured tuple of `task_id`, middleware key, rule name, and ordered values,
 so namespace parts cannot collide. URL normalization stably sorts query pairs by key while preserving
 the original order of repeated keys. All active rules are checked and inserted atomically; omitted TTL
@@ -122,6 +132,12 @@ therefore never share a client entry.
 Same-origin redirects carry intermediate response cookies into the next hop. Cross-origin follow and
 redirect handling never inherit Request headers or cookies.
 
+The v3 response-text contract keeps `Response.body` as the downloaded bytes and centralizes character
+decoding in `Response::text()`. Encoding precedence is BOM, a valid `Content-Type` charset, an HTML
+meta declaration within the first 1024 bytes for HTML or a missing MIME type, then UTF-8. Malformed
+sequences use Unicode replacement semantics; the runtime performs no statistical charset guessing.
+`Response::json<T>()` uses the same decoded text path.
+
 ## Development
 
 ```bash
@@ -131,9 +147,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
-The current release scope is single-process Memory scheduling, HTTP crawling, deterministic CSS
-healing, and explicit AI selectors. Browser rendering, distributed/API schedulers, and Master
-control-plane features are outside v2.
+The v3 Scheduler contract scopes `next_requests` and pending-work checks to the current Worker's
+supported download modes; filtering must be atomic with claim. A real Browser Downloader and mixed
+HTTP/browser end-to-end execution remain v5 work. The optional API/Redis/MySQL Schedulers and Master
+control plane remain v4 work and do not depend on Browser implementation.
+`Memory::new(worker_id)` defaults to HTTP-only claims; `Memory::with_modes(...)` replaces that
+capability set and rejects an empty set.
+
+Media normalization does not download files. Item attachment downloading is not implemented and has
+no assigned release; a separate future OpenSpec must define it.
 
 Backend and API integrations can validate a complete rules document with `Config::validate()` or
 validate one middleware declaration with `middleware::check(&spec)` before saving it.

@@ -8,6 +8,8 @@ use crate::middleware;
 use crate::net::{Cookies, Error, Headers, Request, StatusCode};
 use crate::selector;
 
+mod encoding;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum HttpVersion {
     Http10,
@@ -65,7 +67,7 @@ impl Response {
     }
 
     pub fn text(&self) -> Result<String, Error> {
-        String::from_utf8(self.body.to_vec()).map_err(Error::from)
+        Ok(encoding::decode(&self.body, &self.headers))
     }
 
     pub fn json<T>(&self) -> Result<T, Error>
@@ -119,6 +121,15 @@ mod tests {
             kwargs: HashMap::new(),
             middlewares: Vec::new(),
         }
+    }
+
+    fn encoded_response(body: &'static [u8], content_type: &str) -> Response {
+        let mut response = html_response("");
+        response
+            .headers
+            .insert("content-type".to_string(), content_type.to_string());
+        response.body = Bytes::from_static(body);
+        response
     }
 
     #[test]
@@ -277,6 +288,29 @@ mod tests {
         let value: serde_json::Value = response.json().unwrap();
 
         assert_eq!(value.get("title"), Some(&Value::from("Book A")));
+    }
+
+    #[test]
+    fn text_and_css_decode_without_changing_body_bytes() {
+        const BODY: &[u8] = b"<html><h1>\xB9\xF0\xC1\xD6\xC3\xD7\xB7\xDB</h1></html>";
+        let response = encoded_response(BODY, "text/html; charset=gbk");
+
+        assert!(response.text().unwrap().contains("桂林米粉"));
+        assert_eq!(
+            response.css().unwrap().find("h1").unwrap().unwrap().text(),
+            "桂林米粉"
+        );
+        assert_eq!(response.body().as_ref(), BODY);
+    }
+
+    #[test]
+    fn json_uses_the_same_charset_resolution_as_text() {
+        const BODY: &[u8] = b"{\"title\":\"\xB9\xF0\xC1\xD6\"}";
+        let response = encoded_response(BODY, "application/json; charset=gbk");
+        let value: serde_json::Value = response.json().unwrap();
+
+        assert_eq!(value.get("title"), Some(&Value::from("桂林")));
+        assert_eq!(response.body().as_ref(), BODY);
     }
 
     #[test]

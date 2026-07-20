@@ -10,10 +10,12 @@ async-openai = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+encoding_rs = { workspace = true }
 erased-serde = { workspace = true }
 futures-util = { workspace = true }
 indexmap = { workspace = true }
 kameo = { workspace = true }
+mime = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 scrape-core = { workspace = true }

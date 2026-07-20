@@ -549,6 +549,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2032,11 +2041,13 @@ dependencies = [
  "bytes",
  "chrono",
  "chrono-tz",
+ "encoding_rs",
  "erased-serde",
  "futures-util",
  "indexmap",
  "kameo",
  "macros",
+ "mime",
  "regex",
  "reqwest",
  "scrape-core",

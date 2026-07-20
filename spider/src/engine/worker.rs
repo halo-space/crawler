@@ -55,14 +55,22 @@ where
             stats.done(request.node_key(), 1);
         }
         payload.stats = stats.snapshot();
-
-        if payload.state == crate::net::State::Failed {
-            retry_failure(scheduler.as_ref(), &payload).await
-        } else {
-            retry_success(scheduler.as_ref(), &payload).await
-        }
+        payload
     };
-    engine::lease::run(scheduler.as_ref(), &request, execution).await
+    let settlement_scheduler = scheduler.clone();
+    engine::lease::run(
+        scheduler.as_ref(),
+        &request,
+        execution,
+        move |payload| async move {
+            if payload.state == crate::net::State::Failed {
+                retry_failure(settlement_scheduler.as_ref(), &payload).await
+            } else {
+                retry_success(settlement_scheduler.as_ref(), &payload).await
+            }
+        },
+    )
+    .await
 }
 
 fn panic_message(panic: Box<dyn Any + Send>) -> String {

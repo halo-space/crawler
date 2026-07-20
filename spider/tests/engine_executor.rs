@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -83,8 +84,72 @@ impl PayloadRecord {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FailureAttempt {
+    payload: PayloadRecord,
+    error: Option<String>,
+    stats: HashMap<String, Value>,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+}
+
+impl FailureAttempt {
+    fn from_payload(payload: &payload::Payload) -> Self {
+        Self {
+            payload: PayloadRecord::from_payload(payload),
+            error: payload.error.clone(),
+            stats: payload.stats.clone(),
+            start_time: payload.start_time,
+            end_time: payload.end_time,
+        }
+    }
+}
+
 struct LifecycleMiddleware {
     calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+struct SkipInitialRequest;
+
+impl Middleware for SkipInitialRequest {
+    fn before_scheduler<'a>(
+        &'a self,
+        _request: net::Request,
+        _spec: &'a Spec,
+    ) -> BoxFuture<'a, Next<net::Request>> {
+        Box::pin(async { Ok(Next::Skip) })
+    }
+}
+
+struct RejectInitialRequest;
+
+impl Middleware for RejectInitialRequest {
+    fn before_scheduler<'a>(
+        &'a self,
+        _request: net::Request,
+        _spec: &'a Spec,
+    ) -> BoxFuture<'a, Next<net::Request>> {
+        Box::pin(async {
+            Err(spider::middleware::Error::Message(
+                "initial Request rejected".to_string(),
+            ))
+        })
+    }
+}
+
+struct RewriteInitialRequest;
+
+impl Middleware for RewriteInitialRequest {
+    fn before_scheduler<'a>(
+        &'a self,
+        mut request: net::Request,
+        _spec: &'a Spec,
+    ) -> BoxFuture<'a, Next<net::Request>> {
+        Box::pin(async move {
+            request.url = "https://example.com/fail".to_string();
+            Ok(Next::Continue(request))
+        })
+    }
 }
 
 impl Middleware for LifecycleMiddleware {
@@ -235,6 +300,146 @@ graph:
     assert_eq!(engine.scheduler().trace_len(), 1);
     assert_eq!(engine.scheduler().done_len(), 1);
     assert_eq!(engine.scheduler().failed_len(), 0);
+}
+
+#[tokio::test]
+async fn rules_initial_requests_run_dedup_before_atomic_init() {
+    let config = spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: rules-initial-dedup
+  start:
+    - node: index
+      url: https://example.com/article
+      middlewares:
+        - name: dedup
+          hook: before_scheduler
+          args:
+            rules:
+              url: {key: ["$request.url"], ttl: -1}
+    - node: index
+      url: https://example.com/article
+      middlewares:
+        - name: dedup
+          hook: before_scheduler
+          args:
+            rules:
+              url: {key: ["$request.url"], ttl: -1}
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#,
+    )
+    .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_rules(config)
+        .with_spider(RulesSpider::new())
+        .with_downloader(TestDownload)
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(engine.scheduler().trace_len(), 1);
+    assert_eq!(engine.scheduler().done_len(), 1);
+    assert_eq!(engine.scheduler().failed_len(), 0);
+}
+
+#[tokio::test]
+async fn rules_initial_requests_may_all_be_filtered() {
+    let config = spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: rules-empty-run
+  start:
+    - node: index
+      url: https://example.com/article
+      middlewares:
+        - {name: skip-initial, hook: before_scheduler}
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#,
+    )
+    .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_rules(config)
+        .with_middleware("skip-initial", SkipInitialRequest)
+        .with_spider(RulesSpider::new())
+        .with_downloader(TestDownload)
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(engine.scheduler().trace_len(), 1);
+    assert_eq!(engine.scheduler().queued_len(), 0);
+    assert_eq!(engine.scheduler().done_len(), 0);
+    assert_eq!(engine.scheduler().failed_len(), 0);
+}
+
+#[tokio::test]
+async fn rules_initial_request_error_does_not_create_a_partial_run() {
+    let config = spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: rules-rejected-run
+  start:
+    - node: index
+      url: https://example.com/article
+      middlewares:
+        - {name: reject-initial, hook: before_scheduler}
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#,
+    )
+    .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_rules(config)
+        .with_middleware("reject-initial", RejectInitialRequest)
+        .with_spider(RulesSpider::new())
+        .with_downloader(TestDownload)
+        .build();
+
+    let error = engine.start().await.unwrap_err();
+
+    assert!(error.to_string().contains("initial Request rejected"));
+    assert_eq!(engine.scheduler().trace_len(), 0);
+    assert_eq!(engine.scheduler().queued_len(), 0);
+    assert_eq!(engine.scheduler().processing_len(), 0);
+}
+
+#[tokio::test]
+async fn rules_initial_request_uses_middleware_changes() {
+    let config = spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: rules-rewritten-run
+  start:
+    - node: index
+      url: https://example.com/original
+      middlewares:
+        - {name: rewrite-initial, hook: before_scheduler}
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#,
+    )
+    .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_rules(config)
+        .with_middleware("rewrite-initial", RewriteInitialRequest)
+        .with_spider(RulesSpider::new())
+        .with_downloader(TestDownload)
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(engine.scheduler().done_len(), 0);
+    assert_eq!(engine.scheduler().failed_len(), 1);
 }
 
 struct RulesDownload;
@@ -758,6 +963,34 @@ fn response(request: net::Request, body: &str) -> net::Response {
     }
 }
 
+struct RetryDownload {
+    attempts: Arc<Mutex<Vec<(i64, i32)>>>,
+}
+
+impl downloader::Download for RetryDownload {
+    async fn open(&self) -> Result<(), downloader::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), downloader::Error> {
+        Ok(())
+    }
+
+    async fn fetch(&self, request: net::Request) -> Result<net::Response, downloader::Error> {
+        self.attempts
+            .lock()
+            .unwrap()
+            .push((request.version, request.retry_count));
+        if request.retry_count == 0 {
+            Err(downloader::Error::UnsupportedMode(
+                "first attempt fails".to_string(),
+            ))
+        } else {
+            Ok(response(request, ""))
+        }
+    }
+}
+
 struct LifecycleDownload {
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -878,6 +1111,7 @@ struct LifecycleScheduler {
     inner: spider::Memory,
     calls: Arc<Mutex<Vec<&'static str>>>,
     fail_push: bool,
+    push_gate: Option<Arc<PushGate>>,
     reject_refresh: bool,
     block_refresh: bool,
     transient_refreshes: AtomicUsize,
@@ -900,6 +1134,7 @@ impl LifecycleScheduler {
             inner: spider::Memory::new("worker-1").with_lease(Self::test_lease()),
             calls,
             fail_push: false,
+            push_gate: None,
             reject_refresh: false,
             block_refresh: false,
             transient_refreshes: AtomicUsize::new(0),
@@ -914,6 +1149,7 @@ impl LifecycleScheduler {
             inner: spider::Memory::new("worker-1").with_lease(Self::test_lease()),
             calls,
             fail_push: true,
+            push_gate: None,
             reject_refresh: false,
             block_refresh: false,
             transient_refreshes: AtomicUsize::new(0),
@@ -925,6 +1161,11 @@ impl LifecycleScheduler {
 
     fn reject_refresh(mut self) -> Self {
         self.reject_refresh = true;
+        self
+    }
+
+    fn gate_push(mut self, gate: Arc<PushGate>) -> Self {
+        self.push_gate = Some(gate);
         self
     }
 
@@ -962,6 +1203,10 @@ impl Scheduler for LifecycleScheduler {
     async fn push(&self, payload: payload::Payload) -> Result<(), spider::scheduler::Error> {
         if self.fail_push {
             self.calls.lock().unwrap().push("scheduler.push");
+            if let Some(gate) = &self.push_gate {
+                gate.entered.add_permits(1);
+                gate.release.acquire().await.unwrap().forget();
+            }
             return Err(spider::scheduler::Error::Message("push".to_string()));
         }
 
@@ -1036,6 +1281,20 @@ impl Scheduler for LifecycleScheduler {
     }
 }
 
+struct PushGate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+impl PushGate {
+    fn new() -> Self {
+        Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
 impl Init for LifecycleScheduler {
     fn initializes_run(&self) -> bool {
         self.inner.initializes_run()
@@ -1060,6 +1319,9 @@ struct FlakyScheduler {
     inner: spider::Memory,
     fail_next: AtomicBool,
     fail_after_commit: AtomicBool,
+    transient_after_commit: bool,
+    failure_response_lost: AtomicBool,
+    failure_attempts: Arc<Mutex<Vec<FailureAttempt>>>,
     claim_calls: AtomicUsize,
     delay_second_claim: bool,
 }
@@ -1130,17 +1392,31 @@ impl Scheduler for FlakyScheduler {
         }
         self.inner.success(payload).await?;
         if self.fail_after_commit.swap(false, Ordering::SeqCst) {
-            return Err(spider::scheduler::Error::Message(
-                "success response failed after commit".to_string(),
-            ));
+            return if self.transient_after_commit {
+                Err(spider::scheduler::Error::Unavailable(
+                    "success response lost after commit".to_string(),
+                ))
+            } else {
+                Err(spider::scheduler::Error::Message(
+                    "success response failed after commit".to_string(),
+                ))
+            };
         }
         Ok(())
     }
 
-    async fn failure(&self, _payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
-        Err(spider::scheduler::Error::Message(
-            "failure failed".to_string(),
-        ))
+    async fn failure(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+        self.failure_attempts
+            .lock()
+            .unwrap()
+            .push(FailureAttempt::from_payload(payload));
+        self.inner.failure(payload).await?;
+        if self.failure_response_lost.swap(false, Ordering::SeqCst) {
+            return Err(spider::scheduler::Error::Unavailable(
+                "failure response lost after commit".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1585,6 +1861,32 @@ impl StartEmitFailSpider {
     }
 }
 
+#[macros::spider]
+struct CancelledOutputSpider {
+    task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+#[macros::spider]
+impl CancelledOutputSpider {
+    fn name(&self) -> &str {
+        "cancelled-output"
+    }
+
+    async fn start(&self) -> Result<(), spider::Error> {
+        let tx = self.tx.clone();
+        let task = tokio::spawn(async move {
+            let request = net::Request::follow("https://example.com/cancelled").unwrap();
+            let _ = tx.request(vec![request]).await;
+        });
+        *self.task.lock().unwrap() = Some(task);
+        Ok(())
+    }
+
+    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+        Ok(())
+    }
+}
+
 struct Args {
     start_url: String,
 }
@@ -1976,6 +2278,33 @@ async fn engine_start_closes_resources_when_event_push_fails() {
             "scheduler.close"
         ]
     );
+}
+
+#[tokio::test]
+async fn engine_reports_output_failure_after_the_sender_is_cancelled() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(PushGate::new());
+    let task = Arc::new(Mutex::new(None));
+    let scheduler = LifecycleScheduler::fail_push(calls).gate_push(gate.clone());
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(TestDownload)
+        .with_spider(CancelledOutputSpider::new(task.clone()))
+        .build();
+
+    let runtime = tokio::spawn(async move { engine.start().await });
+    gate.entered.acquire().await.unwrap().forget();
+    let sender = task.lock().unwrap().take().unwrap();
+    sender.abort();
+    let _ = sender.await;
+    gate.release.add_permits(1);
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), runtime)
+        .await
+        .expect("engine must drain a failed output after its sender is cancelled")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("push"));
 }
 
 #[tokio::test]
@@ -2631,6 +2960,9 @@ async fn engine_retries_transient_success_error_without_reexecution() {
         inner: spider::Memory::new("worker-1"),
         fail_next: AtomicBool::new(true),
         fail_after_commit: AtomicBool::new(false),
+        transient_after_commit: false,
+        failure_response_lost: AtomicBool::new(false),
+        failure_attempts: Arc::new(Mutex::new(Vec::new())),
         claim_calls: AtomicUsize::new(0),
         delay_second_claim: false,
     };
@@ -2661,11 +2993,102 @@ async fn engine_retries_transient_success_error_without_reexecution() {
 }
 
 #[tokio::test]
+async fn engine_retries_the_same_success_payload_after_a_lost_response() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = FlakyScheduler {
+        inner: spider::Memory::new("worker-1"),
+        fail_next: AtomicBool::new(false),
+        fail_after_commit: AtomicBool::new(true),
+        transient_after_commit: true,
+        failure_response_lost: AtomicBool::new(false),
+        failure_attempts: Arc::new(Mutex::new(Vec::new())),
+        claim_calls: AtomicUsize::new(0),
+        delay_second_claim: false,
+    };
+    scheduler
+        .push(payload::Payload::new().requests(vec![
+            net::Request::follow("https://example.com/one").unwrap(),
+        ]))
+        .await
+        .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(LifecycleDownload {
+            calls: calls.clone(),
+        })
+        .with_spider(EmptySpider::new())
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(engine.scheduler().inner.done_len(), 1);
+    assert_eq!(engine.scheduler().inner.processing_len(), 0);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| **call == "downloader.fetch")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
+    let downloads = Arc::new(Mutex::new(Vec::new()));
+    let failure_attempts = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = FlakyScheduler {
+        inner: spider::Memory::new("worker-1"),
+        fail_next: AtomicBool::new(false),
+        fail_after_commit: AtomicBool::new(false),
+        transient_after_commit: false,
+        failure_response_lost: AtomicBool::new(true),
+        failure_attempts: failure_attempts.clone(),
+        claim_calls: AtomicUsize::new(0),
+        delay_second_claim: false,
+    };
+    let mut request = net::Request::follow("https://example.com/retry").unwrap();
+    request.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(RetryDownload {
+            attempts: downloads.clone(),
+        })
+        .with_spider(EmptySpider::new())
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(downloads.lock().unwrap().as_slice(), [(1, 0), (2, 1)]);
+    let failure_attempts = failure_attempts.lock().unwrap();
+    assert_eq!(failure_attempts.len(), 2);
+    assert_eq!(failure_attempts[0], failure_attempts[1]);
+    drop(failure_attempts);
+
+    assert_eq!(engine.scheduler().inner.done_len(), 1);
+    assert_eq!(engine.scheduler().inner.failed_len(), 0);
+    assert_eq!(engine.scheduler().inner.queued_len(), 0);
+    assert_eq!(engine.scheduler().inner.processing_len(), 0);
+    let stats = engine.scheduler().inner.trace_stats("");
+    assert_eq!(stats["index"].total, 2);
+    assert_eq!(stats["index"].done, 1);
+    assert_eq!(stats["index"].download, 1);
+}
+
+#[tokio::test]
 async fn claim_returning_after_a_request_error_still_executes_its_request() {
     let scheduler = FlakyScheduler {
         inner: spider::Memory::new("worker-1"),
         fail_next: AtomicBool::new(false),
         fail_after_commit: AtomicBool::new(true),
+        transient_after_commit: false,
+        failure_response_lost: AtomicBool::new(false),
+        failure_attempts: Arc::new(Mutex::new(Vec::new())),
         claim_calls: AtomicUsize::new(0),
         delay_second_claim: true,
     };
@@ -2682,7 +3105,7 @@ async fn claim_returning_after_a_request_error_still_executes_its_request() {
         .with_spider(EmptySpider::new())
         .build()
         .with_concurrency(2)
-        .with_limit(1);
+        .with_claim_limit(1);
 
     let error = tokio::time::timeout(std::time::Duration::from_secs(1), engine.start())
         .await

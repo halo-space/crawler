@@ -56,7 +56,7 @@ impl AcceptanceSpider {
 }
 
 #[tokio::test]
-async fn default_code_mode_runs_real_http_multihop_and_writes_jsonl() {
+async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
     let (start_url, server) = serve_pages();
     let runtime_dir = temp_dir();
     let mut engine = engine::Builder::new()
@@ -88,13 +88,15 @@ async fn default_code_mode_runs_real_http_multihop_and_writes_jsonl() {
     let content = tokio::fs::read_to_string(item_path).await.unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(content.trim()).unwrap(),
-        serde_json::json!({"title": "Rust in Action"})
+        serde_json::json!({"title": "桂林米粉"})
     );
 
     tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
 }
 
 fn serve_pages() -> (String, std::thread::JoinHandle<()>) {
+    const LIST: &[u8] = b"<html><a href=\"/detail\">Detail</a></html>";
+    const DETAIL: &[u8] = b"<!doctype html><html><head><meta charset=\"gbk\"><title>\xB9\xF0\xC1\xD6\xC3\xD7\xB7\xDB</title></head><body><main><article><h1>\xB9\xF0\xC1\xD6\xC3\xD7\xB7\xDB</h1></article></main></body></html>";
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
@@ -103,16 +105,17 @@ fn serve_pages() -> (String, std::thread::JoinHandle<()>) {
             let mut request = [0; 2048];
             let size = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);
-            let body = if request.starts_with("GET /detail ") {
-                "<html><h1>Rust in Action</h1></html>"
+            let (body, content_type) = if request.starts_with("GET /detail ") {
+                (DETAIL, "text/html; charset=gbk")
             } else {
-                "<html><a href=\"/detail\">Detail</a></html>"
+                (LIST, "text/html; charset=utf-8")
             };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
         }
     });
     (format!("http://{address}/list"), server)

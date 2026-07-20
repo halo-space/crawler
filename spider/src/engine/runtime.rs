@@ -83,7 +83,7 @@ where
         self
     }
 
-    pub fn with_limit(mut self, limit: usize) -> Self {
+    pub fn with_claim_limit(mut self, limit: usize) -> Self {
         self.claim_limit = Some(limit);
         self
     }
@@ -165,7 +165,10 @@ where
             return Err(crate::Error::message("engine already started"));
         };
         events.set_limit(self.event_limit);
-        let init = self.init.init(self.scheduler.clone()).await?;
+        let init = self
+            .init
+            .init(self.scheduler.clone(), self.registry.clone())
+            .await?;
         let actor = engine::actor::Engine::new(
             self.scheduler.clone(),
             self.downloader.clone(),

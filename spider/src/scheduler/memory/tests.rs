@@ -9,6 +9,12 @@ fn empty_worker_identity_is_rejected_during_construction() {
     let _scheduler = Memory::new("   ");
 }
 
+#[test]
+#[should_panic(expected = "Memory supported_modes must not be empty")]
+fn empty_worker_capability_is_rejected_during_construction() {
+    let _scheduler = Memory::new("worker-1").with_modes(std::iter::empty::<net::Mode>());
+}
+
 fn rules_config(id: &str, node: &str) -> crate::config::Config {
     crate::config::Config::from_yaml(&format!(
         r#"
@@ -784,6 +790,54 @@ async fn init_atomically_stores_trace_and_initial_requests() {
 }
 
 #[tokio::test]
+async fn init_rejects_invalid_later_request_without_mutation() {
+    let scheduler = Memory::new("worker-1");
+    let mut first = net::Request::follow("https://example.com/one").unwrap();
+    first.task_id = "task-1".to_string();
+    first.trace_id = "trace-1".to_string();
+    let first_id = first.id.clone();
+    let mut invalid = net::Request::follow("https://example.com/two").unwrap();
+    invalid.task_id = "task-1".to_string();
+    invalid.trace_id = "trace-1".to_string();
+    invalid.state = net::State::Processing;
+    let invalid_id = invalid.id.clone();
+
+    let result = scheduler
+        .init(
+            "trace-1".to_string(),
+            trace::Snapshot::code("task-1"),
+            vec![first, invalid],
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(scheduler.trace("trace-1").await.unwrap().is_none());
+    assert_eq!(scheduler.queued_len(), 0);
+    let state = scheduler.state();
+    assert!(!state.contains(&first_id));
+    assert!(!state.contains(&invalid_id));
+}
+
+#[tokio::test]
+async fn init_stores_a_rules_trace_with_no_accepted_requests() {
+    let scheduler = Memory::new("worker-1");
+    let config = rules_config("books", "detail");
+
+    scheduler
+        .init(
+            "trace-1".to_string(),
+            trace::Snapshot::rules("books", config),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(scheduler.trace("trace-1").await.unwrap().is_some());
+    assert_eq!(scheduler.queued_len(), 0);
+    assert_eq!(scheduler.processing_len(), 0);
+}
+
+#[tokio::test]
 async fn claim_restores_rules_requests_and_shares_trace_config() {
     let scheduler = Memory::new("worker-1");
     let config = rules_config("books", "detail");
@@ -901,7 +955,10 @@ async fn invalid_queued_snapshot_records_a_terminal_error() {
         .unwrap();
     {
         let mut state = scheduler.state();
-        let mut snapshot = state.pop(crate::utils::time::now_millis()).unwrap();
+        let mut snapshot = state
+            .take(crate::utils::time::now_millis(), 1, &[net::Mode::Http])
+            .pop()
+            .unwrap();
         snapshot.state = net::State::Processing;
         state.enqueue(snapshot, crate::utils::time::now_millis());
     }
@@ -917,6 +974,36 @@ async fn invalid_queued_snapshot_records_a_terminal_error() {
 }
 
 #[tokio::test]
+async fn invalid_snapshot_is_retried_at_most_once_per_claim() {
+    let scheduler = Memory::new("worker-1");
+    let mut request = net::Request::follow("https://example.com").unwrap();
+    request.max_retry_count = 3;
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+    {
+        let mut state = scheduler.state();
+        let mut snapshot = state
+            .take(crate::utils::time::now_millis(), 1, &[net::Mode::Http])
+            .pop()
+            .unwrap();
+        snapshot.state = net::State::Processing;
+        state.enqueue(snapshot, crate::utils::time::now_millis());
+    }
+
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
+    assert_eq!(scheduler.failed_len(), 0);
+    assert_eq!(scheduler.queued_len(), 1);
+    let retried = scheduler
+        .state()
+        .take(crate::utils::time::now_millis(), 1, &[net::Mode::Http])
+        .pop()
+        .unwrap();
+    assert_eq!(retried.retry_count, 1);
+}
+
+#[tokio::test]
 async fn claim_version_overflow_records_a_terminal_error() {
     let scheduler = Memory::new("worker-1");
     let request = net::Request::follow("https://example.com").unwrap();
@@ -926,7 +1013,10 @@ async fn claim_version_overflow_records_a_terminal_error() {
         .unwrap();
     {
         let mut state = scheduler.state();
-        let mut snapshot = state.pop(crate::utils::time::now_millis()).unwrap();
+        let mut snapshot = state
+            .take(crate::utils::time::now_millis(), 1, &[net::Mode::Http])
+            .pop()
+            .unwrap();
         snapshot.version = i64::MAX;
         state.enqueue(snapshot, crate::utils::time::now_millis());
     }
@@ -1018,7 +1108,10 @@ async fn release_defers_version_advance_until_the_next_claim() {
         .unwrap();
     {
         let mut state = scheduler.state();
-        let mut snapshot = state.pop(crate::utils::time::now_millis()).unwrap();
+        let mut snapshot = state
+            .take(crate::utils::time::now_millis(), 1, &[net::Mode::Http])
+            .pop()
+            .unwrap();
         snapshot.version = i64::MAX - 1;
         state.enqueue(snapshot, crate::utils::time::now_millis());
     }
@@ -1201,4 +1294,213 @@ async fn claim_leaves_future_requests_pending() {
     assert!(claimed.is_empty());
     assert_eq!(scheduler.queued_len(), 1);
     assert!(scheduler.has_pending_requests().await.unwrap());
+}
+
+#[tokio::test]
+async fn claim_returns_empty_without_mutating_incompatible_work() {
+    let scheduler = Memory::new("http-worker");
+    let browser = net::Request::follow("https://example.com/browser")
+        .unwrap()
+        .mode(net::Mode::Browser);
+    scheduler
+        .push(payload::Payload::new().requests(vec![browser]))
+        .await
+        .unwrap();
+
+    let claimed = scheduler.next_requests(1).await.unwrap();
+
+    assert!(claimed.is_empty());
+    assert_eq!(scheduler.queued_len(), 1);
+    assert_eq!(scheduler.processing_len(), 0);
+}
+
+#[tokio::test]
+async fn pending_check_ignores_globally_pending_incompatible_work() {
+    let scheduler = Memory::new("http-worker");
+    let browser = net::Request::follow("https://example.com/browser")
+        .unwrap()
+        .mode(net::Mode::Browser);
+    scheduler
+        .push(payload::Payload::new().requests(vec![browser]))
+        .await
+        .unwrap();
+
+    assert_eq!(scheduler.queued_len(), 1);
+    assert!(!scheduler.has_pending_requests().await.unwrap());
+}
+
+#[test]
+fn concurrent_claims_only_take_compatible_requests_once() {
+    const THREADS: usize = 8;
+    const HTTP_REQUESTS: usize = 24;
+    const BROWSER_REQUESTS: usize = 8;
+
+    let scheduler = Arc::new(Memory::new("http-worker"));
+    let mut requests = Vec::new();
+    for index in 0..HTTP_REQUESTS {
+        if index < BROWSER_REQUESTS {
+            let mut browser = net::Request::follow(format!("https://example.com/browser/{index}"))
+                .unwrap()
+                .mode(net::Mode::Browser);
+            browser.priority = 10;
+            requests.push(browser);
+        }
+        let mut http = net::Request::follow(format!("https://example.com/http/{index}")).unwrap();
+        http.priority = 1;
+        requests.push(http);
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(scheduler.push(payload::Payload::new().requests(requests)))
+        .unwrap();
+
+    let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+    let handles = (0..THREADS)
+        .map(|_| {
+            let scheduler = scheduler.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                barrier.wait();
+                runtime.block_on(scheduler.next_requests(4)).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let claimed = handles
+        .into_iter()
+        .flat_map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    let ids = claimed
+        .iter()
+        .map(|request| request.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(claimed.len(), HTTP_REQUESTS);
+    assert_eq!(ids.len(), HTTP_REQUESTS);
+    assert!(
+        claimed
+            .iter()
+            .all(|request| request.mode == net::Mode::Http)
+    );
+    assert_eq!(scheduler.processing_len(), HTTP_REQUESTS);
+    assert_eq!(scheduler.queued_len(), BROWSER_REQUESTS);
+}
+
+#[tokio::test]
+async fn failure_retry_preserves_browser_mode_eligibility() {
+    let scheduler = Memory::new("browser-worker").with_modes([net::Mode::Browser]);
+    let mut browser = net::Request::follow("https://example.com/browser")
+        .unwrap()
+        .mode(net::Mode::Browser);
+    browser.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![browser]))
+        .await
+        .unwrap();
+    let first = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut ack = payload::Payload::for_request(&first, "browser-worker");
+    ack.state = net::State::Processing;
+    scheduler.ack(&ack).await.unwrap();
+    let mut failure = payload::Payload::for_request(&first, "browser-worker").failed("boom");
+    failure.start_time = Some(1);
+    failure.end_time = Some(2);
+    scheduler.failure(&failure).await.unwrap();
+
+    let retried = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+
+    assert_eq!(retried.id, first.id);
+    assert_eq!(retried.mode, net::Mode::Browser);
+    assert_eq!(retried.version, first.version + 1);
+    assert_eq!(retried.retry_count, 1);
+}
+
+#[tokio::test]
+async fn expired_lease_recovery_preserves_browser_mode_eligibility() {
+    let scheduler = Memory::new("browser-worker").with_modes([net::Mode::Browser]);
+    let mut browser = net::Request::follow("https://example.com/browser")
+        .unwrap()
+        .mode(net::Mode::Browser);
+    browser.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![browser]))
+        .await
+        .unwrap();
+    let first = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut ack = payload::Payload::for_request(&first, "browser-worker");
+    ack.state = net::State::Processing;
+    scheduler.ack(&ack).await.unwrap();
+    scheduler
+        .state()
+        .processing
+        .get_mut(&first.id)
+        .unwrap()
+        .lease_time = 1;
+
+    let recovered = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+
+    assert_eq!(recovered.id, first.id);
+    assert_eq!(recovered.mode, net::Mode::Browser);
+    assert_eq!(recovered.version, first.version + 1);
+    assert_eq!(recovered.retry_count, 1);
+}
+
+#[tokio::test]
+async fn release_preserves_browser_mode_and_pending_state() {
+    let scheduler = Memory::new("browser-worker").with_modes([net::Mode::Browser]);
+    let browser = net::Request::follow("https://example.com/browser")
+        .unwrap()
+        .mode(net::Mode::Browser);
+    scheduler
+        .push(payload::Payload::new().requests(vec![browser]))
+        .await
+        .unwrap();
+    let first = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut release = payload::Payload::for_request(&first, "browser-worker");
+    release.state = net::State::Processing;
+
+    scheduler.release(&release).await.unwrap();
+
+    assert_eq!(scheduler.processing_len(), 0);
+    assert_eq!(scheduler.queued_len(), 1);
+    assert!(scheduler.has_pending_requests().await.unwrap());
+    let reclaimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    assert_eq!(reclaimed.id, first.id);
+    assert_eq!(reclaimed.mode, net::Mode::Browser);
+    assert_eq!(reclaimed.version, first.version + 1);
+    assert_eq!(reclaimed.retry_count, 0);
+}
+
+#[tokio::test]
+async fn expired_unacknowledged_browser_claim_remains_pending() {
+    let scheduler = Memory::new("browser-worker").with_modes([net::Mode::Browser]);
+    let browser = net::Request::follow("https://example.com/browser")
+        .unwrap()
+        .mode(net::Mode::Browser);
+    scheduler
+        .push(payload::Payload::new().requests(vec![browser]))
+        .await
+        .unwrap();
+    let first = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    scheduler
+        .state()
+        .processing
+        .get_mut(&first.id)
+        .unwrap()
+        .lease_time = 1;
+
+    assert!(scheduler.next_requests(0).await.unwrap().is_empty());
+
+    assert_eq!(scheduler.processing_len(), 0);
+    assert_eq!(scheduler.queued_len(), 1);
+    assert!(scheduler.has_pending_requests().await.unwrap());
+    let reclaimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    assert_eq!(reclaimed.id, first.id);
+    assert_eq!(reclaimed.mode, net::Mode::Browser);
+    assert_eq!(reclaimed.version, first.version + 1);
+    assert_eq!(reclaimed.retry_count, 0);
+    assert!(reclaimed.failed_workers.is_empty());
 }

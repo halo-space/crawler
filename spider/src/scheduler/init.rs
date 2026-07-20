@@ -8,7 +8,8 @@ pub trait Init: scheduler::Scheduler {
         false
     }
 
-    /// 原子保存一份 Trace Snapshot 及其初始 Request 批次。
+    /// 原子保存一份 Trace Snapshot 及其准入后的初始 Request 批次。
+    /// 所有初始 Request 被过滤时，空集合仍必须保存 Trace Snapshot。
     fn init(
         &self,
         trace_id: String,

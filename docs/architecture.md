@@ -23,14 +23,15 @@ The workspace contains four crates:
 | YAML Rules mode | Implemented | Validation, request graph, extraction, binding, transforms, Item Schema, and downstream Requests |
 | Memory Scheduler | Implemented | Priority/FIFO queue, delayed Requests, leases, lease refresh, retry, terminal states, Traces, and statistics |
 | HTTP Downloader | Implemented | Headers, cookies, body, timeout, redirects, proxy, and TLS settings |
+| Response charset decoding | Implemented | Deterministic BOM/header/HTML-meta/UTF-8 selection in `Response::text()` with raw-body preservation |
 | Browser Downloader | Not implemented | The current stub returns `UnsupportedMode("browser")`; implementation is planned for v5 |
 | CSS Selector | Implemented | `Response::css()` returns the native `scrape_core::Soup` |
 | CSS Healing | Implemented | Deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
 | Regex and JSON | Implemented | Regex selection and code-mode `Response::json<T>()` |
 | AI Selector | Implemented | Explicit OpenAI-compatible JSON extraction, independent of CSS Healing |
 | Middleware | Implemented | Lifecycle Registry plus built-in validate, dedup, rate limit, and retry capabilities |
-| Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots |
-| Capability-aware claiming | Planned | The v3 OpenSpec is not implemented; current claims do not filter by Request `mode` |
+| Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots; attachment download is not implemented |
+| Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
 | API/Redis/MySQL Schedulers | Planned | v4 `contrib` capabilities; each must implement the complete Scheduler contract |
 | Master control plane | Planned | A v4 capability, not part of the core Scheduler itself |
 | Runtime tracing | Planned | v4 will use `fasttrace`; this is separate from the business `trace_id` |
@@ -145,13 +146,14 @@ flowchart TB
     F --> H
 
     I["Rules Engine starts"] --> J["Validate and freeze the full DSL"]
-    J --> K["Atomically initialize Trace Snapshot<br/>and initial Requests"]
+    J --> L["Run before_scheduler<br/>for every initial Request"]
+    L --> K["Atomically initialize Trace Snapshot<br/>and accepted Requests"]
     K --> H
 ```
 
 `scheduler::Init::initializes_run()` currently controls code-mode local initialization. Memory returns `true`. A remote Scheduler defaults to `false`, so a code Worker can consume a run already published by an external task source without creating a local Trace or calling `Spider.start()`.
 
-Rules mode currently treats the loaded YAML as the definition of this run. Before claiming starts, `rules::Init` atomically stores its Trace Snapshot and initial Requests. A future externally dispatched Rules worker must preserve this snapshot contract instead of introducing a second identity model in the Worker.
+Rules mode treats the loaded YAML as the definition of this run. Before claiming starts, every generated initial Request passes through the same `before_scheduler` admission path used by Tx output, then `rules::Init` atomically stores the Trace Snapshot and accepted Requests. If every Request is filtered, the empty run still stores its Trace Snapshot and finishes normally. A future externally dispatched Rules worker must preserve this snapshot contract instead of introducing a second identity model in the Worker.
 
 ## 5. Engine Actor
 
@@ -176,14 +178,14 @@ validate runtime limits
 - Tx Event capacity, producer activity, and the first terminal error;
 - shared Scheduler, Downloader, Executor, Middleware Registry, and optional Item snapshot store references.
 
-Startup, claim, Request, output, poll, and producer-idle completions return as separate Actor messages. Every spawned task catches panic and reports completion. Kameo's mailbox is unbounded for internal messages; the explicit Event capacity controls only external `Tx` output and therefore remains independent from internal completion traffic.
+Startup, claim, Request, output, poll, and producer-idle completions return as separate Actor messages. Every spawned task catches panic and reports completion. An accepted output failure normally returns to its waiting `Tx` caller; if that caller has been cancelled, the output completion reports the undelivered error to the Engine instead of silently succeeding. Kameo's mailbox is unbounded for internal messages; the explicit Event capacity controls only external `Tx` output and therefore remains independent from internal completion traffic.
 
 ### 5.1 Three Independent Limits
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
 | `with_concurrency(n)` | `16` | Maximum number of active Request tasks |
-| `with_limit(n)` | concurrency | Maximum Requests requested by one `next_requests(limit)` call |
+| `with_claim_limit(n)` | concurrency | Maximum Requests requested by one `next_requests(limit)` call |
 | `with_event_limit(n)` | `32` | Maximum accepted Events whose Actor handler has not started |
 
 The values are validated and frozen when the Engine starts. They are not hot-reloaded and do not replace one another. The actual claim size is:
@@ -198,7 +200,7 @@ An Event permit is acquired before `Tx` sends an Event and released when the Eng
 
 An empty `next_requests(limit)` result means only that the current claim returned no work. It does not terminate the Engine. The Actor exits only when all of the following are true:
 
-- the Scheduler confirms there are no queued or processing Requests;
+- the Scheduler confirms there are no queued or processing Requests within the current Worker capability scope;
 - no startup, claim, poll, or producer-idle observation task is active;
 - no Request task is active;
 - no output task is active;
@@ -224,7 +226,7 @@ This prevents early termination while a list page is producing detail Requests, 
 | `push_items` | Consume only `Payload.items` and submit Items |
 | `trace` | Read an immutable Trace Snapshot by `trace_id` |
 | `next_requests(limit)` | Claim and restore at most `limit` Requests |
-| `has_pending_requests` | Report whether the Scheduler scope still has queued or processing Requests |
+| `has_pending_requests` | Report whether the current Worker capability scope still has queued or processing Requests |
 | `ack` | Confirm that the Engine accepted a claimed execution right |
 | `release` | Voluntarily return execution ownership without consuming a queue retry |
 | `refresh_lease` | Extend an acknowledged execution lease |
@@ -234,7 +236,7 @@ This prevents early termination while a list page is producing detail Requests, 
 `scheduler::Init` adds:
 
 - `initializes_run()`, which declares whether this Engine creates a local run;
-- `init(trace_id, snapshot, requests)`, which atomically stores a Trace Snapshot and its initial Requests.
+- `init(trace_id, snapshot, requests)`, which atomically stores a Trace Snapshot and its accepted initial Requests; an empty collection is valid after admission filtering.
 
 `Payload` is the single transport envelope shared by these methods; the design does not add parallel Batch or Receipt structures. It carries Request execution identity, state, error, timing, statistics, and the `requests / items` output collections. Every Scheduler method rejects fields unrelated to its own semantics: `push` accepts Requests only, `push_items` accepts Items only, and settlement Payloads require both collections to be empty.
 
@@ -261,8 +263,10 @@ Memory atomically maintains its queues, known Request IDs, processing records, a
 - duplicate Request IDs within one Payload and IDs already registered by Memory are rejected;
 - ID uniqueness prevents the same Request object from being enqueued twice; URL and business-field deduplication remain Dedup Middleware responsibilities;
 - the ready queue uses higher `priority` first and FIFO within one priority; a delayed queue holds future `next_time` values;
+- `Memory::new(worker_id)` defaults to HTTP-only claims; `with_modes(...)` replaces the non-empty capability set;
+- claim selects the highest-priority FIFO Request supported by that capability set without changing incompatible queue entries, and pending checks use the same scope;
 - claiming changes a Request to `processing`, records `leased_by / lease_time`, and advances `version`;
-- the default lease timeout is 30 seconds and the refresh interval is 10 seconds; `Memory::with_lease(...)` can replace them;
+- the default lease timeout is 30 seconds and the refresh interval is 10 seconds; `Memory::with_lease(...)` can replace them with positive whole-millisecond durations representable by the runtime clock;
 - `ack` is idempotent for the same valid identity and records only execution confirmation; `refresh_lease` updates the acknowledged lease timestamp;
 - an unacknowledged expired claim consumes no retry and records no failed Worker, while an acknowledged expiry appends the current Worker and consumes one queue attempt;
 - recovery and retry return a Request to pending without changing `version`; the next successful claim creates the next execution generation;
@@ -271,7 +275,12 @@ Memory atomically maintains its queues, known Request IDs, processing records, a
 - `failure` preserves Request ID while advancing queue retry count, then requeues or enters failed when retries are exhausted.
 - restoration, version/retry overflow, and queue-conversion failures produce explicit terminal diagnostics with the original Request ID instead of silently dropping work.
 
-Memory is an unregistered process-local Scheduler and does not perform fleet-aware Worker selection; registration, heartbeat, and cross-Worker eligibility belong to v4 contrib Schedulers. It reads Trace Snapshots from an immutable in-process map and has no remote cache, transport retry, or temporary Trace-storage failure path. It does not restore its Request queue after process exit, and the current implementation does not write local Request files under `data/requests/`.
+Memory is a Worker-scoped, unregistered process-local Scheduler. It applies the current instance's
+configured mode capabilities, but it does not discover or select among a fleet of Workers;
+registration, heartbeat, and cross-Worker eligibility belong to v4 contrib Schedulers. It reads
+Trace Snapshots from an immutable in-process map and has no remote cache, transport retry, or
+temporary Trace-storage failure path. It does not restore its Request queue after process exit, and
+the current implementation does not write local Request files under `data/requests/`.
 
 ## 7. Complete Request Lifecycle
 
@@ -313,7 +322,9 @@ The important semantics are:
 
 - `ack` happens before Downloader execution. A failed ack prevents the download.
 - `release` returns unfinished ownership voluntarily; it is not failure and does not increment retry count.
-- lease maintenance covers download, parsing, and retries of final `success / failure` settlement.
+- Lease maintenance covers download, parsing, and retries of final `success / failure` settlement.
+- Before a final Payload exists, explicit ownership loss, lease expiry, or another terminal refresh error cancels execution and prevents settlement. Transient refresh errors retry within the current lease deadline while execution continues.
+- After execution produces an immutable final Payload, `success / failure` is authoritative. A concurrent refresh error stops further refreshes but cannot cancel settlement; transient settlement errors retry the same Payload without executing the Request again.
 - Middleware Retry is a local Worker retry for downloading, parsing, or Item submission.
 - Scheduler `failure` is the only queue-level Request retry. The Worker submits it only after local execution retries are exhausted.
 - `Tx.request` and `Tx.item` wait for actual Event handling, so parsing cannot report success before the Scheduler accepts its output.
@@ -329,6 +340,27 @@ is removed lazily after 90 idle seconds. `Http::close()` clears the pool and inv
 cold-build insertion, so a client constructed before close cannot be reattached afterward. Redirects
 for one Request retain that Request's selected client; proxy or TLS configuration is never mutated as
 global Downloader state.
+
+### 7.1 Response Character Decoding
+
+The v3 response charset contract keeps `Response.body` as the Downloader-delivered payload bytes
+before character transcoding. `Response::text()` is the single decoding boundary for CSS, Regex, AI,
+and JSON consumers. It selects the first recognized encoding in this order:
+
+```text
+recognized BOM
+-> valid Content-Type charset
+-> HTML meta in the first 1024 bytes when MIME is text/html or absent
+-> UTF-8
+```
+
+The BOM is removed from returned text. Empty, malformed, or unknown charset labels fall through to
+the next eligible source. Once selected, malformed byte sequences produce `U+FFFD`; they do not
+trigger another encoding choice. No statistical detector or site-specific guess participates.
+HTML meta follows web prescan rules: UTF-16 labels select UTF-8 and `x-user-defined` selects
+Windows-1252; those adjustments do not alter BOM or HTTP-header selections.
+`Response::json<T>()` decodes through `Response::text()` before deserialization. Deterministic local
+HTTP fixtures provide required regression coverage; live Internet access is not a CI prerequisite.
 
 Each Request execution owns one shared `stats::Delta`, accumulating `total / done / filter / dedup / validate / download` counters by node or `items`. A directly awaited Tx call uses the current task-local Request context and updates that delta. A Tx clone moved to a detached task retains only Trace identity; its output neither changes the settled Request nor delays settlement. The Worker attaches the delta snapshot to the final Payload, and the Scheduler merges it into Trace statistics only on the first `success / failure` settlement; idempotent replay does not double-count it.
 
@@ -427,7 +459,7 @@ Healing stores no historical fingerprints, does not rewrite or persist a repaire
 ### 9.2 Regex, JSON, and AI
 
 - Regex returns every capture. It uses capture group one when present, otherwise the full match.
-- `Response::json<T>()` deserializes structured JSON directly from the response body.
+- `Response::json<T>()` follows the shared response-text decoding contract before deserialization.
 - AI is an explicit selector alongside CSS and Regex. It uses `async-openai` with an OpenAI-compatible Chat Completion endpoint, combines the current Response text with `expr`, and parses the model content as one JSON value.
 - Persisted Rules configuration must reference an API key as `env:VARIABLE`; the Worker resolves the secret at execution time. Temporary code-created configuration may accept a direct key, but serialization rejects direct secrets.
 - AI does not generate CSS, and CSS Healing never delegates candidates to AI.
@@ -472,7 +504,7 @@ Built-in implementations:
 
 `Builder::with_middleware(name, value)` registers a capability; it does not attach it to every object. Request, Response, Item, and Spider lifecycle Specs opt into capabilities explicitly. Only validate Specs for the normal stages are Registry defaults.
 
-Default Dedup handles only Request fingerprints built from explicitly configured keys; it never deduplicates Items or adds an implicit URL key. Fingerprints are observed and inserted during `before_scheduler`, so a later `Scheduler::push` failure does not roll them back. SHA-256 hashes a structured tuple of `task_id`, Middleware key, rule name, and ordered values rather than an ad hoc concatenated namespace. URL normalization stably sorts query pairs only by key, preserving the original order of repeated keys. All active rules are checked and inserted under one lock after every finite TTL deadline has been validated, so a TTL error cannot partially mutate the store. A rule with `ttl: 0` neither checks nor stores its fingerprint; omitted TTL or `-1` remains for the process lifetime without capacity eviction. The exact in-memory store uses a `HashMap` plus an expiry heap and lazily removes only expired heap-head entries.
+Default Dedup handles only Request fingerprints built from explicitly configured keys; it never deduplicates Items or adds an implicit URL key. Both Rules initial Requests and Tx output pass through `before_scheduler`. Fingerprints are observed and inserted there, so a later `Scheduler::push` or run-seed `init` failure does not roll them back. SHA-256 hashes a structured tuple of `task_id`, Middleware key, rule name, and ordered values rather than an ad hoc concatenated namespace. URL normalization stably sorts query pairs only by key, preserving the original order of repeated keys. All active rules are checked and inserted under one lock after every finite TTL deadline has been validated, so a TTL error cannot partially mutate the store. A rule with `ttl: 0` neither checks nor stores its fingerprint; omitted TTL or `-1` remains for the process lifetime without capacity eviction. The exact in-memory store uses a `HashMap` plus an expiry heap and lazily removes only expired heap-head entries.
 
 ## 11. Items, Validation, and Local Persistence
 
@@ -540,7 +572,8 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/engine/builder.rs` | Assemble components and own the Schema Store used by all execution modes |
 | `spider/src/engine/runtime.rs` | Component lifecycle, startup settings, and Actor assembly |
 | `spider/src/engine/worker.rs` | Ack, lease maintenance, and final settlement for one Request |
-| `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse path |
+| `spider/src/engine/admission.rs` | Apply `before_scheduler` to Request output before it enters the Scheduler |
+| `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse lifecycle for one claimed Request |
 | `spider/src/engine/event/request.rs` | Handle Request output emitted by Tx |
 | `spider/src/engine/event/item.rs` | Handle Items, submission retries, and failure snapshots |
 | `spider/src/engine/executor.rs` | Select Code/Rules from Trace Snapshot and invoke the shared Spider |
@@ -574,11 +607,11 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 
 ## 13. Extension Boundaries and Roadmap
 
-### Not Yet Implemented
+### Release Boundaries
 
-- v3: atomic Scheduler claiming by Worker capability; HTTP charset handling and broader real-page regression coverage.
-- v4: API, Redis, and MySQL Schedulers; Master control plane; auditable Item snapshot replay; `fasttrace` runtime tracing.
-- v5: a real Browser Downloader and mixed HTTP/Browser Worker capabilities.
+- v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
+- v4: API, Redis, and MySQL Schedulers; Master control plane; auditable Item snapshot replay; `fasttrace` runtime tracing. These implementations depend on the v3 Scheduler contract, not on Browser delivery.
+- v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:
 
@@ -595,6 +628,7 @@ These capabilities must preserve the existing core contracts:
 - providing a partial XPath implementation;
 - batching an entire Trace's Items at Engine shutdown;
 - using Item ID for business deduplication;
+- downloading Item attachments; that capability is unimplemented and has no assigned release;
 - making the core `spider` crate depend on `contrib` or a control-plane implementation.
 
 ## 14. Architecture Invariants
@@ -607,7 +641,8 @@ Implementation and extensions should continue to satisfy these checks:
 4. `Tx.request / Tx.item` output is handled immediately, and the Engine cannot exit while any producer can still emit work.
 5. `success`, `failure`, `release`, and `refresh_lease` each express exactly one state transition semantic.
 6. CSS Healing and AI remain independent and explicit selection capabilities.
-7. Planned components are never presented as implemented merely because placeholder files or configuration fields exist.
+7. Character decoding never mutates `Response.body`, and every response text consumer uses the same deterministic decoding path.
+8. Planned components are never presented as implemented merely because placeholder files or configuration fields exist.
 
 ## 15. Related Documentation
 

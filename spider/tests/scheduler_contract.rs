@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use spider::scheduler::Init;
 use spider::{Memory, Scheduler, item, net, payload};
 
 async fn request_contract<S>(scheduler: S)
@@ -91,9 +92,109 @@ where
     scheduler.close().await.unwrap();
 }
 
+async fn capability_claim_contract<S>(
+    scheduler: S,
+    supported_modes: &[net::Mode],
+    expected_urls: &[&str],
+) where
+    S: Scheduler,
+{
+    let mut http = net::Request::follow("https://example.com/http").unwrap();
+    http.priority = 1;
+    let mut browser = net::Request::follow("https://example.com/browser")
+        .unwrap()
+        .mode(net::Mode::Browser);
+    browser.priority = 10;
+    scheduler
+        .push(payload::Payload::new().requests(vec![http, browser]))
+        .await
+        .unwrap();
+
+    let claimed = scheduler.next_requests(2).await.unwrap();
+
+    assert_eq!(claimed.len(), expected_urls.len());
+    assert_eq!(
+        claimed
+            .iter()
+            .map(|request| request.url.as_str())
+            .collect::<Vec<_>>(),
+        expected_urls
+    );
+    assert!(
+        claimed
+            .iter()
+            .all(|request| supported_modes.contains(&request.mode))
+    );
+    for request in claimed {
+        assert_eq!(request.state, net::State::Processing);
+        assert_eq!(request.version, 1);
+        assert!(!request.leased_by.is_empty());
+        assert!(request.lease_time > 0);
+    }
+}
+
 #[tokio::test]
 async fn memory_implements_scheduler_request_contract() {
     let dir = std::env::temp_dir().join(format!("crawler-contract-{}", uuid::Uuid::now_v7()));
     request_contract(Memory::new("contract-worker").with_dir(&dir)).await;
     let _ = tokio::fs::remove_dir_all(dir).await;
+}
+
+#[tokio::test]
+async fn memory_init_accepts_an_empty_rules_request_collection() {
+    let scheduler = Memory::new("contract-worker");
+    let config = spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: empty-rules-run
+  start: [{node: index, url: https://example.com}]
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#,
+    )
+    .unwrap();
+
+    scheduler
+        .init(
+            "trace-empty".to_string(),
+            spider::trace::Snapshot::rules("empty-rules-run", config),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(scheduler.trace("trace-empty").await.unwrap().is_some());
+    assert!(!scheduler.has_pending_requests().await.unwrap());
+}
+
+#[tokio::test]
+async fn memory_http_only_capability_claim_contract() {
+    capability_claim_contract(
+        Memory::new("http-worker"),
+        &[net::Mode::Http],
+        &["https://example.com/http"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn memory_browser_only_capability_claim_contract() {
+    capability_claim_contract(
+        Memory::new("browser-worker").with_modes([net::Mode::Browser]),
+        &[net::Mode::Browser],
+        &["https://example.com/browser"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn memory_multi_mode_capability_claim_contract() {
+    capability_claim_contract(
+        Memory::new("mixed-worker").with_modes([net::Mode::Http, net::Mode::Browser]),
+        &[net::Mode::Http, net::Mode::Browser],
+        &["https://example.com/browser", "https://example.com/http"],
+    )
+    .await;
 }
