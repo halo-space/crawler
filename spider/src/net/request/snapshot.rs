@@ -16,6 +16,7 @@ pub struct Snapshot {
     pub method: net::Method,
     pub headers: net::Headers,
     pub body: net::Body,
+    #[serde(with = "crate::net::cookies::request_snapshot")]
     pub cookies: net::Cookies,
     pub vals: HashMap<String, Value>,
     pub kwargs: HashMap<String, Value>,
@@ -226,7 +227,7 @@ impl Snapshot {
     pub(crate) fn into_request(self) -> Result<net::Request, String> {
         let mut request = net::Request::follow(self.url.clone())
             .map_err(|error| format!("Request Snapshot URL is invalid: {error}"))?;
-        request.id = self.id;
+        request.assign_id(self.id);
         request.task_id = self.task_id;
         request.trace_id = self.trace_id;
         request.protocol = self.protocol;

@@ -13,8 +13,7 @@ mod lease;
 pub(crate) mod request;
 pub mod rules;
 mod runtime;
-#[doc(hidden)]
-pub(crate) mod worker;
+mod worker;
 
 pub use builder::Builder;
 pub use builder::Builder as Engine;

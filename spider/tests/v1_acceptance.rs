@@ -74,7 +74,7 @@ async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
     let (start_url, server) = serve_pages();
     let runtime_dir = temp_dir();
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new("worker-1").with_dir(&runtime_dir))
+        .with_scheduler(spider::Memory::new().with_dir(&runtime_dir))
         .with_spider(AcceptanceSpider::new(start_url))
         .build()
         .with_concurrency(2);

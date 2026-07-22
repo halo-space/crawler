@@ -31,7 +31,7 @@ struct RecordingScheduler {
 impl RecordingScheduler {
     fn new(records: Arc<Mutex<Vec<PayloadRecord>>>) -> Self {
         Self {
-            inner: spider::Memory::new("worker-1"),
+            inner: spider::Memory::new(),
             records,
             item_attempts: None,
             item_failures: 0,
@@ -111,12 +111,18 @@ impl Scheduler for RecordingScheduler {
     async fn next_requests(
         &self,
         limit: usize,
+        worker_id: &str,
+        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
-        self.inner.next_requests(limit).await
+        self.inner.next_requests(limit, worker_id, modes).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests().await
+    async fn has_pending_requests(
+        &self,
+        worker_id: &str,
+        modes: &[net::Mode],
+    ) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests(worker_id, modes).await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -388,11 +394,53 @@ impl ParseRetrySpider {
         "parse_retry"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        let request = response
+            .follow("/detail")
+            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .node(Self::detail);
+        self.tx.request(vec![request]).await?;
         if attempt < 3 {
             return Err(spider::Error::Message("temporary parse".to_string()));
         }
+        Ok(())
+    }
+
+    async fn detail(&self, _response: net::Response) -> Result<(), spider::Error> {
+        Ok(())
+    }
+}
+
+#[macros::spider]
+struct QueueRetrySpider {
+    attempts: Arc<AtomicUsize>,
+}
+
+#[macros::spider]
+impl QueueRetrySpider {
+    fn name(&self) -> &str {
+        "queue_retry"
+    }
+
+    async fn start(&self) -> Result<(), spider::Error> {
+        let mut request = net::Request::follow("https://example.com")
+            .map_err(|error| spider::Error::Message(error.to_string()))?;
+        request.max_retry_count = 2;
+        self.tx.request(vec![request]).await
+    }
+
+    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        let request = response
+            .follow("/detail")
+            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .node(Self::detail);
+        self.tx.request(vec![request]).await?;
+        Err(spider::Error::Message("parse failed".to_string()))
+    }
+
+    async fn detail(&self, _response: net::Response) -> Result<(), spider::Error> {
         Ok(())
     }
 }
@@ -740,7 +788,31 @@ async fn parse_retry_reinvokes_handler_until_it_succeeds() {
     engine.start().await.unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    assert_eq!(records.lock().unwrap()[0].state, payload::State::Done);
+    assert_eq!(engine.scheduler().inner.done_len(), 2);
+    assert!(
+        records
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|record| record.state == payload::State::Done)
+    );
+}
+
+#[tokio::test]
+async fn queue_retry_replays_the_same_child_request() {
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut engine = engine::Builder::new()
+        .with_scheduler(RecordingScheduler::new(records))
+        .with_downloader(StatusDownload { status: 200 })
+        .with_spider(QueueRetrySpider::new(attempts.clone()))
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(engine.scheduler().inner.done_len(), 1);
+    assert_eq!(engine.scheduler().inner.failed_len(), 1);
 }
 
 #[tokio::test]

@@ -72,11 +72,18 @@ impl Http {
         let mut method = reqwest::Method::from(&request.method);
         let mut request_body = request.body.clone();
         let mut inherit_headers = true;
+        let mut strip_body_headers = false;
         let mut cookies = request.cookies.clone();
         let mut redirects = Vec::new();
 
         let response = loop {
-            let headers = request_headers(&request, inherit_headers, &cookies, &method, &url)?;
+            let headers = request_headers(
+                &request,
+                inherit_headers,
+                strip_body_headers,
+                &cookies,
+                &url,
+            )?;
             let builder = client.request(method.clone(), url.clone()).headers(headers);
             let response = with_body(builder, &request_body).send().await?;
             let response_headers = net::Headers::from(response.headers().clone());
@@ -101,7 +108,8 @@ impl Http {
                 inherit_headers = false;
                 cookies = cookies.for_url(&target);
             }
-            redirect_method(response.status(), &mut method, &mut request_body);
+            strip_body_headers |=
+                redirect_method(response.status(), &mut method, &mut request_body);
             redirects.push(target.to_string());
             url = target;
         };
@@ -169,8 +177,8 @@ impl downloader::Download for Http {
 fn request_headers(
     request: &net::Request,
     inherit_headers: bool,
+    strip_body_headers: bool,
     cookies: &net::Cookies,
-    method: &reqwest::Method,
     url: &url::Url,
 ) -> Result<HeaderMap, downloader::Error> {
     let mut headers = if inherit_headers {
@@ -178,9 +186,12 @@ fn request_headers(
     } else {
         HeaderMap::new()
     };
-    if method == reqwest::Method::GET || method == reqwest::Method::HEAD {
+    if strip_body_headers {
         headers.remove(reqwest::header::CONTENT_LENGTH);
         headers.remove(reqwest::header::CONTENT_TYPE);
+        headers.remove(reqwest::header::CONTENT_ENCODING);
+        headers.remove(reqwest::header::CONTENT_LANGUAGE);
+        headers.remove(reqwest::header::CONTENT_LOCATION);
         headers.remove(reqwest::header::TRANSFER_ENCODING);
     }
     headers.remove(reqwest::header::COOKIE);
@@ -200,7 +211,14 @@ fn with_body(builder: reqwest::RequestBuilder, body: &net::Body) -> reqwest::Req
 }
 
 fn redirect_location(response: &reqwest::Response) -> Result<Option<String>, downloader::Error> {
-    if !response.status().is_redirection() {
+    if !matches!(
+        response.status(),
+        reqwest::StatusCode::MOVED_PERMANENTLY
+            | reqwest::StatusCode::FOUND
+            | reqwest::StatusCode::SEE_OTHER
+            | reqwest::StatusCode::TEMPORARY_REDIRECT
+            | reqwest::StatusCode::PERMANENT_REDIRECT
+    ) {
         return Ok(None);
     }
     let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
@@ -216,7 +234,7 @@ fn redirect_method(
     status: reqwest::StatusCode,
     method: &mut reqwest::Method,
     body: &mut net::Body,
-) {
+) -> bool {
     let switch_to_get = status == reqwest::StatusCode::SEE_OTHER
         || ((status == reqwest::StatusCode::MOVED_PERMANENTLY
             || status == reqwest::StatusCode::FOUND)
@@ -224,7 +242,9 @@ fn redirect_method(
     if switch_to_get && *method != reqwest::Method::HEAD {
         *method = reqwest::Method::GET;
         *body = net::Body::Empty;
+        return true;
     }
+    false
 }
 
 fn validate_redirect(target: &url::Url) -> Result<(), downloader::Error> {
@@ -297,14 +317,7 @@ mod tests {
         request.headers.try_append("X-Value", "two").unwrap();
         let url = url::Url::parse(&request.url).unwrap();
 
-        let headers = request_headers(
-            &request,
-            true,
-            &request.cookies,
-            &reqwest::Method::GET,
-            &url,
-        )
-        .unwrap();
+        let headers = request_headers(&request, true, false, &request.cookies, &url).unwrap();
 
         assert_eq!(
             headers
@@ -322,16 +335,62 @@ mod tests {
         request.headers.try_set("cookie", "raw=stale").unwrap();
         let url = url::Url::parse(&request.url).unwrap();
 
-        let headers = request_headers(
-            &request,
-            true,
-            &request.cookies,
-            &reqwest::Method::GET,
-            &url,
-        )
-        .unwrap();
+        let headers = request_headers(&request, true, false, &request.cookies, &url).unwrap();
 
         assert!(!headers.contains_key(reqwest::header::COOKIE));
+    }
+
+    #[test]
+    fn request_headers_strip_entity_headers_only_after_a_body_is_discarded() {
+        let mut request = net::Request::follow("https://example.com").unwrap();
+        request.headers.try_set("content-length", "4").unwrap();
+        request
+            .headers
+            .try_set("content-type", "text/plain")
+            .unwrap();
+        request
+            .headers
+            .try_set("content-encoding", "identity")
+            .unwrap();
+        request.headers.try_set("content-language", "en").unwrap();
+        request
+            .headers
+            .try_set("content-location", "/source")
+            .unwrap();
+        request
+            .headers
+            .try_set("transfer-encoding", "chunked")
+            .unwrap();
+        let url = url::Url::parse(&request.url).unwrap();
+
+        let preserved = request_headers(&request, true, false, &request.cookies, &url).unwrap();
+        let stripped = request_headers(&request, true, true, &request.cookies, &url).unwrap();
+
+        for name in [
+            reqwest::header::CONTENT_LENGTH,
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::CONTENT_LANGUAGE,
+            reqwest::header::CONTENT_LOCATION,
+            reqwest::header::TRANSFER_ENCODING,
+        ] {
+            assert!(preserved.contains_key(&name));
+            assert!(!stripped.contains_key(&name));
+        }
+    }
+
+    #[test]
+    fn redirect_to_get_strips_body_headers_even_when_the_body_is_empty() {
+        let mut method = reqwest::Method::POST;
+        let mut body = net::Body::Empty;
+
+        assert!(redirect_method(
+            reqwest::StatusCode::FOUND,
+            &mut method,
+            &mut body
+        ));
+        assert_eq!(method, reqwest::Method::GET);
+        assert!(matches!(body, net::Body::Empty));
     }
 
     #[test]
@@ -441,6 +500,107 @@ mod tests {
 
         assert_eq!(response.url, format!("{base_url}/final"));
         assert_eq!(response.redirects, [format!("{base_url}/final")]);
+    }
+
+    #[tokio::test]
+    async fn does_not_follow_a_304_location() {
+        let (listener, base_url) = listener();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(request.starts_with("GET /cached "));
+            stream
+                .write_all(
+                    b"HTTP/1.1 304 Not Modified\r\nLocation: /other\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let response = Http::new()
+            .fetch(net::Request::follow(format!("{base_url}/cached")).unwrap())
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status, net::StatusCode(304));
+        assert_eq!(response.url, format!("{base_url}/cached"));
+        assert!(response.redirects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn initial_get_with_a_body_preserves_content_type() {
+        let (listener, base_url) = listener();
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            request_tx.send(read_request(&mut stream)).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let request = net::Request::follow(base_url)
+            .unwrap()
+            .header("content-type", "text/plain; charset=utf-8")
+            .unwrap()
+            .body(net::Body::Text("query".to_string()));
+
+        Http::new().fetch(request).await.unwrap();
+        server.join().unwrap();
+        let request = request_rx.recv().unwrap();
+
+        assert!(request.starts_with("GET / HTTP/1.1\r\n"));
+        assert_eq!(
+            header(&request, "content-type"),
+            Some("text/plain; charset=utf-8")
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_to_get_removes_headers_for_the_discarded_body() {
+        let (listener, base_url) = listener();
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            request_tx.send(read_request(&mut first)).unwrap();
+            first
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            request_tx.send(read_request(&mut second)).unwrap();
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let request = net::Request::follow(format!("{base_url}/start"))
+            .unwrap()
+            .method(net::Method::Post)
+            .header("content-type", "text/plain")
+            .unwrap()
+            .header("content-encoding", "identity")
+            .unwrap()
+            .body(net::Body::Text("body".to_string()));
+
+        Http::new().fetch(request).await.unwrap();
+        server.join().unwrap();
+        let first = request_rx.recv().unwrap();
+        let second = request_rx.recv().unwrap();
+
+        assert!(first.starts_with("POST /start HTTP/1.1\r\n"));
+        assert_eq!(header(&first, "content-type"), Some("text/plain"));
+        assert!(second.starts_with("GET /final HTTP/1.1\r\n"));
+        for name in [
+            "content-length",
+            "content-type",
+            "content-encoding",
+            "content-language",
+            "content-location",
+            "transfer-encoding",
+        ] {
+            assert_eq!(header(&second, name), None, "unexpected {name}");
+        }
     }
 
     #[tokio::test]

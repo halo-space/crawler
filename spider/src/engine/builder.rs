@@ -1,10 +1,11 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use super::runtime::{DEFAULT_WORKER_ID, MAX_EVENTS, Runtime};
+use super::runtime::{MAX_EVENTS, Runtime};
+use super::worker::Worker;
 use crate::spider::Spider as _;
 use crate::spider::tx;
-use crate::{config, downloader, engine, middleware, scheduler, spider};
+use crate::{config, downloader, engine, middleware, net, scheduler, spider};
 
 pub struct Builder<S = scheduler::Memory, D = downloader::Downloader, F = ()> {
     pub(super) scheduler: S,
@@ -13,18 +14,20 @@ pub struct Builder<S = scheduler::Memory, D = downloader::Downloader, F = ()> {
     pub(super) registry: middleware::Registry,
     pub(super) schemas: Arc<crate::item::schema::Store>,
     pub(super) middlewares: Vec<middleware::Spec>,
+    pub(super) worker: Worker,
 }
 
 impl Builder<scheduler::Memory, downloader::Downloader, ()> {
     pub fn new() -> Self {
         let schemas = Arc::new(crate::item::schema::Store::new());
         Self {
-            scheduler: scheduler::Memory::new(DEFAULT_WORKER_ID),
+            scheduler: scheduler::Memory::new(),
             downloader: downloader::Downloader::new(),
             spider_factory: (),
             registry: middleware::Registry::with_schemas(schemas.clone()),
             schemas,
             middlewares: Vec::new(),
+            worker: Worker::default(),
         }
     }
 }
@@ -44,6 +47,7 @@ impl<S, D, F> Builder<S, D, F> {
             registry: self.registry,
             schemas: self.schemas,
             middlewares: self.middlewares,
+            worker: self.worker,
         }
     }
 
@@ -55,6 +59,7 @@ impl<S, D, F> Builder<S, D, F> {
             registry: self.registry,
             schemas: self.schemas,
             middlewares: self.middlewares,
+            worker: self.worker,
         }
     }
 
@@ -66,6 +71,7 @@ impl<S, D, F> Builder<S, D, F> {
             registry: self.registry,
             schemas: self.schemas,
             middlewares: self.middlewares,
+            worker: self.worker,
         }
     }
 
@@ -78,7 +84,18 @@ impl<S, D, F> Builder<S, D, F> {
             registry: self.registry,
             schemas: self.schemas,
             middlewares: self.middlewares,
+            worker: self.worker,
         }
+    }
+
+    pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
+        self.worker.set_id(worker_id);
+        self
+    }
+
+    pub fn with_modes(mut self, modes: impl IntoIterator<Item = net::Mode>) -> Self {
+        self.worker.set_modes(modes);
+        self
     }
 
     pub fn with_middleware<M>(self, name: impl Into<String>, value: M) -> Self
@@ -120,6 +137,7 @@ where
             events,
             self.registry,
             self.middlewares,
+            self.worker,
         )
         .with_init(engine::code::Init::new(seed))
     }

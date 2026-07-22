@@ -11,7 +11,7 @@ const RETRY_DELAY: Duration = Duration::from_millis(25);
 /// Ownership loss before execution completes prevents settlement. Once the
 /// final Payload exists, the settlement response is authoritative and a
 /// concurrent refresh error only stops further refreshes.
-pub(super) async fn run<S, F>(
+pub(super) async fn execute_with_lease<S, F>(
     scheduler: &S,
     request: &net::Request,
     execution: impl Future<Output = payload::Payload>,
@@ -63,10 +63,14 @@ where
                     Ok(deadline) => deadline,
                     Err(error) => return error,
                 };
+                let next_refresh = refreshed_at
+                    .checked_add(policy.interval())
+                    .unwrap_or(deadline)
+                    .min(deadline);
+                tokio::time::sleep_until(next_refresh).await;
             }
             Err(error) => return error,
         }
-        tokio::time::sleep(policy.interval()).await;
     }
 }
 
@@ -81,6 +85,9 @@ where
 {
     loop {
         let started_at = tokio::time::Instant::now();
+        if started_at >= deadline {
+            return Err(scheduler::Error::LeaseExpired(payload.id.clone()));
+        }
         let result = tokio::time::timeout_at(deadline, scheduler.refresh_lease(payload)).await;
         match result {
             Ok(Ok(())) => return Ok(started_at),
@@ -222,11 +229,17 @@ mod tests {
         async fn next_requests(
             &self,
             _limit: usize,
+            _worker_id: &str,
+            _modes: &[net::Mode],
         ) -> Result<Vec<net::Request>, scheduler::Error> {
             Ok(Vec::new())
         }
 
-        async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
+        async fn has_pending_requests(
+            &self,
+            _worker_id: &str,
+            _modes: &[net::Mode],
+        ) -> Result<bool, scheduler::Error> {
             Ok(false)
         }
 
@@ -285,7 +298,7 @@ mod tests {
         let scheduler = TestScheduler::new(policy);
         let request = claimed_request();
 
-        let result = run(
+        let result = execute_with_lease(
             &scheduler,
             &request,
             async { payload::Payload::new() },
@@ -306,7 +319,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_millis(25),
-            run(
+            execute_with_lease(
                 &scheduler,
                 &request,
                 async { payload::Payload::new() },
@@ -330,7 +343,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(50),
-            run(
+            execute_with_lease(
                 &scheduler,
                 &request,
                 std::future::pending::<payload::Payload>(),
@@ -356,7 +369,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(160),
-            run(
+            execute_with_lease(
                 &scheduler,
                 &request,
                 std::future::pending::<payload::Payload>(),
@@ -374,13 +387,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn near_deadline_success_does_not_delay_the_next_refresh() {
+        let policy =
+            scheduler::Lease::new(Duration::from_millis(300), Duration::from_millis(200)).unwrap();
+        let scheduler = TestScheduler::slow_then_unavailable(policy, Duration::from_millis(270));
+        let request = claimed_request();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(360),
+            execute_with_lease(
+                &scheduler,
+                &request,
+                std::future::pending::<payload::Payload>(),
+                settle,
+            ),
+        )
+        .await
+        .expect("a refresh response near the deadline must not add another full interval");
+
+        assert!(matches!(
+            result,
+            Err(crate::Error::Scheduler(scheduler::Error::LeaseExpired(id))) if id == request.id
+        ));
+        assert!(scheduler.refreshes.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
     async fn settlement_continues_after_refresh_loses_ownership() {
         let policy =
             scheduler::Lease::new(Duration::from_millis(200), Duration::from_millis(5)).unwrap();
         let scheduler = TestScheduler::ownership_loss_after(policy, 1);
         let request = claimed_request();
 
-        let result = run(
+        let result = execute_with_lease(
             &scheduler,
             &request,
             async { payload::Payload::new() },
@@ -402,7 +441,7 @@ mod tests {
         let scheduler = TestScheduler::ownership_loss_after(policy, 1);
         let request = claimed_request();
 
-        let result = run(
+        let result = execute_with_lease(
             &scheduler,
             &request,
             async { payload::Payload::new() },

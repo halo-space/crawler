@@ -5,9 +5,18 @@ use bytes::Bytes;
 use spider::scheduler::{Init, Scheduler};
 use spider::{downloader, engine, net, payload};
 
+#[derive(Debug, PartialEq, Eq)]
+struct Claim {
+    limit: usize,
+    worker_id: String,
+    modes: Vec<net::Mode>,
+    count: usize,
+}
+
 struct ClaimScheduler {
     inner: spider::Memory,
-    calls: Mutex<Vec<(usize, usize)>>,
+    calls: Mutex<Vec<Claim>>,
+    pending: Mutex<Vec<(String, Vec<net::Mode>)>>,
     active: AtomicUsize,
     max_active: AtomicUsize,
     transient: AtomicUsize,
@@ -18,8 +27,9 @@ struct ClaimScheduler {
 impl ClaimScheduler {
     fn new(transient: usize) -> Self {
         Self {
-            inner: spider::Memory::new("worker-1"),
+            inner: spider::Memory::new(),
             calls: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
             transient: AtomicUsize::new(transient),
@@ -72,6 +82,8 @@ impl Scheduler for ClaimScheduler {
     async fn next_requests(
         &self,
         limit: usize,
+        worker_id: &str,
+        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
@@ -88,13 +100,26 @@ impl Scheduler for ClaimScheduler {
                 "temporary claim failure".to_string(),
             ));
         }
-        let requests = self.inner.next_requests(limit).await?;
-        self.calls.lock().unwrap().push((limit, requests.len()));
+        let requests = self.inner.next_requests(limit, worker_id, modes).await?;
+        self.calls.lock().unwrap().push(Claim {
+            limit,
+            worker_id: worker_id.to_string(),
+            modes: modes.to_vec(),
+            count: requests.len(),
+        });
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(requests)
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
+    async fn has_pending_requests(
+        &self,
+        worker_id: &str,
+        modes: &[net::Mode],
+    ) -> Result<bool, spider::scheduler::Error> {
+        self.pending
+            .lock()
+            .unwrap()
+            .push((worker_id.to_string(), modes.to_vec()));
         if self
             .pending_failures
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
@@ -106,7 +131,7 @@ impl Scheduler for ClaimScheduler {
                 "temporary pending-state failure".to_string(),
             ));
         }
-        self.inner.has_pending_requests().await
+        self.inner.has_pending_requests(worker_id, modes).await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -255,8 +280,112 @@ async fn claim_limit_fills_concurrency_in_multiple_single_claims() {
     assert_eq!(max_active.load(Ordering::SeqCst), 16);
     assert_eq!(runtime.scheduler().max_active.load(Ordering::SeqCst), 1);
     let calls = runtime.scheduler().calls.lock().unwrap();
-    assert_eq!(&calls[..4], &[(4, 4), (4, 4), (4, 4), (4, 4)]);
-    assert!(calls.iter().all(|(limit, _)| *limit <= 4));
+    assert_eq!(
+        &calls[..4],
+        [
+            Claim {
+                limit: 4,
+                worker_id: "worker-1".to_string(),
+                modes: vec![net::Mode::Http],
+                count: 4,
+            },
+            Claim {
+                limit: 4,
+                worker_id: "worker-1".to_string(),
+                modes: vec![net::Mode::Http],
+                count: 4,
+            },
+            Claim {
+                limit: 4,
+                worker_id: "worker-1".to_string(),
+                modes: vec![net::Mode::Http],
+                count: 4,
+            },
+            Claim {
+                limit: 4,
+                worker_id: "worker-1".to_string(),
+                modes: vec![net::Mode::Http],
+                count: 4,
+            },
+        ]
+    );
+    assert!(calls.iter().all(|claim| claim.limit <= 4));
+}
+
+#[tokio::test]
+async fn engine_forwards_worker_identity_and_modes_to_scheduler() {
+    let scheduler = ClaimScheduler::new(0);
+    let request = net::Request::follow("https://example.com/browser")
+        .unwrap()
+        .mode(net::Mode::Browser);
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+    let mut runtime = engine::Builder::new()
+        .with_worker_id("browser-worker")
+        .with_modes([net::Mode::Browser])
+        .with_scheduler(scheduler)
+        .with_downloader(SlowDownload {
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+        })
+        .with_spider(EmptySpider::new())
+        .build();
+
+    runtime.start().await.unwrap();
+
+    let scheduler = runtime.scheduler();
+    let calls = scheduler.calls.lock().unwrap();
+    assert!(calls.iter().all(|claim| {
+        claim.worker_id == "browser-worker" && claim.modes == [net::Mode::Browser]
+    }));
+    assert!(calls.iter().any(|claim| claim.count == 1));
+    drop(calls);
+    let pending = scheduler.pending.lock().unwrap();
+    assert!(!pending.is_empty());
+    assert!(pending.iter().all(|(worker_id, modes)| {
+        worker_id == "browser-worker" && modes == &[net::Mode::Browser]
+    }));
+}
+
+#[tokio::test]
+async fn rules_builder_forwards_worker_identity_and_modes_to_scheduler() {
+    let config = spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: browser-rules
+  start:
+    - node: index
+      url: https://example.com/browser
+      download_mode: browser
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#,
+    )
+    .unwrap();
+    let mut runtime = engine::Builder::new()
+        .with_worker_id("rules-browser-worker")
+        .with_modes([net::Mode::Browser])
+        .with_spider(EmptySpider::new())
+        .with_rules(config)
+        .with_scheduler(ClaimScheduler::new(0))
+        .with_downloader(SlowDownload {
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+        })
+        .build();
+
+    runtime.start().await.unwrap();
+
+    let scheduler = runtime.scheduler();
+    let calls = scheduler.calls.lock().unwrap();
+    assert!(calls.iter().any(|claim| claim.count == 1));
+    assert!(calls.iter().all(|claim| {
+        claim.worker_id == "rules-browser-worker" && claim.modes == [net::Mode::Browser]
+    }));
 }
 
 #[tokio::test]
@@ -398,5 +527,31 @@ async fn zero_runtime_limits_are_rejected_before_startup() {
             .unwrap_err()
             .to_string()
             .contains("Event limit must be positive")
+    );
+
+    let mut worker = engine::Builder::new()
+        .with_spider(EmptySpider::new())
+        .with_worker_id("  ")
+        .build();
+    assert!(
+        worker
+            .start()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Worker id must not be empty")
+    );
+
+    let mut modes = engine::Builder::new()
+        .with_spider(EmptySpider::new())
+        .with_modes(std::iter::empty::<net::Mode>())
+        .build();
+    assert!(
+        modes
+            .start()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Worker modes must not be empty")
     );
 }

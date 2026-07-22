@@ -591,4 +591,27 @@ graph:
 
         assert_eq!(rendered, Value::String("rust-book-v2".to_string()));
     }
+
+    #[test]
+    fn template_does_not_reinterpret_resolved_braces() {
+        let request = net::Request::follow("https://example.com/books").unwrap();
+        let response = response("");
+        let fields = IndexMap::new();
+        let bind = IndexMap::new();
+        let context = Context {
+            request: &request,
+            response: &response,
+            fields: &fields,
+            bind: &bind,
+        };
+        let vars = serde_json::from_value::<IndexMap<String, ValueRef>>(serde_json::json!({
+            "first": {"value": "{second}"},
+            "second": {"value": "value"}
+        }))
+        .unwrap();
+
+        let rendered = bind::render("{first}-{second}", &vars, &context).unwrap();
+
+        assert_eq!(rendered, Value::String("{second}-value".to_string()));
+    }
 }

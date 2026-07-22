@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use crate::{net, payload, stats};
 
+use super::identity;
+
 tokio::task_local! {
     static CURRENT: Context;
 }
@@ -16,6 +18,7 @@ pub(crate) struct Context {
     worker_id: String,
     node: String,
     stats: Option<Arc<stats::Delta>>,
+    occurrences: identity::Occurrences,
 }
 
 impl Context {
@@ -28,10 +31,11 @@ impl Context {
             worker_id: request.leased_by.clone(),
             node: request.node_key().to_string(),
             stats: Some(stats),
+            occurrences: Default::default(),
         }
     }
 
-    pub(super) fn trace(task_id: impl Into<String>, trace_id: impl Into<String>) -> Self {
+    pub(crate) fn trace(task_id: impl Into<String>, trace_id: impl Into<String>) -> Self {
         Self {
             id: String::new(),
             task_id: task_id.into(),
@@ -40,6 +44,7 @@ impl Context {
             worker_id: String::new(),
             node: String::new(),
             stats: None,
+            occurrences: Default::default(),
         }
     }
 
@@ -59,12 +64,19 @@ impl Context {
         self.stats.as_deref()
     }
 
-    pub(super) fn task_id(&self) -> &str {
+    pub(crate) fn task_id(&self) -> &str {
         &self.task_id
     }
 
-    pub(super) fn trace_id(&self) -> &str {
+    pub(crate) fn trace_id(&self) -> &str {
         &self.trace_id
+    }
+
+    pub(crate) fn assign_ids(
+        &self,
+        requests: &mut [net::Request],
+    ) -> Result<identity::Reservation, crate::Error> {
+        identity::assign(requests, &self.id, &self.occurrences)
     }
 }
 

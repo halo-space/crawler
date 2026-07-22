@@ -68,7 +68,9 @@ impl Middleware for Validate {
         _spec: &'a Spec,
     ) -> BoxFuture<'a, Next<Response>> {
         Box::pin(async move {
-            if url::Url::parse(&response.url).is_err() || response.status.0 == 0 {
+            if !http_url_is_valid(&response.url)
+                || http::StatusCode::from_u16(response.status.0).is_err()
+            {
                 return Err(crate::middleware::Error::Message(
                     "downloader returned an invalid response".to_string(),
                 ));
@@ -195,13 +197,20 @@ fn value_is_empty(value: &serde_json::Value) -> bool {
 }
 
 fn request_url_is_valid(request: &Request) -> bool {
-    url::Url::parse(&request.url)
+    http_url_is_valid(&request.url)
+}
+
+fn http_url_is_valid(value: &str) -> bool {
+    url::Url::parse(value)
         .ok()
         .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use bytes::Bytes;
     use serde_json::Value;
 
     use super::*;
@@ -229,6 +238,23 @@ mod tests {
 
         fn state_mut(&mut self) -> &mut crate::item::State {
             &mut self.state
+        }
+    }
+
+    fn response(url: &str, status: u16) -> Response {
+        Response {
+            request: Request::follow("https://example.com/article").unwrap(),
+            url: url.to_string(),
+            status: crate::net::StatusCode(status),
+            reason: None,
+            version: crate::net::HttpVersion::Http11,
+            redirects: Vec::new(),
+            headers: crate::net::Headers::new(),
+            cookies: crate::net::Cookies::new(),
+            body: Bytes::new(),
+            vals: HashMap::new(),
+            kwargs: HashMap::new(),
+            middlewares: Vec::new(),
         }
     }
 
@@ -271,6 +297,60 @@ mod tests {
         let next = Validate::default().before_item(item, &spec).await.unwrap();
 
         assert!(matches!(next, Next::Skip));
+    }
+
+    #[tokio::test]
+    async fn after_download_rejects_invalid_response_urls() {
+        let validate = Validate::default();
+        let spec = Spec::new("validate");
+
+        for url in [
+            "/relative",
+            "file:///tmp/article",
+            "custom:/article",
+            "https://",
+        ] {
+            let error = validate
+                .after_download(response(url, 200), &spec)
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains("invalid response"), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn after_download_rejects_invalid_http_status_codes() {
+        let validate = Validate::default();
+        let spec = Spec::new("validate");
+
+        for status in [0, 99, 1_000, u16::MAX] {
+            let error = validate
+                .after_download(response("https://example.com/article", status), &spec)
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains("invalid response"), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn after_download_accepts_structurally_valid_error_responses() {
+        let validate = Validate::default();
+        let spec = Spec::new("validate");
+        let response = match validate
+            .after_download(response("https://example.com/missing", 404), &spec)
+            .await
+            .unwrap()
+        {
+            Next::Continue(response) => response,
+            Next::Skip => panic!("valid response must continue after download"),
+        };
+
+        assert!(matches!(
+            validate.before_parse(response, &spec).await.unwrap(),
+            Next::Skip
+        ));
     }
 
     #[tokio::test]

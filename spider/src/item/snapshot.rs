@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Local;
+use serde::Serialize;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
@@ -28,32 +29,7 @@ impl Store {
         error: &str,
     ) -> Result<PathBuf, crate::Error> {
         let path = self.path(payload);
-        let items = payload
-            .items
-            .iter()
-            .map(|item| {
-                serde_json::to_value(item.as_ref()).map(|data| {
-                    serde_json::json!({
-                        "id": item.id(),
-                        "data": data,
-                    })
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(crate::item::Error::from)?;
-        let snapshot = serde_json::json!({
-            "id": payload.id,
-            "task_id": payload.task_id,
-            "trace_id": payload.trace_id,
-            "version": payload.version,
-            "worker_id": payload.worker_id,
-            "node": payload.node,
-            "error": error,
-            "failed_time": crate::utils::time::now_millis(),
-            "items": items,
-        });
-        let bytes = serde_json::to_vec_pretty(&snapshot).map_err(crate::item::Error::from)?;
-        publish(&path, &bytes).await?;
+        publish(&path, payload, error).await?;
 
         Ok(path)
     }
@@ -81,7 +57,13 @@ impl Store {
     }
 }
 
-async fn publish(path: &Path, bytes: &[u8]) -> Result<(), crate::Error> {
+#[derive(Serialize)]
+struct Record<'a> {
+    id: &'a str,
+    data: &'a dyn crate::item::Item,
+}
+
+async fn publish(path: &Path, payload: &payload::Payload, error: &str) -> Result<(), crate::Error> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -95,10 +77,12 @@ async fn publish(path: &Path, bytes: &[u8]) -> Result<(), crate::Error> {
         .await
         .map_err(crate::item::Error::from)?;
     let result = async {
-        file.write_all(bytes).await?;
-        file.flush().await?;
+        write_snapshot(&mut file, payload, error).await?;
+        file.flush().await.map_err(crate::item::Error::from)?;
         drop(file);
-        tokio::fs::rename(&temporary, path).await
+        tokio::fs::rename(&temporary, path)
+            .await
+            .map_err(crate::item::Error::from)
     }
     .await;
     if let Err(error) = result {
@@ -111,9 +95,57 @@ async fn publish(path: &Path, bytes: &[u8]) -> Result<(), crate::Error> {
             ))
             .into());
         }
-        return Err(crate::item::Error::from(error).into());
+        return Err(error.into());
     }
 
+    Ok(())
+}
+
+async fn write_snapshot(
+    file: &mut tokio::fs::File,
+    payload: &payload::Payload,
+    error: &str,
+) -> Result<(), crate::item::Error> {
+    file.write_all(b"{\"id\":").await?;
+    write_json(file, &payload.id).await?;
+    file.write_all(b",\"task_id\":").await?;
+    write_json(file, &payload.task_id).await?;
+    file.write_all(b",\"trace_id\":").await?;
+    write_json(file, &payload.trace_id).await?;
+    file.write_all(b",\"version\":").await?;
+    write_json(file, &payload.version).await?;
+    file.write_all(b",\"worker_id\":").await?;
+    write_json(file, &payload.worker_id).await?;
+    file.write_all(b",\"node\":").await?;
+    write_json(file, &payload.node).await?;
+    file.write_all(b",\"error\":").await?;
+    write_json(file, error).await?;
+    file.write_all(b",\"failed_time\":").await?;
+    write_json(file, &crate::utils::time::now_millis()).await?;
+    file.write_all(b",\"items\":[").await?;
+    for (index, item) in payload.items.iter().enumerate() {
+        if index > 0 {
+            file.write_all(b",").await?;
+        }
+        write_json(
+            file,
+            &Record {
+                id: item.id(),
+                data: item.as_ref(),
+            },
+        )
+        .await?;
+    }
+    file.write_all(b"]}").await?;
+    Ok(())
+}
+
+async fn write_json<T>(file: &mut tokio::fs::File, value: &T) -> Result<(), crate::item::Error>
+where
+    T: Serialize + ?Sized,
+{
+    let bytes = serde_json::to_vec(value)?;
+    file.write_all(&bytes).await?;
     Ok(())
 }
 
@@ -151,6 +183,35 @@ mod tests {
             Ok(Self {
                 state: crate::item::State::default(),
                 value,
+            })
+        }
+
+        fn state(&self) -> &crate::item::State {
+            &self.state
+        }
+
+        fn state_mut(&mut self) -> &mut crate::item::State {
+            &mut self.state
+        }
+    }
+
+    struct FailingItem {
+        state: crate::item::State,
+    }
+
+    impl serde::Serialize for FailingItem {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("cannot serialize item"))
+        }
+    }
+
+    impl crate::item::Item for FailingItem {
+        fn from_values(_values: crate::item::Values) -> Result<Self, crate::item::Error> {
+            Ok(Self {
+                state: crate::item::State::default(),
             })
         }
 
@@ -254,8 +315,29 @@ mod tests {
         let runtime_dir = temp_dir();
         let path = runtime_dir.join("snapshot.json");
         tokio::fs::create_dir_all(&path).await.unwrap();
+        let mut payload = payload::Payload::new().items(vec![Box::new(item("item-1", 1))]);
+        payload.task_id = "task".to_string();
 
-        assert!(publish(&path, b"snapshot").await.is_err());
+        assert!(publish(&path, &payload, "snapshot").await.is_err());
+        assert!(temporary_files(&runtime_dir).await.is_empty());
+
+        tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serialization_failure_removes_the_temporary_file() {
+        let runtime_dir = temp_dir();
+        let path = runtime_dir.join("snapshot.json");
+        let mut payload = payload::Payload::new().items(vec![
+            Box::new(item("item-1", 1)),
+            Box::new(FailingItem {
+                state: crate::item::State::default(),
+            }),
+        ]);
+        payload.task_id = "task".to_string();
+
+        assert!(publish(&path, &payload, "snapshot").await.is_err());
+        assert!(!tokio::fs::try_exists(&path).await.unwrap());
         assert!(temporary_files(&runtime_dir).await.is_empty());
 
         tokio::fs::remove_dir_all(runtime_dir).await.unwrap();

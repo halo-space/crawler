@@ -65,6 +65,21 @@ impl Config {
                 "base_url must be an absolute http or https URL".to_string(),
             ));
         }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(selector::Error::Ai(
+                "base_url must not contain credentials".to_string(),
+            ));
+        }
+        if url.query().is_some() {
+            return Err(selector::Error::Ai(
+                "base_url must not contain a query".to_string(),
+            ));
+        }
+        if url.fragment().is_some() {
+            return Err(selector::Error::Ai(
+                "base_url must not contain a fragment".to_string(),
+            ));
+        }
         if model_name.trim().is_empty() {
             return Err(selector::Error::Ai(
                 "model_name cannot be empty".to_string(),
@@ -135,7 +150,7 @@ impl std::fmt::Debug for Config {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Config")
-            .field("base_url", &self.base_url)
+            .field("base_url", &display_base_url(&self.base_url))
             .field("api_key", &"***")
             .field("model_name", &self.model_name)
             .finish()
@@ -195,7 +210,7 @@ pub async fn select(
         .chat()
         .create(completion_request)
         .await
-        .map_err(|error| selector::Error::Ai(redact(error, &api_key)))?;
+        .map_err(|error| selector::Error::Ai(redact(error, &api_key, config.base_url())))?;
     let json = completion
         .choices
         .first()
@@ -205,8 +220,22 @@ pub async fn select(
         .map_err(|error| selector::Error::Ai(format!("model content is not valid JSON: {error}")))
 }
 
-fn redact(error: impl std::fmt::Display, secret: &str) -> String {
-    error.to_string().replace(secret, "***")
+fn redact(error: impl std::fmt::Display, secret: &str, base_url: &str) -> String {
+    let mut message = error.to_string();
+    let display = display_base_url(base_url);
+    if display != base_url {
+        message = message.replace(base_url, &display);
+    }
+    message.replace(secret, "***")
+}
+
+fn display_base_url(base_url: &str) -> String {
+    let Ok(mut url) = url::Url::parse(base_url) else {
+        return "<invalid>".to_string();
+    };
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string().trim_end_matches('/').to_string()
 }
 
 #[cfg(test)]
@@ -309,13 +338,39 @@ mod tests {
         assert_eq!(config.base_url(), "https://example.com/v1");
         assert!(!format!("{config:?}").contains("secret"));
         assert_eq!(
-            redact("provider echoed secret", "secret"),
+            redact("provider echoed secret", "secret", "https://example.com/v1"),
             "provider echoed ***"
         );
         assert!(Config::new("not-a-url", "secret", "model").is_err());
+        assert!(Config::new("https://user:pass@example.com/v1", "secret", "model").is_err());
+        assert!(Config::new("https://example.com/v1#chat", "secret", "model").is_err());
         assert!(Config::new("https://example.com/v1", "", "model").is_err());
         assert!(Config::new("https://example.com/v1", "secret", "").is_err());
         assert!(serde_json::to_value(&config).is_err());
+
+        for error in [
+            Config::new("https://example.com/v1?token=url-secret", "secret", "model").unwrap_err(),
+            Config::from_env(
+                "https://example.com/v1?token=url-secret",
+                "OPENAI_API_KEY",
+                "model",
+            )
+            .unwrap_err(),
+        ] {
+            assert_eq!(
+                error,
+                selector::Error::Ai("base_url must not contain a query".to_string())
+            );
+            assert!(!error.to_string().contains("url-secret"));
+        }
+        assert_eq!(
+            redact(
+                "request failed at https://example.com/v1?token=url-secret/chat/completions",
+                "secret",
+                "https://example.com/v1?token=url-secret",
+            ),
+            "request failed at https://example.com/v1/chat/completions"
+        );
 
         let persisted =
             Config::from_env("https://example.com/v1", "OPENAI_API_KEY", "model").unwrap();

@@ -39,6 +39,9 @@ impl Registry {
         &self,
         mut request: Request,
     ) -> Result<Output<Request>, Error> {
+        let id = request.id.clone();
+        let task_id = request.task_id.clone();
+        let trace_id = request.trace_id.clone();
         for bind in self.resolve(&request.middlewares, "before_scheduler", true)? {
             request = match bind
                 .middleware
@@ -52,6 +55,14 @@ impl Registry {
                     });
                 }
             };
+            validate_unchanged(
+                "before_scheduler",
+                [
+                    ("id", request.id == id),
+                    ("task_id", request.task_id == task_id),
+                    ("trace_id", request.trace_id == trace_id),
+                ],
+            )?;
         }
 
         Ok(Output::Continue(request))
@@ -61,6 +72,10 @@ impl Registry {
         &self,
         mut request: Request,
     ) -> Result<Output<Request>, Error> {
+        let id = request.id.clone();
+        let task_id = request.task_id.clone();
+        let trace_id = request.trace_id.clone();
+        let node = request.node_key().to_string();
         for bind in self.resolve(&request.middlewares, "before_download", true)? {
             request = match bind.middleware.before_download(request, &bind.spec).await? {
                 Next::Continue(request) => request,
@@ -70,6 +85,15 @@ impl Registry {
                     });
                 }
             };
+            validate_unchanged(
+                "before_download",
+                [
+                    ("id", request.id == id),
+                    ("task_id", request.task_id == task_id),
+                    ("trace_id", request.trace_id == trace_id),
+                    ("node", request.node_key() == node),
+                ],
+            )?;
         }
 
         Ok(Output::Continue(request))
@@ -258,6 +282,18 @@ impl Registry {
     }
 }
 
+fn validate_unchanged<const N: usize>(
+    hook: &str,
+    fields: [(&'static str, bool); N],
+) -> Result<(), Error> {
+    if let Some((field, _)) = fields.into_iter().find(|(_, unchanged)| !unchanged) {
+        return Err(Error::Message(format!(
+            "{hook} middleware must not change Request {field}"
+        )));
+    }
+    Ok(())
+}
+
 impl Default for Registry {
     fn default() -> Self {
         Self::with_schemas(Arc::new(crate::item::schema::Store::new()))
@@ -303,6 +339,18 @@ mod tests {
         name: &'static str,
         calls: Arc<Mutex<Vec<String>>>,
     }
+
+    #[derive(Clone, Copy)]
+    enum RequestField {
+        Id,
+        TaskId,
+        TraceId,
+        Node,
+    }
+
+    struct ChangeRequest(RequestField);
+
+    struct ChangeTransport;
 
     #[derive(serde::Serialize)]
     struct TestItem {
@@ -360,6 +408,46 @@ mod tests {
             Box::pin(async move {
                 self.calls.lock().unwrap().push(error.to_string());
                 Ok(())
+            })
+        }
+    }
+
+    impl Middleware for ChangeRequest {
+        fn order(&self, _hook: &str) -> i32 {
+            200
+        }
+
+        fn before_download<'a>(
+            &'a self,
+            mut request: Request,
+            _spec: &'a Spec,
+        ) -> crate::middleware::BoxFuture<'a, Next<Request>> {
+            Box::pin(async move {
+                match self.0 {
+                    RequestField::Id => request.id = "other-request".to_string(),
+                    RequestField::TaskId => request.task_id = "other-task".to_string(),
+                    RequestField::TraceId => request.trace_id = "other-trace".to_string(),
+                    RequestField::Node => request = request.node("other-node"),
+                }
+                Ok(Next::Continue(request))
+            })
+        }
+    }
+
+    impl Middleware for ChangeTransport {
+        fn order(&self, _hook: &str) -> i32 {
+            200
+        }
+
+        fn before_download<'a>(
+            &'a self,
+            mut request: Request,
+            _spec: &'a Spec,
+        ) -> crate::middleware::BoxFuture<'a, Next<Request>> {
+            Box::pin(async move {
+                request.url = "https://cdn.example.com/article".to_string();
+                request.headers.try_set("x-route", "cdn").unwrap();
+                Ok(Next::Continue(request))
             })
         }
     }
@@ -432,6 +520,55 @@ mod tests {
         let error = registry.before_scheduler(request).await.unwrap_err();
 
         assert!(matches!(error, Error::NotRegistered(name) if name == "missing"));
+    }
+
+    #[tokio::test]
+    async fn before_download_rejects_request_identity_and_node_changes() {
+        for (change, field) in [
+            (RequestField::Id, "id"),
+            (RequestField::TaskId, "task_id"),
+            (RequestField::TraceId, "trace_id"),
+            (RequestField::Node, "node"),
+        ] {
+            let registry = Registry::new();
+            registry.register("change", ChangeRequest(change));
+            let mut request = Request::follow("https://example.com").unwrap();
+            request.task_id = "task-1".to_string();
+            request.trace_id = "trace-1".to_string();
+            request.middlewares = vec![spec("change", "before_download")];
+
+            let error = registry.before_download(request).await.unwrap_err();
+
+            assert!(matches!(
+                error,
+                Error::Message(message)
+                    if message == format!(
+                        "before_download middleware must not change Request {field}"
+                    )
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn before_download_allows_transport_changes() {
+        let registry = Registry::new();
+        registry.register("transport", ChangeTransport);
+        let mut request = Request::follow("https://example.com/article").unwrap();
+        let id = request.id.clone();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
+        request.middlewares = vec![spec("transport", "before_download")];
+
+        let Output::Continue(request) = registry.before_download(request).await.unwrap() else {
+            panic!("request should continue");
+        };
+
+        assert_eq!(request.id, id);
+        assert_eq!(request.task_id, "task-1");
+        assert_eq!(request.trace_id, "trace-1");
+        assert_eq!(request.node_key(), "index");
+        assert_eq!(request.url, "https://cdn.example.com/article");
+        assert_eq!(request.headers.get("x-route").unwrap(), "cdn");
     }
 
     #[tokio::test]

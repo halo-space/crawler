@@ -36,12 +36,9 @@ pub(super) fn check(node: &str, value: Option<&Value>) -> Result<(), Error> {
             "node {node} uses unsupported request.body kind: {kind}"
         )));
     }
-    if kind == "text"
-        && let Some(data) = object.get("data")
-        && !data.is_string()
-    {
+    if kind == "text" && object.get("data").is_none_or(|data| !data.is_string()) {
         return Err(Error::Message(format!(
-            "node {node} request.body text data must be a string"
+            "node {node} request.body text data is required and must be a string"
         )));
     }
     if let Some(data) = object.get("data") {
@@ -92,6 +89,26 @@ mod tests {
         let error = check("detail", Some(&value)).unwrap_err();
 
         assert!(error.to_string().contains("unsupported field: payload"));
+    }
+
+    #[test]
+    fn requires_text_data_during_config_check() {
+        for value in [
+            serde_json::json!({"kind": "text"}),
+            serde_json::json!({"kind": "text", "data": null}),
+            serde_json::json!({"kind": "text", "data": 1}),
+        ] {
+            let error = check("detail", Some(&value)).unwrap_err();
+
+            assert!(error.to_string().contains("data is required"));
+        }
+    }
+
+    #[test]
+    fn accepts_string_text_data_during_config_check() {
+        let value = serde_json::json!({"kind": "text", "data": "{fields.query}"});
+
+        check("detail", Some(&value)).unwrap();
     }
 
     #[test]

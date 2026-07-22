@@ -31,21 +31,28 @@ pub(super) fn spawn<S, D, E>(
 {
     engine.claim_stale = false;
     let scheduler = engine.scheduler.clone();
+    let worker_id = engine.config.worker.id.clone();
+    let modes = engine.config.worker.modes.clone();
     let handle = tokio::spawn(async move {
-        let result = task::protect(next(scheduler, limit)).await;
+        let result = task::protect(next(scheduler, limit, worker_id, modes)).await;
         let id = tokio::task::id();
         let _ = actor_ref.tell(Done { id, result }).await;
     });
     engine.claim = Some(task::Task::new(handle));
 }
 
-async fn next<S>(scheduler: Arc<S>, limit: usize) -> Result<Output, crate::Error>
+async fn next<S>(
+    scheduler: Arc<S>,
+    limit: usize,
+    worker_id: String,
+    modes: Vec<crate::net::Mode>,
+) -> Result<Output, crate::Error>
 where
     S: scheduler::Scheduler,
 {
-    let requests = retry(|| scheduler.next_requests(limit)).await?;
+    let requests = retry(|| scheduler.next_requests(limit, &worker_id, &modes)).await?;
     if requests.is_empty() {
-        if retry(|| scheduler.has_pending_requests()).await? {
+        if retry(|| scheduler.has_pending_requests(&worker_id, &modes)).await? {
             Ok(Output::Pending)
         } else {
             Ok(Output::Exhausted)

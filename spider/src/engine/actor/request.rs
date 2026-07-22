@@ -23,7 +23,7 @@ pub(super) fn spawn<S, D, E>(
     let executor = engine.executor.clone();
     let registry = engine.registry.clone();
     let handle = tokio::spawn(async move {
-        let result = task::protect(engine::worker::run(
+        let result = task::protect(engine::request::task::execute(
             request, scheduler, downloader, executor, registry,
         ))
         .await;

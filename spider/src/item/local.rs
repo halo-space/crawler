@@ -127,17 +127,10 @@ impl Writer {
     }
 
     pub(crate) async fn write(&self, payload: &payload::Payload) -> Result<(), crate::Error> {
-        let path = self.current_path(&payload.task_id);
-        let mut bytes = Vec::new();
-        for item in &payload.items {
-            let mut line = serde_json::to_vec(item.as_ref()).map_err(crate::item::Error::from)?;
-            line.push(b'\n');
-            bytes.extend(line);
-        }
-        if bytes.is_empty() {
+        if payload.items.is_empty() {
             return Ok(());
         }
-
+        let path = self.current_path(&payload.task_id);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -152,8 +145,15 @@ impl Writer {
             .map_err(crate::item::Error::from)?
             .len();
         let write_result = async {
-            file.write_all(&bytes).await?;
-            file.flush().await
+            for item in &payload.items {
+                let mut line =
+                    serde_json::to_vec(item.as_ref()).map_err(crate::item::Error::from)?;
+                line.push(b'\n');
+                file.write_all(&line)
+                    .await
+                    .map_err(crate::item::Error::from)?;
+            }
+            file.flush().await.map_err(crate::item::Error::from)
         }
         .await;
         if let Err(error) = write_result {
@@ -169,7 +169,7 @@ impl Writer {
                 ))
                 .into());
             }
-            return Err(crate::item::Error::from(error).into());
+            return Err(error.into());
         }
 
         Ok(())
@@ -212,6 +212,35 @@ mod tests {
                 .and_then(|value| value.as_i64())
                 .ok_or_else(|| crate::item::Error::Message("value must be an int".to_string()))?;
             Ok(Self::new(value))
+        }
+
+        fn state(&self) -> &crate::item::State {
+            &self.state
+        }
+
+        fn state_mut(&mut self) -> &mut crate::item::State {
+            &mut self.state
+        }
+    }
+
+    struct FailingItem {
+        state: crate::item::State,
+    }
+
+    impl serde::Serialize for FailingItem {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("cannot serialize item"))
+        }
+    }
+
+    impl Item for FailingItem {
+        fn from_values(_values: crate::item::Values) -> Result<Self, crate::item::Error> {
+            Ok(Self {
+                state: crate::item::State::default(),
+            })
         }
 
         fn state(&self) -> &crate::item::State {
@@ -283,6 +312,28 @@ mod tests {
             .collect::<Vec<_>>();
         values.sort_unstable();
         assert_eq!(values, [1, 2]);
+
+        tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serialization_failure_rolls_back_the_complete_payload() {
+        let runtime_dir = temp_dir();
+        let storage = Writer::new(&runtime_dir);
+        let path = storage.current_path("same-task");
+        storage.write(&payload("same-task", 1)).await.unwrap();
+        let original = tokio::fs::read(&path).await.unwrap();
+        let mut failed = payload::Payload::new().items(vec![
+            Box::new(TestItem::new(2)),
+            Box::new(FailingItem {
+                state: crate::item::State::default(),
+            }),
+        ]);
+        failed.task_id = "same-task".to_string();
+
+        assert!(storage.write(&failed).await.is_err());
+        storage.close().await.unwrap();
+        assert_eq!(tokio::fs::read(path).await.unwrap(), original);
 
         tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
     }

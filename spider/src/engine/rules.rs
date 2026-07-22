@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::runtime::MAX_EVENTS;
 use crate::spider::tx;
-use crate::{config, downloader, middleware, scheduler, spider};
+use crate::{config, downloader, middleware, net, scheduler, spider};
 
 /// Rules 模式装配完成后的 Engine 类型。
 pub type Runtime<S, D, F> = super::runtime::Runtime<
@@ -23,6 +23,7 @@ pub struct Builder<S, D, F> {
     pub(super) registry: middleware::Registry,
     pub(super) schemas: Arc<crate::item::schema::Store>,
     pub(super) middlewares: Vec<middleware::Spec>,
+    pub(super) worker: super::worker::Worker,
 }
 
 impl<S, D, F> Builder<S, D, F> {
@@ -35,6 +36,7 @@ impl<S, D, F> Builder<S, D, F> {
             registry: self.registry,
             schemas: self.schemas,
             middlewares: self.middlewares,
+            worker: self.worker,
         }
     }
 
@@ -47,6 +49,7 @@ impl<S, D, F> Builder<S, D, F> {
             registry: self.registry,
             schemas: self.schemas,
             middlewares: self.middlewares,
+            worker: self.worker,
         }
     }
 
@@ -59,7 +62,18 @@ impl<S, D, F> Builder<S, D, F> {
             registry: self.registry,
             schemas: self.schemas,
             middlewares: self.middlewares,
+            worker: self.worker,
         }
+    }
+
+    pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
+        self.worker.set_id(worker_id);
+        self
+    }
+
+    pub fn with_modes(mut self, modes: impl IntoIterator<Item = net::Mode>) -> Self {
+        self.worker.set_modes(modes);
+        self
     }
 
     pub fn with_middleware<M>(self, name: impl Into<String>, value: M) -> Self
@@ -99,6 +113,7 @@ where
             events,
             self.registry,
             self.middlewares,
+            self.worker,
         )
         .with_init(Init::new(config, trace_id, schemas))
     }
@@ -169,7 +184,8 @@ where
                 Default::default(),
             )
             .map_err(crate::Error::Config)?;
-        let requests = super::admission::apply(requests, None, registry.as_ref()).await?;
+        let context = tx::Context::trace(self.config.spider.name.clone(), self.trace_id.clone());
+        let requests = super::admission::apply(requests, Some(&context), registry.as_ref()).await?;
 
         scheduler
             .init(self.trace_id.clone(), snapshot, requests)

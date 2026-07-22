@@ -46,7 +46,7 @@ XPath has been removed from the roadmap. CSS is the sole HTML selector path; the
 4. **Identity is separate from execution ownership:** Request ID survives retry and recovery; `version`, `leased_by`, and `lease_time` describe one execution right.
 5. **Immutable run snapshots:** Each Trace has one immutable Trace Snapshot. Rules snapshots contain the complete DSL; code snapshots never persist Rust handlers.
 6. **Explicit recovery semantics:** Lease refresh, release, success, and failure use separate methods. There is no overloaded `finish` operation.
-7. **Single-purpose modules:** The Actor coordinates, a Worker owns one Request execution, an Executor parses, and a Scheduler implements scheduling and submission contracts.
+7. **Single-purpose modules:** The Actor coordinates, startup-frozen Worker state owns identity and capabilities, a Request task owns one execution right, an Executor parses, and a Scheduler implements scheduling and submission contracts.
 
 ## 3. System Overview
 
@@ -112,7 +112,7 @@ flowchart LR
 - Rules `config.spider.name` identifies that Rules task and becomes its local `task_id`; it is not required to equal Rust `Spider::name()`.
 - `Task.id` identifies a task definition. A persistent control plane may create several parameterized or scheduled Tasks from one deployed Spider.
 - `Trace.id` identifies one Task run. Each periodic dispatch should create a new Trace.
-- `Request.id` identifies one logical Request and remains unchanged across lease recovery and queue retry.
+- `Request.id` identifies one logical Request and remains unchanged across lease recovery and queue retry. For current-Request `Tx.request` output, the framework derives child IDs from the parent ID, the canonical initial child specification, and its occurrence in that parse attempt. Replaying the same output therefore reuses the ID; `Request::with_id` preserves an application-owned ID.
 - Local Memory has no persistent Task table. A code run uses Rust `Spider::name()` as `task_id`; a Rules run uses `config.spider.name`.
 - Item ID is not part of this hierarchy. `Tx.item` generates a UUID v7 when an Item has no ID. That ID identifies a data instance and does not provide business deduplication.
 
@@ -185,7 +185,7 @@ Startup, claim, Request, output, poll, and producer-idle completions return as s
 | Setting | Default | Meaning |
 | --- | ---: | --- |
 | `with_concurrency(n)` | `16` | Maximum number of active Request tasks |
-| `with_claim_limit(n)` | concurrency | Maximum Requests requested by one `next_requests(limit)` call |
+| `with_claim_limit(n)` | concurrency | Maximum Requests requested by one `next_requests(limit, worker_id, modes)` call |
 | `with_event_limit(n)` | `32` | Maximum accepted Events whose Actor handler has not started |
 
 The values are validated and frozen when the Engine starts. They are not hot-reloaded and do not replace one another. The actual claim size is:
@@ -198,7 +198,7 @@ An Event permit is acquired before `Tx` sends an Event and released when the Eng
 
 ### 5.2 Idle Detection and Exit
 
-An empty `next_requests(limit)` result means only that the current claim returned no work. It does not terminate the Engine. The Actor exits only when all of the following are true:
+An empty `next_requests(limit, worker_id, modes)` result means only that the current claim returned no work. It does not terminate the Engine. The Actor exits only when all of the following are true:
 
 - the Scheduler confirms there are no queued or processing Requests within the current Worker capability scope;
 - no startup, claim, poll, or producer-idle observation task is active;
@@ -222,11 +222,11 @@ This prevents early termination while a list page is producing detail Requests, 
 | `dir` | Return an optional Worker-local directory used for framework Item failure snapshots |
 | `lease` | Return optional lease timeout and refresh interval settings |
 | `open / close` | Open and close Scheduler-owned resources |
-| `push` | Consume only `Payload.requests` and submit emitted Requests |
+| `push` | Consume only `Payload.requests`; skip identical replays, atomically insert missing Requests, and reject a conflicting collection |
 | `push_items` | Consume only `Payload.items` and submit Items |
 | `trace` | Read an immutable Trace Snapshot by `trace_id` |
-| `next_requests(limit)` | Claim and restore at most `limit` Requests |
-| `has_pending_requests` | Report whether the current Worker capability scope still has queued or processing Requests |
+| `next_requests(limit, worker_id, modes)` | Atomically claim and restore at most `limit` Requests for the supplied Worker identity and modes |
+| `has_pending_requests(worker_id, modes)` | Report whether the supplied Worker capability scope still has queued or processing Requests |
 | `ack` | Confirm that the Engine accepted a claimed execution right |
 | `release` | Voluntarily return execution ownership without consuming a queue retry |
 | `refresh_lease` | Extend an acknowledged execution lease |
@@ -239,6 +239,8 @@ This prevents early termination while a list page is producing detail Requests, 
 - `init(trace_id, snapshot, requests)`, which atomically stores a Trace Snapshot and its accepted initial Requests; an empty collection is valid after admission filtering.
 
 `Payload` is the single transport envelope shared by these methods; the design does not add parallel Batch or Receipt structures. It carries Request execution identity, state, error, timing, statistics, and the `requests / items` output collections. Every Scheduler method rejects fields unrelated to its own semantics: `push` accepts Requests only, `push_items` accepts Items only, and settlement Payloads require both collections to be empty.
+
+For `has_pending_requests`, `modes` defines the capability scope. A processing Request with a matching mode remains pending for every Worker with that capability, regardless of its current `leased_by` value. The `worker_id` identifies and validates the caller; it does not narrow the processing set to leases owned by that Worker. This conservative rule prevents a compatible Worker from exiting before lease recovery or before an in-flight Request can emit more compatible work.
 
 Every `contrib` Scheduler must fully implement these state and identity semantics. The Engine must not contain Redis-, MySQL-, or API-specific branches.
 
@@ -260,11 +262,13 @@ stateDiagram-v2
 
 Memory atomically maintains its queues, known Request IDs, processing records, acknowledgements, completions, Trace Snapshots, and Trace statistics behind one mutex:
 
-- duplicate Request IDs within one Payload and IDs already registered by Memory are rejected;
+- duplicate Request IDs within one Payload are rejected; replaying an existing ID with the same initial Request Snapshot is a no-op, while a different Snapshot conflicts and rejects the whole collection;
+- a collection containing matching existing Snapshots and new Requests atomically inserts only the missing Requests;
+- Memory keeps a SHA-256 digest of each canonical initial Request Snapshot for replay comparison; this is Scheduler identity protection, not URL/business deduplication;
 - ID uniqueness prevents the same Request object from being enqueued twice; URL and business-field deduplication remain Dedup Middleware responsibilities;
 - the ready queue uses higher `priority` first and FIFO within one priority; a delayed queue holds future `next_time` values;
-- `Memory::new(worker_id)` defaults to HTTP-only claims; `with_modes(...)` replaces the non-empty capability set;
-- claim selects the highest-priority FIFO Request supported by that capability set without changing incompatible queue entries, and pending checks use the same scope;
+- `Memory::new()` owns only process-local Scheduler state; Engine supplies a non-empty Worker ID and mode set for every claim and pending check;
+- claim selects the highest-priority FIFO Request supported by the supplied mode set without changing incompatible queue entries, and pending checks use the same Worker scope;
 - claiming changes a Request to `processing`, records `leased_by / lease_time`, and advances `version`;
 - the default lease timeout is 30 seconds and the refresh interval is 10 seconds; `Memory::with_lease(...)` can replace them with positive whole-millisecond durations representable by the runtime clock;
 - `ack` is idempotent for the same valid identity and records only execution confirmation; `refresh_lease` updates the acknowledged lease timestamp;
@@ -275,8 +279,8 @@ Memory atomically maintains its queues, known Request IDs, processing records, a
 - `failure` preserves Request ID while advancing queue retry count, then requeues or enters failed when retries are exhausted.
 - restoration, version/retry overflow, and queue-conversion failures produce explicit terminal diagnostics with the original Request ID instead of silently dropping work.
 
-Memory is a Worker-scoped, unregistered process-local Scheduler. It applies the current instance's
-configured mode capabilities, but it does not discover or select among a fleet of Workers;
+Memory is an unregistered process-local Scheduler. Engine owns the Worker identity and frozen mode
+capabilities, then supplies them to each claim; Memory does not discover or select among a fleet of Workers;
 registration, heartbeat, and cross-Worker eligibility belong to v4 contrib Schedulers. It reads
 Trace Snapshots from an immutable in-process map and has no remote cache, transport retry, or
 temporary Trace-storage failure path. It does not restore its Request queue after process exit, and
@@ -294,7 +298,7 @@ sequenceDiagram
     participant E as Executor
     participant T as Tx / Event
 
-    A->>S: next_requests(n)
+    A->>S: next_requests(n, worker_id, modes)
     S-->>A: Requests in processing with lease
     A->>W: run(request)
     W->>S: ack(payload)
@@ -329,6 +333,8 @@ The important semantics are:
 - Scheduler `failure` is the only queue-level Request retry. The Worker submits it only after local execution retries are exhausted.
 - `Tx.request` and `Tx.item` wait for actual Event handling, so parsing cannot report success before the Scheduler accepts its output.
 - exhausted Item submission returns into the current parser call and causes the current Request to settle as failed.
+- current-Request `Tx.request` output uses a fresh occurrence allocator for each parse attempt. The canonical output includes scheduling intent such as `next_time` and uses a time-stable Cookie view. Parse and queue retries reproduce the same IDs for the same canonical output, while identical outputs within one attempt remain distinct. Detached Tx output has no parent Request identity and retains at-least-once delivery.
+- every emitted Request is checked as one collection against its Tx `task_id / trace_id` before any `before_scheduler` Middleware runs; a Middleware is not allowed to rewrite `id`, `task_id`, or `trace_id`. Because the replay-stable ID is derived before this hook, any hook that changes the remaining Request specification must be deterministic for the same input; time-, random-, or external-state-dependent changes intentionally surface as a Snapshot conflict on replay.
 - `Response::follow` always inherits vals and Trace identity. A same-origin target clones the updated Headers and CookieStore; a cross-origin target drops source headers and retains only cookies applicable to the target URL.
 - the HTTP Downloader validates every redirect target against `allowed_domains` before sending it. A disallowed redirect is a normal filter, not a download retry or `error_download`; an allowed cross-origin redirect drops source headers and retains only target-applicable cookies.
 - every redirect applies all intermediate `Set-Cookie` values before the next hop. On a cross-origin hop, source headers are removed and the CookieStore is reduced to target-applicable cookies before sending.
@@ -359,6 +365,13 @@ Middleware or Scheduler download retry invokes a new fetch and receives a fresh 
 retry reuses the existing Response and performs no download. The completed body remains the existing
 bounded `Response.body: Bytes`; no public streaming Response, file sink, or attachment API is added.
 
+The Downloader follows only `301`, `302`, `303`, `307`, and `308`. A redirect that changes a
+body-bearing Request to GET discards the body and removes `Content-Length`, `Content-Type`,
+`Content-Encoding`, `Content-Language`, `Content-Location`, and `Transfer-Encoding` on subsequent hops.
+This cleanup also applies when the previous body value was empty but carried body metadata. An original GET or HEAD does not lose
+those headers merely because of its method. Other 3xx responses, including `304`, are returned without
+following `Location`.
+
 `Headers` is a wrapper over `http::HeaderMap<HeaderValue>`. Names use standard case-insensitive identity,
 Response values retain their raw bytes and received multiplicity, `set` replaces every value for a name,
 and `append` preserves existing values. Rules Request headers remain a single-value map and therefore
@@ -375,7 +388,13 @@ do not observe later mutations. Cross-origin construction removes source headers
 store to target-applicable cookies, preventing unrelated credentials from entering the new Snapshot;
 cross-site public-suffix Domain attributes are rejected, while an identical public-suffix Request host
 is normalized to HostOnly. Raw `Cookie` headers are removed before transport so CookieStore remains
-the only session source. There is no Trace-wide live or distributed CookieStore.
+the only session source. Memory replay comparison includes stored Cookie records through a dedicated
+stable view. A `Max-Age` cookie keeps its raw relative attribute while omitting the absolute expiry
+derived from the current receive time, so Request identity does not change when the same response is
+replayed; explicit `Expires` and session state remain part of the view. The public `Cookies`
+serializer, lookup, and transport still ignore expired records. Request Snapshot
+serialization preserves those records so a later cross-Worker restore retains the same replay
+identity. There is no Trace-wide live or distributed CookieStore.
 
 ### 7.2 Response Character Decoding
 
@@ -446,7 +465,8 @@ resolve their stable node directly through the Rust Spider registry.
 `spider.start[*]` and request edges use the same complete Request Spec. Graph nodes contain parse, bind, and
 domain policy only; they never fill transport fields after a Request has been created. URL-array expansion is
 stable, writes a reserved one-based `vals.idx` before transport templates render, and resets the index for each
-new expansion.
+new expansion. Request and bind templates share one parser. Rendering walks the parsed source once, so braces
+inside a resolved dynamic value remain literal data instead of becoming a second template expression.
 
 Rules does not compile into a second Request or Item model. Parse/bind provides each base field and only a
 non-empty Item-edge `vals` result overrides it; null, empty strings, arrays, and objects preserve the base while
@@ -487,6 +507,10 @@ compile valid CSS
 ```
 
 Scoring covers tags, IDs, classes, attributes, combinator relationships, and supported static pseudo-classes. Extra candidate attributes are not penalized. The default `min` is `0.8`, and the valid range is `0.0..=1.0`.
+Recursive relationship scoring memoizes each `(DOM node, selector compound)` state for one selection.
+Best-ancestor and best-earlier-sibling states reuse the immediately related node, so deep descendant
+and wide sibling chains require linear relation states rather than repeated full-chain scans. No state
+is persisted across documents.
 
 Healing accepts exactly the syntax that `scrape-core 0.2.9` can compile. In particular, that parser currently rejects `:is()`, `:where()`, and `:has()` before Healing starts.
 
@@ -498,6 +522,7 @@ Healing stores no historical fingerprints, does not rewrite or persist a repaire
 - `Response::json<T>()` follows the shared response-text decoding contract before deserialization.
 - AI is an explicit selector alongside CSS and Regex. It uses `async-openai` with an OpenAI-compatible Chat Completion endpoint, combines the current Response text with `expr`, and parses the model content as one JSON value.
 - Persisted Rules configuration must reference an API key as `env:VARIABLE`; the Worker resolves the secret at execution time. Temporary code-created configuration may accept a direct key, but serialization rejects direct secrets.
+- AI `base_url` must be an absolute HTTP(S) base endpoint without user information, a query, or a fragment. Diagnostics retain defensive redaction for both the API key and URL query.
 - AI does not generate CSS, and CSS Healing never delegates candidates to AI.
 
 ### 9.3 Media Fields
@@ -529,6 +554,11 @@ after_spider
 
 `Middleware::Next<T>` contains only `Continue(T)` and `Skip`. `Skip` is normal filtering and does not invoke the corresponding error hook. The Registry merges default Specs with object-local Specs, then orders them by `order` and declaration sequence.
 
+Request middleware may change only fields owned by its stage. `before_scheduler` must preserve
+`id / task_id / trace_id`; after a Request is claimed, `before_download` must also preserve `node` so
+execution and lease settlement cannot refer to different work. `before_download` may still change
+transport fields such as URL and headers.
+
 Built-in implementations:
 
 | Middleware | Hook area | Semantics |
@@ -539,6 +569,11 @@ Built-in implementations:
 | `retry` | Error configuration | Provide Worker-local retry policies for download, parse, and Item submission |
 
 `Builder::with_middleware(name, value)` registers a capability; it does not attach it to every object. Request, Response, Item, and Spider lifecycle Specs opt into capabilities explicitly. Only validate Specs for the normal stages are Registry defaults.
+
+Default validation requires a text Request body declaration to contain string `data`. A custom
+Downloader Response must have an absolute HTTP(S) URL with a host and a valid HTTP status code;
+`after_download` validates that structure, while `before_parse` retains the separate policy of skipping
+non-success responses.
 
 Default Dedup handles only Request fingerprints built from explicitly configured keys; it never deduplicates Items or adds an implicit URL key. Both Rules initial Requests and Tx output pass through `before_scheduler`. Fingerprints are observed and inserted there, so a later `Scheduler::push` or run-seed `init` failure does not roll them back. SHA-256 hashes a structured tuple of `task_id`, Middleware key, rule name, and ordered values rather than an ad hoc concatenated namespace. URL normalization stably sorts query pairs only by key, preserving the original order of repeated keys. All active rules are checked and inserted under one lock after every finite TTL deadline has been validated, so a TTL error cannot partially mutate the store. A rule with `ttl: 0` neither checks nor stores its fingerprint; omitted TTL or `-1` remains for the process lifetime without capacity eviction. The exact in-memory store uses a `HashMap` plus an expiry heap and lazily removes only expired heap-head entries.
 
@@ -576,7 +611,7 @@ Normal Item output:
 <dir>/data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
-Each Item is one JSON line containing only its business serialization. Concurrent writes to the same hourly file are serialized. Every complete append is flushed immediately; a failed append attempts to roll back that append, and `close()` flushes all open files again.
+Each Item is one JSON line containing only its business serialization. Concurrent writes to the same hourly file are serialized. A Payload is serialized and written one Item at a time without materializing the whole collection; every complete append is flushed immediately. Any serialization, write, or flush failure attempts to truncate the file back to its pre-Payload length, and `close()` flushes all open files again.
 
 `version / timezone` are Trace-level runtime metadata. A persistent Scheduler may read the
 corresponding Trace Snapshot through `payload.trace_id` during `push_items` and denormalize
@@ -592,6 +627,7 @@ Submission-failure snapshots:
 ```
 
 - the first `push_items` failure attempts to create a snapshot before continuing configured retries;
+- a snapshot is streamed to a uniquely named temporary file and atomically renamed only after the complete document is flushed; failure removes the temporary file and publishes no partial snapshot;
 - snapshot-write failure does not prevent Scheduler retries;
 - a later successful retry removes the snapshot, while cleanup failure does not change Item success;
 - an exhausted snapshot remains for manual handling; automatic replay is not currently implemented;
@@ -612,11 +648,13 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/engine/actor/task.rs` | Own task handles and convert task panic into Engine errors |
 | `spider/src/engine/builder.rs` | Assemble components and own the Schema Store used by all execution modes |
 | `spider/src/engine/runtime.rs` | Component lifecycle, startup settings, and Actor assembly |
-| `spider/src/engine/worker.rs` | Ack, lease maintenance, and final settlement for one Request |
+| `spider/src/engine/worker.rs` | Own the startup-frozen Worker ID and download-mode capabilities |
+| `spider/src/engine/request/task.rs` | Ack, lease maintenance, and final settlement for one Request |
 | `spider/src/engine/admission.rs` | Apply `before_scheduler` to Request output before it enters the Scheduler |
 | `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse lifecycle for one claimed Request |
 | `spider/src/engine/event/request.rs` | Handle Request output emitted by Tx |
 | `spider/src/engine/event/item.rs` | Handle Items, submission retries, and failure snapshots |
+| `spider/src/spider/tx/identity.rs` | Derive replay-stable IDs for current-Request output |
 | `spider/src/engine/executor.rs` | Select Code/Rules from Trace Snapshot and invoke the shared Spider |
 | `spider/src/engine/code.rs` | Code-mode local run-seed initialization |
 | `spider/src/engine/rules.rs` | Rules-mode assembly and run-seed initialization |
@@ -632,10 +670,14 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/scheduler/contract.rs` | Public Scheduler contract |
 | `spider/src/scheduler/init.rs` | Run-seed initialization contract |
 | `spider/src/scheduler/memory.rs` | Public Memory implementation and submodule composition |
-| `spider/src/scheduler/memory/claim.rs` | Claiming, expired-lease recovery, and Request restoration |
+| `spider/src/scheduler/memory/digest.rs` | Canonically hash initial Request Snapshots for replay comparison without materializing Body JSON |
+| `spider/src/scheduler/memory/claim.rs` | Coordinate one capability-aware claim from queued Snapshot to processing Request |
 | `spider/src/scheduler/memory/queue.rs` | Ready/delayed queue ordering |
+| `spider/src/scheduler/memory/reclaim.rs` | Recover expired acknowledged and unacknowledged leases |
+| `spider/src/scheduler/memory/restore.rs` | Restore claimed Request Snapshots and handle restoration retries |
 | `spider/src/scheduler/memory/settle.rs` | Identity checks, settlement, and queue retry |
 | `spider/src/scheduler/memory/state.rs` | Memory runtime state structures |
+| `spider/src/scheduler/memory/validate.rs` | Validate new Requests and their Trace ownership |
 | `spider/src/selector/css/healing.rs` | Healing configuration and orchestration |
 | `spider/src/selector/css/healing/reference.rs` | CSS AST to scoring reference model |
 | `spider/src/selector/css/healing/score.rs` | DOM candidate traversal, relationships, and scoring |

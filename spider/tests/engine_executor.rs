@@ -55,6 +55,59 @@ impl TypedRulesSpider {
     }
 }
 
+#[macros::spider]
+struct RetryingRequestSpider {
+    attempts: Arc<AtomicUsize>,
+}
+
+#[macros::spider]
+impl RetryingRequestSpider {
+    fn name(&self) -> &str {
+        "retrying-request"
+    }
+
+    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+        let request = response
+            .follow("/child")
+            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .node(Self::child);
+        self.tx.request(vec![request]).await?;
+
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(spider::Error::Message("retry parse".to_string()));
+        }
+        Ok(())
+    }
+
+    async fn child(&self, _response: net::Response) -> Result<(), spider::Error> {
+        Ok(())
+    }
+}
+
+#[macros::spider]
+struct RetryingRulesSpider {
+    attempts: Arc<AtomicUsize>,
+}
+
+#[macros::spider(item = RulesItem)]
+impl RetryingRulesSpider {
+    fn name(&self) -> &str {
+        "retrying-rules"
+    }
+
+    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+        Ok(())
+    }
+
+    #[item]
+    async fn publish(&self, _item: RulesItem) -> Result<(), spider::Error> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(spider::Error::Message("retry rules item".to_string()));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PayloadRecord {
     id: String,
@@ -594,7 +647,7 @@ item:
     let called = Arc::new(AtomicBool::new(false));
     let dir = std::env::temp_dir().join(format!("crawler-typed-{}", uuid::Uuid::now_v7()));
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new("worker-1").with_dir(&dir))
+        .with_scheduler(spider::Memory::new().with_dir(&dir))
         .with_rules(config)
         .with_spider(TypedRulesSpider::new(called.clone()))
         .with_downloader(RulesDownload)
@@ -605,6 +658,115 @@ item:
     assert!(called.load(Ordering::SeqCst));
     assert_eq!(engine.scheduler().done_len(), 1);
     tokio::fs::remove_dir_all(dir).await.unwrap();
+}
+
+#[tokio::test]
+async fn code_parse_retry_reuses_the_emitted_request_id() {
+    let pushed_requests = Arc::new(Mutex::new(Vec::new()));
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let pushed_items = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records, pushed_items);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let request = net::Request::follow("https://example.com/source")
+        .unwrap()
+        .with_retry(1, [0]);
+    scheduler
+        .inner
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(TestDownload)
+        .with_spider(RetryingRequestSpider::new(attempts.clone()))
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let pushed_requests = pushed_requests.lock().unwrap();
+    let child_ids = pushed_requests
+        .iter()
+        .flat_map(|(_, requests)| requests)
+        .filter(|request| request.url.ends_with("/child"))
+        .map(|request| request.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(child_ids.len(), 2);
+    assert_eq!(child_ids[0], child_ids[1]);
+    assert_eq!(engine.scheduler().inner.done_len(), 2);
+}
+
+#[tokio::test]
+async fn rules_retry_reuses_the_request_edge_id_after_item_failure() {
+    let config = spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: retrying-rules
+  start:
+    - node: detail
+      url: https://example.com/detail/1
+      middlewares:
+        - name: retry
+          hook: error_parse
+          args: {count: 1, backoff: [0]}
+graph:
+  nodes:
+    detail:
+      parse:
+        fields:
+          title:
+            required: true
+            extractors:
+              - {kind: css, expr: "h1::text"}
+      bind:
+        title:
+          kind: pipeline
+          from: $fields.title
+          transforms:
+            - {kind: trim}
+    child: {}
+  edges:
+    - from: detail
+      kind: request
+      request:
+        node: child
+        url: {from: $response.url}
+    - from: detail
+      kind: item
+      fn: publish
+      vals: {}
+item:
+  schema:
+    fields:
+      title: {type: string, rules: [required]}
+"#,
+    )
+    .unwrap();
+    let pushed_requests = Arc::new(Mutex::new(Vec::new()));
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let pushed_items = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records, pushed_items);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_rules(config)
+        .with_spider(RetryingRulesSpider::new(attempts.clone()))
+        .with_downloader(RulesDownload)
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let pushed_requests = pushed_requests.lock().unwrap();
+    let child_ids = pushed_requests
+        .iter()
+        .flat_map(|(_, requests)| requests)
+        .filter(|request| request.node_key() == "child")
+        .map(|request| request.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(child_ids.len(), 2);
+    assert_eq!(child_ids[0], child_ids[1]);
+    assert_eq!(engine.scheduler().inner.done_len(), 2);
 }
 
 #[test]
@@ -699,7 +861,7 @@ item:
     .unwrap();
     let dir = std::env::temp_dir().join(format!("crawler-media-{}", uuid::Uuid::now_v7()));
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new("worker-1").with_dir(&dir))
+        .with_scheduler(spider::Memory::new().with_dir(&dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(MediaDownload)
@@ -1131,7 +1293,7 @@ impl LifecycleScheduler {
 
     fn new(calls: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
-            inner: spider::Memory::new("worker-1").with_lease(Self::test_lease()),
+            inner: spider::Memory::new().with_lease(Self::test_lease()),
             calls,
             fail_push: false,
             push_gate: None,
@@ -1146,7 +1308,7 @@ impl LifecycleScheduler {
 
     fn fail_push(calls: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
-            inner: spider::Memory::new("worker-1").with_lease(Self::test_lease()),
+            inner: spider::Memory::new().with_lease(Self::test_lease()),
             calls,
             fail_push: true,
             push_gate: None,
@@ -1227,12 +1389,18 @@ impl Scheduler for LifecycleScheduler {
     async fn next_requests(
         &self,
         limit: usize,
+        worker_id: &str,
+        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
-        self.inner.next_requests(limit).await
+        self.inner.next_requests(limit, worker_id, modes).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests().await
+    async fn has_pending_requests(
+        &self,
+        worker_id: &str,
+        modes: &[net::Mode],
+    ) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests(worker_id, modes).await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -1357,16 +1525,22 @@ impl Scheduler for FlakyScheduler {
     async fn next_requests(
         &self,
         limit: usize,
+        worker_id: &str,
+        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
         let call = self.claim_calls.fetch_add(1, Ordering::SeqCst);
         if self.delay_second_claim && call == 1 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        self.inner.next_requests(limit).await
+        self.inner.next_requests(limit, worker_id, modes).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests().await
+    async fn has_pending_requests(
+        &self,
+        worker_id: &str,
+        modes: &[net::Mode],
+    ) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests(worker_id, modes).await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -1454,7 +1628,7 @@ impl RecordingScheduler {
         items: Arc<Mutex<Vec<PayloadRecord>>>,
     ) -> Self {
         Self {
-            inner: spider::Memory::new("worker-1"),
+            inner: spider::Memory::new(),
             requests,
             records,
             items,
@@ -1544,12 +1718,18 @@ impl Scheduler for RecordingScheduler {
     async fn next_requests(
         &self,
         limit: usize,
+        worker_id: &str,
+        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
-        self.inner.next_requests(limit).await
+        self.inner.next_requests(limit, worker_id, modes).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
-        let pending = self.inner.has_pending_requests().await?;
+    async fn has_pending_requests(
+        &self,
+        worker_id: &str,
+        modes: &[net::Mode],
+    ) -> Result<bool, spider::scheduler::Error> {
+        let pending = self.inner.has_pending_requests(worker_id, modes).await?;
         if !pending
             && let Some(sync) = &self.claim_sync
             && sync.armed.swap(false, Ordering::SeqCst)
@@ -1643,12 +1823,18 @@ impl Scheduler for FailingCloseScheduler {
     async fn next_requests(
         &self,
         limit: usize,
+        worker_id: &str,
+        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
-        self.inner.next_requests(limit).await
+        self.inner.next_requests(limit, worker_id, modes).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests().await
+    async fn has_pending_requests(
+        &self,
+        worker_id: &str,
+        modes: &[net::Mode],
+    ) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests(worker_id, modes).await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -2113,7 +2299,7 @@ async fn engine_close_closes_downloader_then_scheduler() {
 async fn engine_close_attempts_every_component_when_cleanup_fails() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = FailingCloseScheduler {
-        inner: spider::Memory::new("worker-1"),
+        inner: spider::Memory::new(),
         calls: calls.clone(),
     };
     let downloader = FailingCloseDownload {
@@ -2168,7 +2354,7 @@ async fn engine_runs_request_response_and_item_middleware_hooks_in_order() {
         calls: calls.clone(),
     };
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new("worker-1"))
+        .with_scheduler(spider::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(MiddlewareSpider::new())
         .with_middleware("lifecycle", middleware)
@@ -2220,7 +2406,7 @@ async fn engine_start_closes_resources_when_spider_start_fails() {
 #[tokio::test]
 async fn engine_reports_start_task_panic_without_hanging() {
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new("worker-1"))
+        .with_scheduler(spider::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(PanicStartSpider::new())
         .build();
@@ -2237,7 +2423,7 @@ async fn engine_reports_start_task_panic_without_hanging() {
 async fn spider_start_error_drains_work_that_was_already_accepted() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new("worker-1"))
+        .with_scheduler(spider::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(StartEmitFailSpider::new(calls.clone()))
         .build();
@@ -2333,7 +2519,7 @@ async fn engine_start_closes_resources_when_downloader_open_fails() {
 
 #[tokio::test]
 async fn executor_completes_current_request() {
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
     let request = net::Request::follow("https://example.com").unwrap();
 
     scheduler
@@ -2358,7 +2544,7 @@ async fn executor_completes_current_request() {
 #[tokio::test]
 async fn engine_starts_until_scheduler_is_empty() {
     let spider = StartSpider::new();
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
 
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
@@ -2498,7 +2684,7 @@ graph:
 #[tokio::test]
 async fn engine_sends_start_items_to_scheduler() {
     let spider = StartItemSpider::new();
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
 
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
@@ -2534,7 +2720,7 @@ async fn spider_macro_keeps_user_business_fields_and_injects_tx() {
     let spider = ArgsSpider::new(Args {
         start_url: "https://example.com/ok".to_string(),
     });
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
 
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
@@ -2553,7 +2739,7 @@ async fn spider_macro_keeps_user_business_fields_and_injects_tx() {
 #[tokio::test]
 async fn engine_records_failed_request_and_continues_other_requests() {
     let spider = TestSpider::new();
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
     let failed = net::Request::follow("https://example.com/fail").unwrap();
     let ok = net::Request::follow("https://example.com/ok").unwrap();
 
@@ -2581,7 +2767,7 @@ async fn engine_records_failed_request_and_continues_other_requests() {
 #[tokio::test]
 async fn engine_concurrency_controls_concurrent_requests() {
     let spider = EmptySpider::new();
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
     let requests = vec![
         net::Request::follow("https://example.com/1").unwrap(),
         net::Request::follow("https://example.com/2").unwrap(),
@@ -2933,7 +3119,7 @@ async fn rejected_items_only_fail_current_request_and_keep_consuming() {
 
 #[tokio::test]
 async fn independent_items_run_concurrently() {
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
     let requests = vec![
         net::Request::follow("https://example.com/item-fail").unwrap(),
         net::Request::follow("https://example.com/item-fail").unwrap(),
@@ -2957,7 +3143,7 @@ async fn independent_items_run_concurrently() {
 #[tokio::test]
 async fn engine_retries_transient_success_error_without_reexecution() {
     let scheduler = FlakyScheduler {
-        inner: spider::Memory::new("worker-1"),
+        inner: spider::Memory::new(),
         fail_next: AtomicBool::new(true),
         fail_after_commit: AtomicBool::new(false),
         transient_after_commit: false,
@@ -2996,7 +3182,7 @@ async fn engine_retries_transient_success_error_without_reexecution() {
 async fn engine_retries_the_same_success_payload_after_a_lost_response() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = FlakyScheduler {
-        inner: spider::Memory::new("worker-1"),
+        inner: spider::Memory::new(),
         fail_next: AtomicBool::new(false),
         fail_after_commit: AtomicBool::new(true),
         transient_after_commit: true,
@@ -3039,7 +3225,7 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
     let downloads = Arc::new(Mutex::new(Vec::new()));
     let failure_attempts = Arc::new(Mutex::new(Vec::new()));
     let scheduler = FlakyScheduler {
-        inner: spider::Memory::new("worker-1"),
+        inner: spider::Memory::new(),
         fail_next: AtomicBool::new(false),
         fail_after_commit: AtomicBool::new(false),
         transient_after_commit: false,
@@ -3083,7 +3269,7 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
 #[tokio::test]
 async fn claim_returning_after_a_request_error_still_executes_its_request() {
     let scheduler = FlakyScheduler {
-        inner: spider::Memory::new("worker-1"),
+        inner: spider::Memory::new(),
         fail_next: AtomicBool::new(false),
         fail_after_commit: AtomicBool::new(true),
         transient_after_commit: false,

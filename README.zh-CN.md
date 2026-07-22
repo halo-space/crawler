@@ -71,7 +71,7 @@ Response 文本和 `expr` 提示词，并将模型内容直接解析为 JSON：
 ```
 
 AI 不生成 CSS，也不会被 CSS Healing 自动调用。Rules 快照只保存环境变量引用，Worker 在执行
-Selector 时才读取真正的 API Key。
+Selector 时才读取真正的 API Key。`base_url` 必须是绝对 HTTP(S) 端点，不能内嵌凭据，也不能包含 query 或 fragment。
 
 ## 规则模式
 
@@ -108,6 +108,7 @@ URL、transport、priority 和 vals。URL 数组展开会在模板渲染前写�
 根据 `#[spider(item = Article)]` 关联的 Rust 类型调用 derive 生成的 `Item::from_values`，注入
 SchemaKey，再调用默认 `item` 或 edge 的 `fn` 业务函数。规则模式与代码模式共用 Engine、
 Scheduler、Downloader、Middleware、Request、Response、Item 和 Payload，不维护第二套运行时模型。
+Request 与 bind 模板只解析一次源字符串；动态值中带入的花括号只作为数据，不会再次解释为模板表达式。
 每条 Rules Request 都由统一 Executor 先调用 Rust Spider 的 `index(response.clone())` 业务入口，
 然后再根据 `Request.node` 解释对应 DSL node；这里不存在 Code/Rules Executor 替换。
 每个具体 Item 同时 derive `serde::Serialize`、`serde::Deserialize` 和 `macros::Item`，启用 serde
@@ -130,6 +131,15 @@ Scheduler 实现处理。
 普通 JSONL 只包含业务字段。最终提交失败时，本地快照会额外保存 Item ID 和业务数据，便于恢复和
 排查。失败快照位于 `./data/items/snapshots/`。Item 提交采用 at-least-once 语义；替换
 Scheduler 时由新实现完整实现相同的 Request 与 Item 提交合同。
+Memory 在同一次追加锁内逐条序列化并写入 Item；任一 Item 失败会回滚本次完整追加。失败快照先写入
+临时文件，完整 flush 后再原子 rename，不会发布半截 JSON。
+`Scheduler::push` 对相同 Request ID 与初始 Snapshot 的重放执行幂等 no-op，只原子补写缺失
+Request；任一已有 ID 的 Snapshot 冲突时整批失败。
+当前 Request 执行中直接等待的 `Tx.request` 会使用父 Request ID、规范化后的子 Request 初始规格，
+以及该规格在当前 parse attempt 中的出现次数，为框架生成的子 Request 分配稳定 ID。因此 parse retry
+或队列重试重放相同输出时复用同一 ID；同一次执行中有意产生的多个相同 Request 仍拥有不同 ID。
+通过 `Request::with_id` 设置的 ID 始终以业务值为准。这是 Request 输出重放保护，不是业务 Dedup；
+Item 与 detached Tx 输出仍保持 at-least-once 语义。
 
 Request 进入本地执行槽后先通过 `Scheduler::ack` 确认执行权，长任务运行期间通过
 `Scheduler::refresh_lease` 独立续租，提交最终结果期间也保持续租，最后分别调用 `Scheduler::success` 或
@@ -141,6 +151,8 @@ Memory 只从进程内不可变映射读取 Trace Snapshot。Engine 直接跟踪
 Engine 内部由一个 Kameo Actor 统一协调，Request 和输出 I/O 仍在独立 Tokio 任务中执行。
 当前 Request 内直接 await 的 Tx 调用可以使用完整 Request 上下文；移动到独立任务中的 Tx clone
 只保留 `task_id / trace_id`，不会继承 Request 执行权、租约身份、node、version 或 stats。
+任何输出 Request 都必须在执行 `before_scheduler` Middleware 前匹配该 Tx 的 `task_id / trace_id`，
+且这些 Middleware 不得改写 `id / task_id / trace_id`。
 Request 并发数、单次领取上限和 Event 容量是三个独立且只在启动时加载的配置，分别通过
 `with_concurrency`、`with_claim_limit` 和 `with_event_limit` 设置。
 Actor 开始处理 Event 时即释放 Event 容量，但 Tx 调用仍会等待对应 Scheduler 与 Middleware 工作完成。
@@ -163,6 +175,8 @@ HTTP Downloader 按 Request 应用 proxy 和 TLS 配置。只有 proxy URL 与
 前失败。Downloader 按解码后 chunk 读取且不预分配上限大小，但成功结果仍是一个有界的
 `Response.body: Bytes`；本合同不增加公开 stream 或文件写入 API。`Request.timeout` 覆盖连接、
 所有 redirect 和最终 body 读取的一次完整下载；redirect 不重置超时，每次新的下载重试从零开始新预算。
+只跟随 `301`、`302`、`303`、`307` 和 `308`。redirect 将带 body 的 Request 改为 GET 时，会随被丢弃
+的 body 一并删除相关 headers；原始 GET 即使带 body 也保留其 headers。
 
 `Headers` 直接包装标准 `http::HeaderMap`，保留大小写不敏感的名称、响应原始值和重复字段。
 `set` 替换该名称的所有值，`append` 追加新值；Rules 输入仍是单值 map。Request Snapshot
@@ -196,11 +210,11 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 - 代码模式与 YAML 规则模式
 - 本地 JSONL Item 输出
 
-v3 Scheduler 合同要求 `next_requests` 与待处理判断只作用于当前 Worker 支持的下载模式，能力筛选
+v3 Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker ID 和支持的下载模式，能力筛选
 必须和领取原子完成。真实 Browser Downloader 与 HTTP/browser 混合端到端执行属于 v5；可选的
 API/Redis/MySQL Scheduler 与 Master 控制面属于 v4，且 v4 不依赖 Browser 实现。
-`Memory::new(worker_id)` 默认只领取 HTTP Request；`Memory::with_modes(...)` 用于替换该能力集合，
-并拒绝空集合。
+Engine 默认使用 `worker-1` 和 HTTP 模式；`with_worker_id(...)` 与 `with_modes(...)` 可替换这些启动时冻结的值，
+空 Worker ID 或空 mode 集合会在执行前被拒绝。
 
 媒体对象规范化不会下载文件。Item 附件下载尚未实现，也没有分配版本，后续必须由独立 OpenSpec
 确定合同。

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt;
 
-use cookie_store::{Cookie, CookieDomain, CookieStore, RawCookie};
+use cookie_store::{Cookie, CookieDomain, CookieExpiration, CookieStore, RawCookie};
 use http::HeaderValue;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -115,6 +115,10 @@ impl Cookies {
         Self { store }
     }
 
+    pub(crate) fn records(&self) -> Records<'_> {
+        Records(&self.store)
+    }
+
     fn matching<'a>(&'a self, url: &Url) -> Vec<&'a Cookie<'static>> {
         let mut cookies = self.store.matches(url);
         cookies.sort_by(|left, right| {
@@ -164,15 +168,77 @@ impl Serialize for Cookies {
     where
         S: Serializer,
     {
-        let mut cookies = self.store.iter_unexpired().cloned().collect::<Vec<_>>();
-        cookies.sort_by(|left, right| {
-            left.domain
-                .cmp(&right.domain)
-                .then_with(|| left.path.cmp(&right.path))
-                .then_with(|| left.name().cmp(right.name()))
-        });
+        let cookies = sorted(self.store.iter_unexpired());
         cookies.serialize(serializer)
     }
+}
+
+/// Request Snapshots preserve the complete cookie lineage, including records
+/// that have expired since they were received. Transport and public Cookie
+/// serialization continue to expose only currently usable records.
+pub(crate) mod request_snapshot {
+    use super::*;
+
+    pub fn serialize<S>(cookies: &Cookies, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        sorted(cookies.store.iter_any()).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Cookies, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_store(deserializer, true)
+    }
+}
+
+pub(crate) struct Records<'a>(&'a CookieStore);
+
+impl Serialize for Records<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let records = sorted(self.0.iter_any())
+            .into_iter()
+            .map(Record::new)
+            .collect::<Vec<_>>();
+        records.serialize(serializer)
+    }
+}
+
+#[derive(Serialize)]
+struct Record<'a> {
+    raw_cookie: String,
+    path: &'a cookie_store::CookiePath,
+    domain: &'a CookieDomain,
+    expires: Option<&'a CookieExpiration>,
+}
+
+impl<'a> Record<'a> {
+    fn new(cookie: &'a Cookie<'static>) -> Self {
+        Self {
+            raw_cookie: cookie.to_string(),
+            path: &cookie.path,
+            domain: &cookie.domain,
+            // Max-Age is already present in raw_cookie. Its resolved absolute
+            // expiry depends on response time and must not change replay identity.
+            expires: cookie.max_age().is_none().then_some(&cookie.expires),
+        }
+    }
+}
+
+fn sorted<'a>(cookies: impl Iterator<Item = &'a Cookie<'static>>) -> Vec<&'a Cookie<'static>> {
+    let mut cookies = cookies.collect::<Vec<_>>();
+    cookies.sort_by(|left, right| {
+        left.domain
+            .cmp(&right.domain)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.name().cmp(right.name()))
+    });
+    cookies
 }
 
 impl<'de> Deserialize<'de> for Cookies {
@@ -180,33 +246,46 @@ impl<'de> Deserialize<'de> for Cookies {
     where
         D: Deserializer<'de>,
     {
-        let cookies = Vec::<Cookie<'static>>::deserialize(deserializer)?;
-        let mut keys = HashSet::with_capacity(cookies.len());
-        for cookie in &cookies {
-            let Some(domain) = cookie.domain.as_cow() else {
-                return Err(D::Error::custom("cookie domain must be resolved"));
-            };
-            if !valid_snapshot_domain(&cookie.domain) {
-                return Err(D::Error::custom(
-                    "cookie domain is invalid or a public suffix",
-                ));
-            }
-            if !cookie.path.starts_with('/') {
-                return Err(D::Error::custom("cookie path must start with /"));
-            }
-            let key = (
-                domain.into_owned(),
-                String::from(&cookie.path),
-                cookie.name().to_string(),
-            );
-            if !keys.insert(key) {
-                return Err(D::Error::custom("duplicate cookie identity"));
-            }
-        }
-        let store = CookieStore::from_cookies(cookies.into_iter().map(Ok::<_, Infallible>), false)
-            .unwrap_or_else(|never| match never {});
-        Ok(Self { store })
+        deserialize_store(deserializer, false)
     }
+}
+
+fn deserialize_store<'de, D>(deserializer: D, include_expired: bool) -> Result<Cookies, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cookies = Vec::<Cookie<'static>>::deserialize(deserializer)?;
+    validate_snapshot_cookies(&cookies).map_err(D::Error::custom)?;
+    let store = CookieStore::from_cookies(
+        cookies.into_iter().map(Ok::<_, Infallible>),
+        include_expired,
+    )
+    .unwrap_or_else(|never| match never {});
+    Ok(Cookies { store })
+}
+
+fn validate_snapshot_cookies(cookies: &[Cookie<'static>]) -> Result<(), String> {
+    let mut keys = HashSet::with_capacity(cookies.len());
+    for cookie in cookies {
+        let Some(domain) = cookie.domain.as_cow() else {
+            return Err("cookie domain must be resolved".to_string());
+        };
+        if !valid_snapshot_domain(&cookie.domain) {
+            return Err("cookie domain is invalid or a public suffix".to_string());
+        }
+        if !cookie.path.starts_with('/') {
+            return Err("cookie path must start with /".to_string());
+        }
+        let key = (
+            domain.into_owned(),
+            String::from(&cookie.path),
+            cookie.name().to_string(),
+        );
+        if !keys.insert(key) {
+            return Err("duplicate cookie identity".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn normalize_domain(cookie: &mut Cookie<'_>, url: &Url) -> bool {
@@ -357,6 +436,75 @@ mod tests {
 
         assert_eq!(restored.get(&origin, "sid"), Some("session"));
         assert!(serde_json::from_value::<Cookies>(serde_json::json!({"sid": "old"})).is_err());
+    }
+
+    #[test]
+    fn records_include_expired_entries_without_changing_public_cookie_serde() {
+        let origin = url("https://example.com/");
+        let mut cookies = Cookies::new();
+        cookies.store_response(&origin, &response_headers(&["sid=active; Path=/"]));
+        cookies.store_response(
+            &origin,
+            &response_headers(&["sid=expired; Max-Age=0; Path=/"]),
+        );
+        assert!(cookies.is_empty());
+
+        assert_eq!(
+            serde_json::to_value(cookies.records())
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            serde_json::to_value(&cookies)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn records_ignore_the_absolute_expiry_derived_from_max_age() {
+        let origin = url("https://example.com/");
+        let headers = response_headers(&["sid=one; Max-Age=60; Path=/"]);
+        let mut first = Cookies::new();
+        first.store_response(&origin, &headers);
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let mut replay = Cookies::new();
+        replay.store_response(&origin, &headers);
+
+        assert_ne!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&replay).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(first.records()).unwrap(),
+            serde_json::to_value(replay.records()).unwrap()
+        );
+    }
+
+    #[test]
+    fn request_snapshot_preserves_expired_cookie_records_for_replay() {
+        let origin = url("https://example.com/");
+        let mut request = crate::net::Request::follow(origin.as_str()).unwrap();
+        request
+            .cookies
+            .store_response(&origin, &response_headers(&["sid=one; Max-Age=1; Path=/"]));
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        assert!(request.cookies.is_empty());
+
+        let snapshot = crate::net::request::Snapshot::try_from(request).unwrap();
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        let restored: crate::net::request::Snapshot = serde_json::from_value(encoded).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(snapshot.cookies.records()).unwrap(),
+            serde_json::to_value(restored.cookies.records()).unwrap()
+        );
     }
 
     #[test]

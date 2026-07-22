@@ -77,6 +77,7 @@ pub struct Request {
     node: String,
     snapshot: Option<std::sync::Arc<crate::trace::Snapshot>>,
     allowed_domains: Vec<String>,
+    generated_id: Option<String>,
 }
 
 impl Request {
@@ -93,8 +94,9 @@ impl Request {
             scheme => return Err(Error::UnsupportedProtocol(scheme.to_string())),
         };
 
+        let id = next_id();
         Ok(Self {
-            id: next_id(),
+            id: id.clone(),
             task_id: String::new(),
             trace_id: String::new(),
             version: 0,
@@ -124,7 +126,15 @@ impl Request {
             node: "index".to_string(),
             snapshot: None,
             allowed_domains: Vec::new(),
+            generated_id: Some(id),
         })
+    }
+
+    /// Sets an application-owned Request ID.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self.generated_id = None;
+        self
     }
 
     pub fn node(mut self, node: impl Into<String>) -> Self {
@@ -146,6 +156,15 @@ impl Request {
 
     pub fn node_key(&self) -> &str {
         &self.node
+    }
+
+    pub(crate) fn has_unassigned_id(&self) -> bool {
+        self.generated_id.as_deref() == Some(self.id.as_str())
+    }
+
+    pub(crate) fn assign_id(&mut self, id: String) {
+        self.id = id;
+        self.generated_id = None;
     }
 
     pub(crate) fn set_allowed_domains(&mut self, domains: Vec<String>) {

@@ -1,8 +1,10 @@
 use indexmap::IndexMap;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use super::value::{self, Context};
 use crate::graph::rules::{Bind, Transform, ValueRef};
+use crate::utils::template::{self, Part};
 use crate::{graph, net};
 
 /// 按声明顺序计算 bind，后一个 bind 可以引用前一个 bind。
@@ -90,7 +92,9 @@ pub(super) fn render(
     vars: &IndexMap<String, ValueRef>,
     context: &Context<'_>,
 ) -> Result<Value, crate::Error> {
-    let mut rendered = template.to_string();
+    let parts = template::parse(template)
+        .map_err(|error| crate::Error::message(format!("invalid template: {error}")))?;
+    let mut values = HashMap::with_capacity(vars.len());
     for (name, value_ref) in vars {
         let value = value::resolve(value_ref, context)?;
         if value.is_null() {
@@ -101,12 +105,17 @@ pub(super) fn render(
                 "template variable {name} must be scalar"
             )));
         }
-        rendered = rendered.replace(&format!("{{{name}}}"), &value::scalar(&value)?);
+        values.insert(name.as_str(), value::scalar(&value)?);
     }
-    if rendered.contains('{') || rendered.contains('}') {
-        return Err(crate::Error::message(
-            "template contains undeclared variables",
-        ));
+
+    let mut rendered = String::with_capacity(template.len());
+    for part in parts {
+        match part {
+            Part::Text(text) => rendered.push_str(text),
+            Part::Variable(name) => rendered.push_str(values.get(name).ok_or_else(|| {
+                crate::Error::message(format!("template contains undeclared variable: {name}"))
+            })?),
+        }
     }
     Ok(Value::String(rendered))
 }

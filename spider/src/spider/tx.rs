@@ -6,6 +6,7 @@ mod activity;
 mod capacity;
 mod context;
 mod event;
+mod identity;
 
 use activity::{Activity, Registration};
 use capacity::Capacity;

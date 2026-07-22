@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use kameo::actor::Spawn;
 
+use super::worker::Worker;
 use crate::spider::tx::{Event, Events};
 use crate::{downloader, engine, middleware, scheduler};
 
 pub const MAX_REQUEST_CONCURRENCY: usize = 16;
 pub const MAX_EVENTS: usize = 32;
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-pub const DEFAULT_WORKER_ID: &str = "worker-1";
 
 pub struct Runtime<S, D, E, N = engine::NoInit> {
     scheduler: Arc<S>,
@@ -21,6 +21,7 @@ pub struct Runtime<S, D, E, N = engine::NoInit> {
     concurrency: usize,
     claim_limit: Option<usize>,
     event_limit: usize,
+    worker: Worker,
     init: N,
 }
 
@@ -32,6 +33,7 @@ impl<S: scheduler::Scheduler, D, E> Runtime<S, D, E, engine::NoInit> {
         events: Events,
         registry: middleware::Registry,
         middlewares: Vec<middleware::Spec>,
+        worker: Worker,
     ) -> Self {
         let snapshots = scheduler
             .dir()
@@ -48,6 +50,7 @@ impl<S: scheduler::Scheduler, D, E> Runtime<S, D, E, engine::NoInit> {
             concurrency: MAX_REQUEST_CONCURRENCY,
             claim_limit: None,
             event_limit: MAX_EVENTS,
+            worker,
             init: engine::NoInit,
         }
     }
@@ -66,6 +69,7 @@ impl<S, D, E, N> Runtime<S, D, E, N> {
             concurrency: self.concurrency,
             claim_limit: self.claim_limit,
             event_limit: self.event_limit,
+            worker: self.worker,
             init,
         }
     }
@@ -134,10 +138,10 @@ where
     }
 
     pub async fn start(&mut self) -> Result<(), crate::Error> {
-        self.validate_limits()?;
+        self.validate()?;
         self.open().await?;
 
-        let execution = self.run().await;
+        let execution = self.execute_lifecycle().await;
         let closing = self.close().await;
 
         match (execution, closing) {
@@ -147,7 +151,7 @@ where
         }
     }
 
-    async fn run(&mut self) -> Result<(), crate::Error> {
+    async fn execute_lifecycle(&mut self) -> Result<(), crate::Error> {
         let execution = match self.registry.before_spider(&self.middlewares).await {
             Ok(()) => self.coordinate().await,
             Err(error) => Err(crate::Error::Middleware(error)),
@@ -176,9 +180,10 @@ where
             self.registry.clone(),
             self.snapshots.clone(),
             events.clone(),
-            engine::actor::Limits::new(
+            engine::actor::Config::new(
                 self.concurrency,
                 self.claim_limit.unwrap_or(self.concurrency),
+                self.worker.clone(),
             ),
         );
         let prepared =
@@ -195,7 +200,7 @@ where
         actor.into_result()
     }
 
-    fn validate_limits(&self) -> Result<(), crate::Error> {
+    fn validate(&self) -> Result<(), crate::Error> {
         if self.concurrency == 0 {
             return Err(crate::Error::message(
                 "Request concurrency must be positive",
@@ -209,6 +214,6 @@ where
         if self.event_limit == 0 {
             return Err(crate::Error::message("Event limit must be positive"));
         }
-        Ok(())
+        self.worker.validate()
     }
 }

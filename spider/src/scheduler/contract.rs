@@ -21,6 +21,7 @@ pub trait Scheduler: Send + Sync {
     fn close(&self) -> impl Future<Output = Result<(), crate::scheduler::Error>> + Send;
 
     /// 提交本轮解析产生的 Request，只消费 `payload.requests`。
+    /// 相同 ID 与初始 Snapshot 的重放是 no-op；任一 Snapshot 冲突必须整批失败。
     fn push(
         &self,
         payload: payload::Payload,
@@ -38,15 +39,20 @@ pub trait Scheduler: Send + Sync {
         trace_id: &str,
     ) -> impl Future<Output = Result<Option<trace::Snapshot>, crate::scheduler::Error>> + Send;
 
-    /// 按当前 Worker 能力领取并恢复下一批可执行 Request，`limit` 是本次最多领取条数。
+    /// 按当前 Worker 身份和能力领取并恢复下一批可执行 Request，`limit` 是本次最多领取条数。
     fn next_requests(
         &self,
         limit: usize,
+        worker_id: &str,
+        modes: &[net::Mode],
     ) -> impl Future<Output = Result<Vec<net::Request>, crate::scheduler::Error>> + Send;
 
     /// 判断当前 Worker 能力范围内是否仍有排队中或执行中的 Request。
+    /// `modes` 定义能力范围；执行中的 Request 按 mode 全局统计，不按 `leased_by` 过滤。
     fn has_pending_requests(
         &self,
+        worker_id: &str,
+        modes: &[net::Mode],
     ) -> impl Future<Output = Result<bool, crate::scheduler::Error>> + Send;
 
     /// 确认 Engine 已接受当前领取的 Request。

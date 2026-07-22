@@ -46,7 +46,7 @@ XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护�
 4. **身份与执行权分离**：Request ID 在重试和恢复中不变；`version`、`leased_by` 和 `lease_time` 描述某一次执行权。
 5. **不可变运行快照**：一个 Trace 对应一份不可变 Trace Snapshot；Rules 保存完整 DSL，代码模式不持久化 Rust handler。
 6. **恢复必须显式**：租约、续租、归还、成功和失败分别使用独立接口，不用一个多义的 `finish` 覆盖不同状态变化。
-7. **模块职责单一**：Actor 只协调，Worker 只持有单条 Request 的执行权，Executor 只解析，Scheduler 只实现调度和提交合同。
+7. **模块职责单一**：Actor 只协调，启动时冻结的 Worker 状态只持有身份与能力，Request task 持有单次执行权，Executor 只解析，Scheduler 只实现调度和提交合同。
 
 ## 3. 系统总览
 
@@ -112,7 +112,7 @@ flowchart LR
 - Rules 的 `config.spider.name` 标识这份 Rules 任务并作为本地 `task_id`，不要求等于 Rust `Spider::name()`。
 - `Task.id` 标识任务定义。持久化控制面可以用同一个 Spider 创建多个参数或周期不同的 Task。
 - `Trace.id` 标识 Task 的一次运行。周期任务每次派发都应创建新的 Trace。
-- `Request.id` 标识一条逻辑 Request；租约恢复和队列重试保持该 ID 不变。
+- `Request.id` 标识一条逻辑 Request；租约恢复和队列重试保持该 ID 不变。当前 Request 的 `Tx.request` 输出由框架使用父 Request ID、规范化后的子 Request 初始规格以及该规格在本次 parse attempt 中的出现次数派生子 ID；重放相同输出复用 ID，`Request::with_id` 设置的业务 ID 始终保留。
 - 本地 Memory 没有持久化 Task 表：代码模式使用 Rust `Spider::name()` 作为 `task_id`，Rules 模式使用 `config.spider.name`。
 - Item ID 不在这条层级中。`Tx.item` 会为缺少 ID 的 Item 生成 UUID v7；它只是数据实例 ID，不负责业务去重。
 
@@ -185,7 +185,7 @@ Rules 模式把加载的 YAML 视为本次运行定义。开始领取前，每�
 | 设置 | 默认值 | 含义 |
 | --- | ---: | --- |
 | `with_concurrency(n)` | `16` | 同时运行的 Request 任务上限 |
-| `with_claim_limit(n)` | 等于 concurrency | 一次 `next_requests(limit)` 最多领取的 Request 数 |
+| `with_claim_limit(n)` | 等于 concurrency | 一次 `next_requests(limit, worker_id, modes)` 最多领取的 Request 数 |
 | `with_event_limit(n)` | `32` | 已被 Tx 接受、但 Actor handler 尚未开始的 Event 上限 |
 
 三个值在 Engine 启动时校验并加载，不支持运行中热更新，也不会互相替代。一次实际领取数量为：
@@ -198,7 +198,7 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 
 ### 5.2 空闲与退出
 
-一次 `next_requests(limit)` 返回空集合只表示当前领取没有结果，不能直接结束 Engine。Actor 只有同时满足以下条件才退出：
+一次 `next_requests(limit, worker_id, modes)` 返回空集合只表示当前领取没有结果，不能直接结束 Engine。Actor 只有同时满足以下条件才退出：
 
 - Scheduler 已确认当前 Worker 能力范围内没有排队或执行中的 Request；
 - 没有启动、领取、轮询或 producer 空闲观察任务；
@@ -221,11 +221,11 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 | `dir` | 返回可选的 Worker 本地目录；用于框架本地 Item 失败快照 |
 | `lease` | 返回可选的租约超时和续租间隔 |
 | `open / close` | 打开和关闭 Scheduler 自身资源 |
-| `push` | 只消费 `Payload.requests`，提交解析产生的 Requests |
+| `push` | 只消费 `Payload.requests`；跳过一致重放、原子写入缺失 Request，并拒绝存在冲突的整批数据 |
 | `push_items` | 只消费 `Payload.items`，提交 Items |
 | `trace` | 按 `trace_id` 读取不可变 Trace Snapshot |
-| `next_requests(limit)` | 最多领取并恢复 `limit` 条 Request |
-| `has_pending_requests` | 判断当前 Worker 能力范围内是否仍有排队或执行中的 Request |
+| `next_requests(limit, worker_id, modes)` | 按传入的 Worker 身份和 modes 原子领取并恢复最多 `limit` 条 Request |
+| `has_pending_requests(worker_id, modes)` | 判断传入 Worker 能力范围内是否仍有排队或执行中的 Request |
 | `ack` | 确认 Engine 已接受当前领取的执行权 |
 | `release` | 主动归还执行权，不消耗队列层重试次数 |
 | `refresh_lease` | 延长当前已确认执行权的租约 |
@@ -238,6 +238,8 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 - `init(trace_id, snapshot, requests)`：原子保存 Trace Snapshot 和准入后的初始 Request 集合；过滤后的空集合合法。
 
 `Payload` 是这些方法共用的唯一传输信封，不增加 Batch、Receipt 或其他平行结构。它携带 Request 执行身份、状态、错误、时间、统计以及 `requests / items` 两个输出集合；每个 Scheduler 方法会拒绝与自身语义无关的字段。例如 `push` 只允许 Requests，`push_items` 只允许 Items，结算 Payload 的两个集合必须为空。
+
+`has_pending_requests` 的能力范围由 `modes` 定义。只要 processing Request 的 mode 匹配，所有具备该能力的 Worker 都将其视为 pending，不按当前 `leased_by` 过滤。`worker_id` 用于标识并校验调用方，不把 processing 集合缩小为该 Worker 自己持有的租约。这个保守退出规则避免兼容 Worker 在租约恢复前，或执行中 Request 继续产生兼容任务前提前退出。
 
 任何 `contrib` Scheduler 都必须完整实现这些状态和身份语义。Engine 不应针对 Redis、MySQL 或 API 写特例。
 
@@ -259,11 +261,13 @@ stateDiagram-v2
 
 Memory 在一个受互斥锁保护的状态中原子维护队列、已知 Request ID、processing、ack、完成记录、Trace Snapshot 和 Trace 统计：
 
-- 同一 payload 内的重复 Request ID，以及已经登记过的 Request ID，都会被拒绝；
+- 同一 payload 内的重复 Request ID 会被拒绝；已存在 ID 与初始 Request Snapshot 完全一致时是 no-op，不同 Snapshot 则冲突并拒绝整批；
+- 一批数据同时包含一致的已有 Snapshot 和新 Request 时，只原子写入缺失 Request；
+- Memory 保存每个规范化初始 Request Snapshot 的 SHA-256 摘要用于重放比较；这是 Scheduler 身份保护，不是 URL 或业务去重；
 - ID 去重防止同一 Request 对象重复入队，URL 或业务字段去重仍由 Dedup Middleware 负责；
 - ready 队列先按较高 `priority` 出队，同优先级按 FIFO；未来执行时间由 delayed 队列管理；
-- `Memory::new(worker_id)` 默认只领取 HTTP Request；`with_modes(...)` 用于替换非空能力集合；
-- 领取会在该能力集合中选择 priority 最高且保持 FIFO 的 Request，不改变不兼容队列项；待处理判断使用同一范围；
+- `Memory::new()` 只拥有进程内 Scheduler 状态；Engine 会在每次领取和待处理判断时传入非空 Worker ID 与 mode 集合；
+- 领取会在传入的 mode 集合中选择 priority 最高且保持 FIFO 的 Request，不改变不兼容队列项；待处理判断使用同一 Worker 范围；
 - 领取时 Request 进入 `processing`，写入 `leased_by / lease_time` 并推进 `version`；
 - 默认租约超时为 30 秒，续租间隔为 10 秒，也可通过 `Memory::with_lease(...)` 配置为运行时时钟可表示的正整数毫秒；
 - `ack` 对同一有效身份幂等，只记录执行确认；`refresh_lease` 才刷新已确认执行的 `lease_time`；
@@ -274,8 +278,8 @@ Memory 在一个受互斥锁保护的状态中原子维护队列、已知 Reques
 - `failure` 保持 Request ID并增加队列重试次数；有剩余额度时回填，额度耗尽后进入 failed 终态。
 - Snapshot 恢复、version/retry 溢出或队列转换失败都会形成带原 Request ID 和原因的显式终态记录，不允许只增加计数后丢弃。
 
-Memory 是绑定当前 Worker、但不注册到集群的进程内实现。它会应用当前实例配置的 mode 能力，
-但不会发现或选择 Worker 集合；注册、心跳和跨 Worker 领取资格留给 v4 contrib Scheduler。它从
+Memory 是不注册到集群的进程内 Scheduler。Engine 持有 Worker 身份和启动时冻结的 mode 能力，并在
+每次领取时传入；Memory 不会发现或选择 Worker 集合。注册、心跳和跨 Worker 领取资格留给 v4 contrib Scheduler。它从
 不可变的进程内映射读取 Trace Snapshot，不存在远程 cache、传输重试或“Trace 存储临时不可用”
 分支。进程退出后不恢复 Request 队列；当前也不会在 `data/requests/` 写本地 Request 文件快照。
 
@@ -291,7 +295,7 @@ sequenceDiagram
     participant E as Executor
     participant T as Tx / Event
 
-    A->>S: next_requests(n)
+    A->>S: next_requests(n, worker_id, modes)
     S-->>A: Requests in processing with lease
     A->>W: run(request)
     W->>S: ack(payload)
@@ -326,6 +330,8 @@ sequenceDiagram
 - Scheduler `failure` 是唯一的队列层 Request 重试入口。只有本地执行重试耗尽后，Worker 才提交 failure。
 - `Tx.request` 和 `Tx.item` 都等待其 Event 真正处理完成，因此解析成功不会早于输出被 Scheduler 接受。
 - Item 提交最终失败会返回到当前解析调用，并使当前 Request 走失败结算。
+- 当前 Request 的 `Tx.request` 输出在每次 parse attempt 使用新的出现次数分配器；规范化输出包含 `next_time` 等调度意图，并使用不随时间漂移的 Cookie 视图。parse retry 与队列重试对相同规范化输出生成相同 ID，同一次执行中多个相同输出仍保持不同 ID。detached Tx 没有父 Request 身份，继续保持 at-least-once 语义。
+- 每组输出 Request 都会在任何 `before_scheduler` Middleware 之前统一校验其 `task_id / trace_id` 是否匹配 Tx；Middleware 不得改写 `id / task_id / trace_id`。可重放 ID 在该 hook 前派生，因此 hook 若修改其余 Request 规格，对相同输入必须保持确定性；依赖当前时间、随机值或外部可变状态的修改会在重放时按预期暴露为 Snapshot 冲突。
 - `Response::follow` 始终继承 vals 与 Trace 身份。同源目标复制已更新的 Headers 和 CookieStore；跨源目标移除源站 headers，只保留目标 URL 可用的 Cookie。
 - HTTP Downloader 在发送每个 redirect target 前检查 `allowed_domains`；越界目标按正常过滤处理，不进入下载重试或 `error_download`；允许的跨源 redirect 移除源站 headers，只保留目标 URL 可用的 Cookie。
 - 每个 redirect 都会在下一跳前应用中间响应的全部 `Set-Cookie`。跨源时移除源站 headers，并在发送前把 CookieStore 缩减为目标 URL 可用的 Cookie。
@@ -351,6 +357,12 @@ body stream 共享一个 deadline。redirect 不重置该预算。Middleware 或
 一份新的完整预算；parse 重试复用已有 Response，不重新下载。最终 body 仍是已有的有界
 `Response.body: Bytes`，不新增公开 streaming Response、文件 sink 或附件 API。
 
+Downloader 只跟随 `301`、`302`、`303`、`307` 和 `308`。redirect 将带 body 的 Request 改为 GET
+时，会丢弃 body，并在后续跳转删除 `Content-Length`、`Content-Type`、`Content-Encoding` 和
+`Content-Language`、`Content-Location`、`Transfer-Encoding`；即使之前的 body 值为空，只要携带了
+body 元数据也执行清理。原始 GET 或 HEAD 不会仅因 method 被删除这些 headers。其他 3xx（包括 `304`）
+即使带有 `Location` 也直接作为最终响应返回。
+
 `Headers` 包装 `http::HeaderMap<HeaderValue>`。名称使用标准大小写不敏感身份，Response 保留原始字节与
 收到的重复值；`set` 替换同名的所有值，`append` 保留原值并追加。Rules Request headers 仍是单值 map，
 因此通过 `set` 应用。Request Snapshot 把规范化名称序列化为非空字符串数组；Request 中的非字符串
@@ -363,6 +375,10 @@ Cookie，并在业务解析前用全部响应 `Set-Cookie` 更新 store。Domain
 并把复制的 store 缩减为目标 URL 可用的 Cookie，防止无关凭据进入新 Snapshot；不增加 Trace 级实时或
 分布式 CookieStore。跨站 Public Suffix Domain 会被拒绝，与当前 Request host 完全相同的
 Public Suffix 会规范化为 HostOnly；发送前无条件移除原始 `Cookie` header，保证 CookieStore 是唯一会话来源。
+Memory 重放比较通过专用稳定视图读取 store 中的 Cookie 记录。`Max-Age` Cookie 保留原始相对属性，
+但省略按本次接收时间推导出的绝对过期时间，因此同一响应重放时 Request 身份不会漂移；显式
+`Expires` 和会话状态仍属于该视图。普通 Cookies 序列化、查询与实际发送仍忽略已过期记录；Request Snapshot
+会保留这些记录，使跨 Worker 恢复后仍使用相同的重放身份。
 
 ### 7.2 Response 字符解码
 
@@ -428,7 +444,8 @@ Rust `index` 是每条 Rules Request 固定经过的共享业务代码入口。�
 
 `spider.start[*]` 与 request edge 共用同一完整 Request Spec。Graph node 只包含 parse、bind 和域名
 策略，Request 创建后不再从目标 node 补 transport。URL 数组按稳定顺序展开，在 transport 模板渲染前
-写入从 `1` 开始的保留 `vals.idx`，每层新展开重新计数。
+写入从 `1` 开始的保留 `vals.idx`，每层新展开重新计数。Request 与 bind 模板共用一个解析器；渲染只
+遍历一次解析后的源字符串，动态值中包含的花括号保持为普通数据，不会成为第二层模板表达式。
 
 Rules 不会编译成另一套 Request 或 Item 类型。parse/bind 先提供基础字段，Item edge 的 `vals` 只有
 非空结果才覆盖同名值；null、空字符串、空数组和空对象保留基础值，`0` 与 `false` 仍是有效覆盖。
@@ -468,6 +485,9 @@ let nodes = soup.select("article h2")?;
 ```
 
 评分覆盖标签、ID、class、属性、组合关系和支持的静态伪类。候选的额外属性不扣分；默认 `min` 为 `0.8`，合法范围是 `0.0..=1.0`。
+一次选择过程会按 `(DOM node, selector compound)` 缓存递归关系评分。“最佳祖先”和“最佳前序兄弟”
+直接复用相邻节点的状态，使深层后代和宽兄弟链只产生线性关系状态，不再重复扫描完整关系链；缓存不会
+跨文档持久化。
 
 Healing 只接受 `scrape-core 0.2.9` 能成功编译的语法；该解析器当前会在 Healing 开始前拒绝 `:is()`、`:where()` 和 `:has()`。
 
@@ -479,6 +499,7 @@ Healing 不保存历史节点指纹、不改写或持久化修复后的 selector
 - `Response::json<T>()` 先经过统一的响应文本解码合同，再反序列化结构化 JSON。
 - AI 是与 CSS、Regex 并列的显式 selector。它使用 `async-openai` 调用 OpenAI-compatible Chat Completion，将当前 Response 文本和 `expr` 组合成 prompt，再把模型内容解析为一个 JSON 值。
 - Rules 中持久化的 `api_key` 必须使用 `env:VARIABLE` 引用；Worker 执行时才读取真实密钥。代码直接构造的临时配置可以传入密钥，但配置序列化会拒绝直接密钥。
+- AI `base_url` 必须是绝对 HTTP(S) base endpoint，不能包含 user information、query 或 fragment；诊断信息仍防御性隐藏 API Key 和 URL query。
 - AI 不生成 CSS，CSS Healing 也不会把候选交给 AI。
 
 ### 9.3 媒体字段
@@ -510,6 +531,10 @@ after_spider
 
 `Middleware::Next<T>` 只有 `Continue(T)` 与 `Skip`。`Skip` 是正常过滤，不进入对应 error hook。Registry 合并默认 Spec 与对象局部 Spec，再按 `order` 和声明顺序执行。
 
+Request Middleware 只能修改当前阶段拥有的字段。`before_scheduler` 不得修改
+`id / task_id / trace_id`；Request 领取后，`before_download` 还不得修改 `node`，避免实际执行
+与租约结算指向不同任务。`before_download` 仍可修改 URL、headers 等运输字段。
+
 内置实现：
 
 | Middleware | 作用位置 | 语义 |
@@ -520,6 +545,10 @@ after_spider
 | `retry` | error 配置 | 为 download、parse、Item 提交提供 Worker 本地重试策略 |
 
 `Builder::with_middleware(name, value)` 注册能力，不表示自动挂载到所有对象。Request、Response、Item 和 Spider 生命周期通过各自的 `middleware::Spec` 显式选择能力。只有 validate 的正常阶段 Spec 是 Registry 默认配置。
+
+默认校验要求 text Request body 声明必须包含字符串 `data`。自定义 Downloader 返回的 Response
+必须具有带 host 的绝对 HTTP(S) URL 和合法 HTTP 状态码；`after_download` 负责结构校验，
+`before_parse` 仍单独负责跳过非成功响应。
 
 默认 Dedup 只处理配置 key 生成的 Request fingerprint，不处理 Item，也不增加隐式 URL key。Rules 初始 Request 与 Tx 输出都经过 `before_scheduler`；指纹在这里检查并写入，因此后续 `Scheduler::push` 或运行种子 `init` 失败都不会回滚。SHA-256 输入是 `task_id`、Middleware key、rule name 与有序字段值组成的结构化元组，不使用可能碰撞的字符串 namespace 拼接。URL 归一化只按 query key 稳定排序，同名 key 保持原始顺序。所有启用规则先完成有限 TTL deadline 校验，再在同一把锁内统一检查并写入；任一 TTL 错误都不会留下部分指纹。某条规则的 `ttl: 0` 表示既不查询也不保存该规则指纹；省略或 `-1` 在进程生命周期内永久保留且不做容量淘汰。精确存储使用 `HashMap` 和过期时间堆，只从堆头惰性清理到期项。
 
@@ -555,7 +584,9 @@ Tx.item
 <dir>/data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
-每个 Item 写一行 JSON，JSONL 只包含 Item 的业务序列化结果。并发写入同一小时文件会串行化，每次完整追加后立即 flush；写入失败时尝试回滚本次追加，`close()` 再次刷新全部打开文件。
+每个 Item 写一行 JSON，JSONL 只包含 Item 的业务序列化结果。并发写入同一小时文件会串行化；一个
+Payload 逐 Item 序列化和写入，不在内存中展开整个集合，每次完整追加后立即 flush。任何序列化、写入
+或 flush 失败都会尝试把文件截断回该 Payload 写入前的长度，`close()` 再次刷新全部打开文件。
 
 `version / timezone` 是 Trace 级运行元数据，持久化 Scheduler 在 `push_items` 时可通过
 `payload.trace_id` 读取对应 Trace Snapshot，并按需要反规范化到自己的 Item 记录。列名固定为
@@ -569,6 +600,7 @@ Item JSON，也不复制到每条 Request Snapshot；默认 Memory JSONL 不保�
 ```
 
 - 第一次 `push_items` 失败时尝试写快照，然后继续既定重试；
+- 快照流式写入唯一临时文件，完整 flush 后才原子 rename；失败时删除临时文件，不发布半截快照；
 - 快照写入失败不阻止 Scheduler 重试；
 - 后续重试成功时删除快照；删除失败不改变 Item 已成功的结果；
 - 重试耗尽时快照保留，当前没有自动回放，需人工处理；
@@ -589,11 +621,13 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/engine/actor/task.rs` | 持有任务句柄并把任务 panic 转为 Engine 错误 |
 | `spider/src/engine/builder.rs` | 装配组件并持有所有执行模式共用的 Schema Store |
 | `spider/src/engine/runtime.rs` | 组件生命周期、启动参数和 Actor 装配 |
-| `spider/src/engine/worker.rs` | 单条 Request 的 ack、租约维护和最终结算 |
+| `spider/src/engine/worker.rs` | 持有启动时冻结的 Worker ID 与下载模式能力 |
+| `spider/src/engine/request/task.rs` | 单条 Request 的 ack、租约维护和最终结算 |
 | `spider/src/engine/admission.rs` | Request 输出进入 Scheduler 前统一执行 `before_scheduler` 准入 |
 | `spider/src/engine/request.rs` | 单条已领取 Request 的下载、Middleware、Worker 本地重试与解析生命周期 |
 | `spider/src/engine/event/request.rs` | 处理 Tx 产生的 Request 输出 |
 | `spider/src/engine/event/item.rs` | 处理 Item、提交重试与失败快照 |
+| `spider/src/spider/tx/identity.rs` | 为当前 Request 输出派生可重放的稳定 ID |
 | `spider/src/engine/executor.rs` | 根据 Trace Snapshot 选择 Code/Rules 并调用共享 Spider |
 | `spider/src/engine/code.rs` | 代码模式本地运行种子初始化 |
 | `spider/src/engine/rules.rs` | Rules 模式装配与运行种子初始化 |
@@ -609,10 +643,14 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/scheduler/contract.rs` | Scheduler 公共合同 |
 | `spider/src/scheduler/init.rs` | 运行种子初始化合同 |
 | `spider/src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |
-| `spider/src/scheduler/memory/claim.rs` | 领取、租约回收和 Request 恢复 |
+| `spider/src/scheduler/memory/digest.rs` | 对初始 Request Snapshot 做规范化流式摘要，只用于重放比较且不展开 Body JSON |
+| `spider/src/scheduler/memory/claim.rs` | 协调一次按能力领取，从排队 Snapshot 生成 processing Request |
 | `spider/src/scheduler/memory/queue.rs` | ready/delayed 排队顺序 |
+| `spider/src/scheduler/memory/reclaim.rs` | 回收已 ack 与未 ack 的过期租约 |
+| `spider/src/scheduler/memory/restore.rs` | 恢复已领取 Request Snapshot，并处理恢复重试 |
 | `spider/src/scheduler/memory/settle.rs` | 身份校验、成功/失败和队列重试 |
 | `spider/src/scheduler/memory/state.rs` | Memory 运行状态数据结构 |
+| `spider/src/scheduler/memory/validate.rs` | 校验新 Request 及其 Trace 归属 |
 | `spider/src/selector/css/healing.rs` | Healing 配置与总体流程 |
 | `spider/src/selector/css/healing/reference.rs` | CSS AST 到评分参考结构 |
 | `spider/src/selector/css/healing/score.rs` | DOM 候选遍历、关系判断与评分 |

@@ -4,6 +4,8 @@ use crate::engine::contract::Execute;
 use crate::spider::tx;
 use crate::{downloader, middleware, net, scheduler, spider, stats};
 
+pub(super) mod task;
+
 /// 执行一条已领取 Request 的完整下载与解析生命周期。
 pub(crate) async fn execute<E, D>(
     claimed: &net::Request,

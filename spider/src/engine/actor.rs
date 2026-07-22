@@ -12,16 +12,22 @@ mod start;
 mod task;
 mod wait;
 
-pub(super) struct Limits {
+pub(super) struct Config {
     concurrency: usize,
-    claim: usize,
+    claim_limit: usize,
+    worker: super::worker::Worker,
 }
 
-impl Limits {
-    pub(super) fn new(concurrency: usize, claim_limit: usize) -> Self {
+impl Config {
+    pub(super) fn new(
+        concurrency: usize,
+        claim_limit: usize,
+        worker: super::worker::Worker,
+    ) -> Self {
         Self {
             concurrency,
-            claim: claim_limit,
+            claim_limit,
+            worker,
         }
     }
 }
@@ -33,7 +39,7 @@ pub(super) struct Engine<S, D, E> {
     registry: Arc<middleware::Registry>,
     snapshots: Option<Arc<crate::item::snapshot::Store>>,
     events: Events,
-    limits: Limits,
+    config: Config,
 
     // Concurrent Request work. Its length is the source of truth for free execution slots.
     requests: task::Tasks,
@@ -72,7 +78,7 @@ where
         registry: Arc<middleware::Registry>,
         snapshots: Option<Arc<crate::item::snapshot::Store>>,
         events: Events,
-        limits: Limits,
+        config: Config,
     ) -> Self {
         Self {
             scheduler,
@@ -81,7 +87,7 @@ where
             registry,
             snapshots,
             events,
-            limits,
+            config,
             requests: task::Tasks::default(),
             outputs: task::Tasks::default(),
             startup: None,
@@ -118,10 +124,14 @@ where
             && self.poll.is_none()
             && !self.claims_blocked
             && !self.exhausted
-            && self.requests.len() < self.limits.concurrency
+            && self.requests.len() < self.config.concurrency
         {
-            let available = self.limits.concurrency - self.requests.len();
-            claim::spawn(self, actor_ref.clone(), self.limits.claim.min(available));
+            let available = self.config.concurrency - self.requests.len();
+            claim::spawn(
+                self,
+                actor_ref.clone(),
+                self.config.claim_limit.min(available),
+            );
         }
 
         if self.startup.is_some()

@@ -82,9 +82,14 @@ async fn traced_request(scheduler: &spider::Memory, node: &str) -> net::Request 
 
 #[tokio::test]
 async fn released_code_request_resolves_its_stable_node_again() {
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
     traced_request(&scheduler, "detail").await;
-    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let claimed = scheduler
+        .next_requests(1, "worker-1", &[net::Mode::Http])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
     let mut release = payload::Payload::for_request(&claimed, "worker-1");
     release.state = net::State::Processing;
     scheduler.release(&release).await.unwrap();
@@ -103,7 +108,7 @@ async fn released_code_request_resolves_its_stable_node_again() {
 
 #[tokio::test]
 async fn missing_code_node_uses_request_failure_settlement() {
-    let scheduler = spider::Memory::new("worker-1");
+    let scheduler = spider::Memory::new();
     traced_request(&scheduler, "missing").await;
     let mut runtime = engine::Builder::new()
         .with_scheduler(scheduler)

@@ -62,7 +62,8 @@ OpenAI-compatible Chat Completion endpoint and parses the model content as JSON:
 ```
 
 AI does not generate CSS and is not invoked by CSS healing. Rules persist only the environment
-variable reference; the Worker resolves the actual API key when the selector runs.
+variable reference; the Worker resolves the actual API key when the selector runs. `base_url` must
+be an absolute HTTP(S) endpoint without embedded credentials, a query, or a fragment.
 
 ## Rules Mode
 
@@ -84,6 +85,8 @@ transport, priority, and vals before entering Tx or Scheduler. URL-array expansi
 one-based `vals.idx` before transport templates render. Rules composes parse/bind fields first; only a
 non-empty Item-edge `vals` value overrides the same field. It then constructs the Spider's Rust Item via
 the derived `Item::from_values`, assigns its SchemaKey, and calls the default `item` function or the edge's `fn`.
+Request and bind templates parse their source once; braces introduced by a resolved value remain data
+and are never interpreted as another template expression.
 For every Rules Request, the shared Executor first calls the Rust Spider's `index(response.clone())`
 business entry and then interprets the DSL node selected by `Request.node`; this is one Executor path,
 not a Code/Rules Executor swap.
@@ -97,6 +100,17 @@ The complete executable example is in [examples/src/bin/rules.rs](examples/src/b
 The default Memory Scheduler writes one JSON value per line below
 `./data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl`. Item submission uses
 `Scheduler::push_items`; Requests emitted by `self.tx.request(...)` enter the same Scheduler queue.
+Memory serializes and writes Items one at a time under one append lock, and rolls the entire append back
+if any Item fails. Failure snapshots are written to a temporary file and atomically renamed only after
+the complete snapshot is flushed.
+`Scheduler::push` treats the same Request ID and initial Snapshot as an idempotent replay, atomically
+adds missing Requests, and rejects the whole collection when any existing Snapshot conflicts.
+For a directly awaited `Tx.request` call inside a Request execution, framework-created child IDs are
+derived from the parent Request ID, the canonical initial child specification, and that specification's
+occurrence within the current parse attempt. Replaying the same output after a parse or queue retry
+therefore reuses its ID, while intentional identical children in one attempt remain distinct. An ID set
+with `Request::with_id` remains authoritative. This is Request-output replay protection, not business
+Dedup; Items and detached Tx output retain their at-least-once semantics.
 The current Request is acknowledged before execution, has its lease refreshed through
 `Scheduler::refresh_lease` while it is running and while completion is being submitted, and then
 completed through `Scheduler::success` or `Scheduler::failure`. Each Scheduler owns its lease timeout
@@ -111,6 +125,8 @@ Engine tracks cloned Tx producers directly, so delayed output is drained without
 Its internal coordinator is one Kameo Actor; Request and output I/O remains in independent Tokio tasks.
 An awaited Tx call can use the current Request context. A Tx clone moved into a detached task retains
 only `task_id / trace_id`; it never retains Request ownership, lease identity, node, version, or stats.
+Every emitted Request must match that Tx `task_id / trace_id` before any `before_scheduler` Middleware
+runs, and no such Middleware may rewrite `id`, `task_id`, or `trace_id`.
 Request concurrency, the per-call claim limit, and Event capacity are independent startup-frozen
 settings exposed by `with_concurrency`, `with_claim_limit`, and `with_event_limit`.
 Event capacity is released when the Actor starts handling an Event, while the Tx call continues waiting
@@ -139,6 +155,9 @@ decoded chunks without preallocating the limit, but the successful result remain
 `Response.body: Bytes`; this contract does not expose a public stream or file sink. `Request.timeout`
 is one budget for connection, every redirect, and the final body. A redirect never resets it, while
 each new download retry receives a fresh full budget.
+Only `301`, `302`, `303`, `307`, and `308` are followed. When a redirect changes a body-bearing Request
+to GET, body-related headers are removed together with the discarded body; an original GET body keeps
+its headers.
 
 `Headers` wraps the standard `http::HeaderMap`, preserving case-insensitive names, raw response
 values, and repeated fields. `set` replaces a name and `append` adds another value; Rules input stays
@@ -174,12 +193,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
-The v3 Scheduler contract scopes `next_requests` and pending-work checks to the current Worker's
-supported download modes; filtering must be atomic with claim. A real Browser Downloader and mixed
+The v3 Scheduler contract receives the Engine-owned Worker ID and supported download modes for
+`next_requests` and pending-work checks; filtering must be atomic with claim. A real Browser Downloader and mixed
 HTTP/browser end-to-end execution remain v5 work. The optional API/Redis/MySQL Schedulers and Master
 control plane remain v4 work and do not depend on Browser implementation.
-`Memory::new(worker_id)` defaults to HTTP-only claims; `Memory::with_modes(...)` replaces that
-capability set and rejects an empty set.
+Engine defaults to `worker-1` and HTTP mode. `with_worker_id(...)` and `with_modes(...)` replace
+those frozen startup values; an empty Worker ID or mode set is rejected before execution.
 
 Media normalization does not download files. Item attachment downloading is not implemented and has
 no assigned release; a separate future OpenSpec must define it.

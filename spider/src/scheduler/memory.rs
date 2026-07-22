@@ -4,51 +4,30 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::{item, net, payload, scheduler, stats, trace};
 
 mod claim;
+mod digest;
 mod queue;
+mod reclaim;
+mod restore;
 mod settle;
 mod state;
+mod validate;
 
 use state::State;
 
 #[derive(Debug)]
 pub struct Memory {
-    worker_id: String,
-    supported_modes: Vec<net::Mode>,
     lease: scheduler::Lease,
     state: Mutex<State>,
     writer: item::local::Writer,
 }
 
 impl Memory {
-    pub fn new(worker_id: impl Into<String>) -> Self {
-        let worker_id = worker_id.into();
-        assert!(
-            !worker_id.trim().is_empty(),
-            "Memory worker_id must not be empty"
-        );
+    pub fn new() -> Self {
         Self {
-            worker_id,
-            supported_modes: vec![net::Mode::Http],
             lease: scheduler::Lease::default(),
             state: Mutex::new(State::default()),
             writer: item::local::Writer::default(),
         }
-    }
-
-    /// Replaces the download modes this Worker can claim. Memory defaults to HTTP only.
-    pub fn with_modes(mut self, modes: impl IntoIterator<Item = net::Mode>) -> Self {
-        let mut supported_modes = Vec::new();
-        for mode in modes {
-            if !supported_modes.contains(&mode) {
-                supported_modes.push(mode);
-            }
-        }
-        assert!(
-            !supported_modes.is_empty(),
-            "Memory supported_modes must not be empty"
-        );
-        self.supported_modes = supported_modes;
-        self
     }
 
     pub fn with_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
@@ -126,6 +105,12 @@ impl Memory {
     }
 }
 
+impl Default for Memory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl scheduler::Scheduler for Memory {
     fn dir(&self) -> Option<&std::path::Path> {
         Some(self.writer.dir())
@@ -162,24 +147,34 @@ impl scheduler::Scheduler for Memory {
                     request.id
                 )));
             }
-            claim::validate(&request)?;
-            queued.push(queue::snapshot(request)?);
+            validate::request(&request)?;
+            let snapshot = queue::snapshot(request)?;
+            let digest = digest::of(&snapshot)?;
+            queued.push((snapshot, digest));
         }
 
         let mut state = self.state();
         if let Some(id) = queued
             .iter()
-            .map(|snapshot| snapshot.id.as_str())
-            .find(|id| state.contains(id))
+            .find(|(snapshot, digest)| {
+                state
+                    .request_digests
+                    .get(&snapshot.id)
+                    .is_some_and(|current| current != digest)
+            })
+            .map(|(snapshot, _)| snapshot.id.as_str())
         {
             return Err(scheduler::Error::Message(format!(
-                "request id already exists: {id}"
+                "request id conflicts with existing snapshot: {id}"
             )));
         }
-        claim::validate_trace(&state, &queued)?;
+        validate::ownership(&state, queued.iter().map(|(snapshot, _)| snapshot))?;
         let now = crate::utils::time::now_millis();
-        for snapshot in queued {
-            state.known.insert(snapshot.id.clone());
+        for (snapshot, digest) in queued {
+            if state.contains(&snapshot.id) {
+                continue;
+            }
+            state.request_digests.insert(snapshot.id.clone(), digest);
             state.enqueue(snapshot, now);
         }
         Ok(())
@@ -212,39 +207,25 @@ impl scheduler::Scheduler for Memory {
             .map(|snapshot| snapshot.as_ref().clone()))
     }
 
-    async fn next_requests(&self, limit: usize) -> Result<Vec<net::Request>, scheduler::Error> {
+    async fn next_requests(
+        &self,
+        limit: usize,
+        worker_id: &str,
+        modes: &[net::Mode],
+    ) -> Result<Vec<net::Request>, scheduler::Error> {
+        validate_worker(worker_id, modes)?;
         let mut state = self.state();
-        claim::reclaim(&mut state, self.lease);
-        let now = crate::utils::time::now_millis();
-        let queued = state.take(now, limit, &self.supported_modes);
-        let mut requests = Vec::with_capacity(queued.len());
-
-        for queued in queued {
-            let Some(mut request) = claim::restore(&mut state, queued, &self.worker_id) else {
-                continue;
-            };
-            request.state = net::State::Processing;
-            request.leased_by.clone_from(&self.worker_id);
-            request.lease_time = now;
-            let Some(version) = request.version.checked_add(1) else {
-                state.fail_request(
-                    &request,
-                    format!("request version overflow while claiming: {}", request.id),
-                );
-                continue;
-            };
-            request.version = version;
-
-            state.processing.insert(request.id.clone(), request.clone());
-            requests.push(request);
-        }
-
-        Ok(requests)
+        Ok(claim::next(&mut state, self.lease, limit, worker_id, modes))
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
+    async fn has_pending_requests(
+        &self,
+        worker_id: &str,
+        modes: &[net::Mode],
+    ) -> Result<bool, scheduler::Error> {
+        validate_worker(worker_id, modes)?;
         let state = self.state();
-        Ok(state.has_pending_requests(&self.supported_modes))
+        Ok(state.has_pending_requests(modes))
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
@@ -358,6 +339,20 @@ impl scheduler::Scheduler for Memory {
     }
 }
 
+fn validate_worker(worker_id: &str, modes: &[net::Mode]) -> Result<(), scheduler::Error> {
+    if worker_id.trim().is_empty() {
+        return Err(scheduler::Error::Message(
+            "worker_id must not be empty".to_string(),
+        ));
+    }
+    if modes.is_empty() {
+        return Err(scheduler::Error::Message(
+            "worker modes must not be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl scheduler::Init for Memory {
     fn initializes_run(&self) -> bool {
         true
@@ -394,34 +389,40 @@ impl scheduler::Init for Memory {
             ));
         }
 
+        let mut request_ids = HashSet::with_capacity(requests.len());
+        let mut queue = Vec::with_capacity(requests.len());
+        for request in requests {
+            if !request_ids.insert(request.id.clone()) {
+                return Err(scheduler::Error::Message(
+                    "duplicate initial request id".to_string(),
+                ));
+            }
+            validate::request(&request)?;
+            let snapshot = queue::snapshot(request)?;
+            let digest = digest::of(&snapshot)?;
+            queue.push((snapshot, digest));
+        }
+
         let mut state = self.state();
         if state.trace_snapshots.contains_key(&trace_id) {
             return Err(scheduler::Error::Message(format!(
                 "trace already exists: {trace_id}"
             )));
         }
-
-        let existing_id = requests.iter().any(|request| state.contains(&request.id));
-        let mut request_ids = HashSet::with_capacity(requests.len());
-        let duplicate_id = requests
+        if let Some((snapshot, _)) = queue
             .iter()
-            .any(|request| !request_ids.insert(request.id.clone()));
-        if existing_id || duplicate_id {
-            return Err(scheduler::Error::Message(
-                "initial request id already exists".to_string(),
-            ));
-        }
-
-        let mut queue = Vec::with_capacity(requests.len());
-        for request in requests {
-            claim::validate(&request)?;
-            queue.push(queue::snapshot(request)?);
+            .find(|(snapshot, _)| state.contains(&snapshot.id))
+        {
+            return Err(scheduler::Error::Message(format!(
+                "initial request id already exists: {}",
+                snapshot.id
+            )));
         }
 
         state.trace_snapshots.insert(trace_id, Arc::new(snapshot));
         let now = crate::utils::time::now_millis();
-        for snapshot in queue {
-            state.known.insert(snapshot.id.clone());
+        for (snapshot, digest) in queue {
+            state.request_digests.insert(snapshot.id.clone(), digest);
             state.enqueue(snapshot, now);
         }
         Ok(())

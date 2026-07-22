@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use scrape_core::{
-    Soup, Tag,
+    NodeId, Soup, Tag,
     query::{ScrapeSelector, matches_selector_with_caches},
 };
 use selectors::{context::SelectorCaches, parser::SelectorList};
@@ -13,6 +15,17 @@ const EPSILON: f64 = 1e-9;
 struct Points {
     earned: f64,
     total: f64,
+}
+
+#[derive(Default)]
+struct Cache {
+    points: HashMap<(NodeId, usize), Points>,
+    ancestors: HashMap<(NodeId, usize), Option<Points>>,
+    earlier: HashMap<(NodeId, usize), Option<Points>>,
+    #[cfg(test)]
+    calls: usize,
+    #[cfg(test)]
+    relations: usize,
 }
 
 impl Points {
@@ -39,10 +52,15 @@ pub(super) fn select<'a>(
         .select("*")
         .map_err(|error| selector::Error::Css(error.to_string()))?;
     let mut scored = Vec::with_capacity(candidates.len());
+    let mut caches = reference
+        .branches
+        .iter()
+        .map(|_| Cache::default())
+        .collect::<Vec<_>>();
     for candidate in candidates {
         let mut candidate_score = 0.0_f64;
-        for branch in &reference.branches {
-            candidate_score = candidate_score.max(evaluate_branch(candidate, branch));
+        for (branch, cache) in reference.branches.iter().zip(&mut caches) {
+            candidate_score = candidate_score.max(evaluate_branch(candidate, branch, cache));
         }
         scored.push((candidate, candidate_score));
     }
@@ -60,31 +78,129 @@ pub(super) fn select<'a>(
         .collect())
 }
 
-fn evaluate_branch(candidate: Tag<'_>, branch: &Branch) -> f64 {
-    chain(candidate, branch, 0).score()
+fn evaluate_branch(candidate: Tag<'_>, branch: &Branch, cache: &mut Cache) -> f64 {
+    chain(candidate, branch, 0, cache).score()
 }
 
-fn chain(candidate: Tag<'_>, branch: &Branch, index: usize) -> Points {
+fn chain(candidate: Tag<'_>, branch: &Branch, index: usize, cache: &mut Cache) -> Points {
+    #[cfg(test)]
+    {
+        cache.calls += 1;
+    }
+    let key = (candidate.node_id(), index);
+    if let Some(points) = cache.points.get(&key) {
+        return *points;
+    }
+
     let mut points = compound(candidate, &branch.compounds[index]);
     let Some(relation) = branch.relations.get(index) else {
+        cache.points.insert(key, points);
         return points;
     };
-    let related = related(candidate, *relation);
+    let related = match relation {
+        Relation::Parent => candidate
+            .parent()
+            .map(|node| chain(node, branch, index + 1, cache)),
+        Relation::Ancestor => ancestor(candidate, branch, index, cache),
+        Relation::Previous => candidate
+            .prev_sibling()
+            .map(|node| chain(node, branch, index + 1, cache)),
+        Relation::Earlier => earlier(candidate, branch, index, cache),
+    };
     points.total += 1.0;
-    if related.is_empty() {
+    let Some(related) = related else {
         points.total += remaining_total(branch, index + 1);
+        cache.points.insert(key, points);
         return points;
-    }
+    };
     points.earned += 1.0;
-    let mut best = None;
-    for node in related {
-        let scored = chain(node, branch, index + 1);
-        if best.is_none_or(|best: Points| scored.score() > best.score()) {
-            best = Some(scored);
-        }
-    }
-    points.add(best.expect("related nodes are not empty"));
+    points.add(related);
+    cache.points.insert(key, points);
     points
+}
+
+fn ancestor(
+    candidate: Tag<'_>,
+    branch: &Branch,
+    index: usize,
+    cache: &mut Cache,
+) -> Option<Points> {
+    let key = (candidate.node_id(), index);
+    if let Some(points) = cache.ancestors.get(&key) {
+        return *points;
+    }
+
+    let mut pending = Vec::new();
+    let mut current = candidate;
+    let tail = loop {
+        let key = (current.node_id(), index);
+        if let Some(points) = cache.ancestors.get(&key) {
+            break *points;
+        }
+        #[cfg(test)]
+        {
+            cache.relations += 1;
+        }
+        pending.push(current);
+        let Some(parent) = current.parent() else {
+            break None;
+        };
+        current = parent;
+    };
+
+    let mut points = tail;
+    for node in pending.into_iter().rev() {
+        let value = node.parent().map(|parent| {
+            let nearest = chain(parent, branch, index + 1, cache);
+            prefer(nearest, points)
+        });
+        cache.ancestors.insert((node.node_id(), index), value);
+        points = value;
+    }
+    points
+}
+
+fn earlier(candidate: Tag<'_>, branch: &Branch, index: usize, cache: &mut Cache) -> Option<Points> {
+    let key = (candidate.node_id(), index);
+    if let Some(points) = cache.earlier.get(&key) {
+        return *points;
+    }
+
+    let mut pending = Vec::new();
+    let mut current = candidate;
+    let tail = loop {
+        let key = (current.node_id(), index);
+        if let Some(points) = cache.earlier.get(&key) {
+            break *points;
+        }
+        #[cfg(test)]
+        {
+            cache.relations += 1;
+        }
+        pending.push(current);
+        let Some(previous) = current.prev_sibling() else {
+            break None;
+        };
+        current = previous;
+    };
+
+    let mut points = tail;
+    for node in pending.into_iter().rev() {
+        let value = node.prev_sibling().map(|previous| {
+            let nearest = chain(previous, branch, index + 1, cache);
+            prefer(nearest, points)
+        });
+        cache.earlier.insert((node.node_id(), index), value);
+        points = value;
+    }
+    points
+}
+
+fn prefer(nearest: Points, previous: Option<Points>) -> Points {
+    match previous {
+        Some(previous) if previous.score() > nearest.score() => previous,
+        _ => nearest,
+    }
 }
 
 fn remaining_total(branch: &Branch, index: usize) -> f64 {
@@ -166,15 +282,6 @@ fn matches(candidate: Tag<'_>, selector: &SelectorList<ScrapeSelector>) -> bool 
     )
 }
 
-fn related<'a>(candidate: Tag<'a>, relation: Relation) -> Vec<Tag<'a>> {
-    match relation {
-        Relation::Parent => candidate.parent().into_iter().collect(),
-        Relation::Ancestor => candidate.parents().collect(),
-        Relation::Previous => candidate.prev_sibling().into_iter().collect(),
-        Relation::Earlier => candidate.prev_siblings().collect(),
-    }
-}
-
 fn similarity(expected: &str, actual: &str) -> f64 {
     if expected == actual {
         1.0
@@ -198,7 +305,7 @@ mod tests {
         reference
             .branches
             .iter()
-            .map(|branch| evaluate_branch(candidate, branch))
+            .map(|branch| evaluate_branch(candidate, branch, &mut Cache::default()))
             .fold(0.0_f64, f64::max)
     }
 
@@ -256,5 +363,64 @@ mod tests {
         );
 
         assert!(value < 0.8);
+    }
+
+    #[test]
+    fn memoizes_deep_descendant_and_sibling_scoring_states() {
+        const DEPTH: usize = 28;
+        const COMPOUNDS: usize = 10;
+
+        let descendants = format!(
+            "{}target{}",
+            "<section class='near'>".repeat(DEPTH),
+            "</section>".repeat(DEPTH)
+        );
+        bounded_calls(&descendants, &["section.target"; COMPOUNDS].join(" "));
+
+        let siblings = "<section class='near'></section>".repeat(DEPTH);
+        bounded_calls(&siblings, &["section.target"; COMPOUNDS].join(" ~ "));
+    }
+
+    #[test]
+    fn handles_thousands_of_ancestors_and_earlier_siblings_without_recursion() {
+        const ELEMENTS: usize = 4_096;
+
+        let descendants = format!(
+            "{}target{}",
+            "<section class='near'>".repeat(ELEMENTS),
+            "</section>".repeat(ELEMENTS)
+        );
+        let soup = Soup::parse_with_config(
+            &descendants,
+            scrape_core::SoupConfig::builder()
+                .max_depth(ELEMENTS + 16)
+                .build(),
+        );
+        bounded_calls_in(soup, "main section.target");
+
+        let siblings = "<section class='near'></section>".repeat(ELEMENTS);
+        bounded_calls(&siblings, "main ~ section.target");
+    }
+
+    fn bounded_calls(html: &str, expr: &str) {
+        bounded_calls_in(Soup::parse(html), expr);
+    }
+
+    fn bounded_calls_in(soup: Soup, expr: &str) {
+        let selector = scrape_core::CompiledSelector::compile(expr).unwrap();
+        let reference = Reference::new(&selector).unwrap();
+        let branch = &reference.branches[0];
+        let candidate = *soup.select("section").unwrap().last().unwrap();
+        let elements = soup.select("*").unwrap().len();
+        let compounds = branch.compounds.len();
+        let mut cache = Cache::default();
+
+        let result = chain(candidate, branch, 0, &mut cache);
+
+        assert!(result.total > 0.0);
+        assert!(cache.points.len() <= elements * compounds);
+        assert!(cache.ancestors.len() + cache.earlier.len() <= elements * compounds);
+        assert!(cache.relations <= elements * compounds);
+        assert!(cache.calls <= elements * compounds * 3);
     }
 }

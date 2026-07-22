@@ -4,7 +4,7 @@ use crate::spider::tx::Context;
 use crate::{middleware, net, scheduler};
 
 pub(super) async fn handle<S>(
-    requests: Vec<net::Request>,
+    mut requests: Vec<net::Request>,
     context: Option<&Context>,
     scheduler: Arc<S>,
     registry: Arc<middleware::Registry>,
@@ -12,8 +12,14 @@ pub(super) async fn handle<S>(
 where
     S: scheduler::Scheduler + Send,
 {
+    let ids = context
+        .map(|context| context.assign_ids(&mut requests))
+        .transpose()?;
     let requests = crate::engine::admission::apply(requests, context, registry.as_ref()).await?;
     if requests.is_empty() {
+        if let Some(ids) = ids {
+            ids.commit();
+        }
         return Ok(());
     }
 
@@ -25,7 +31,11 @@ where
     scheduler
         .push(payload)
         .await
-        .map_err(crate::Error::Scheduler)
+        .map_err(crate::Error::Scheduler)?;
+    if let Some(ids) = ids {
+        ids.commit();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -34,7 +44,7 @@ mod tests {
 
     #[tokio::test]
     async fn retains_fingerprint_after_scheduler_push_failure() {
-        let scheduler = Arc::new(crate::scheduler::Memory::new("worker-1"));
+        let scheduler = Arc::new(crate::scheduler::Memory::new());
         let registry = Arc::new(crate::middleware::Registry::new());
         let mut request = crate::net::Request::follow("https://example.com/article").unwrap();
         request.middlewares.push(
