@@ -10,6 +10,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 async-openai = { version = "0.41.1", default-features = false, features = ["chat-completion", "rustls"] }
+base64 = "0.22"
 bytes = { version = "1", features = ["serde"] }
 chrono = "0.4"
 chrono-tz = "0.10"
@@ -19,6 +20,7 @@ futures-util = "0.3"
 http = "1"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"
+redis = { version = "1.4.1", default-features = false, features = ["connection-manager", "script", "streams", "tokio-rustls-comp"] }
 kameo = { version = "0.22.1", default-features = false }
 mime = "0.3"
 serde = { version = "1", features = ["derive"] }

@@ -6,15 +6,19 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{middleware, net, scheduler};
+use crate::{middleware, net};
 
-pub(super) fn of(snapshot: &net::request::Snapshot) -> Result<[u8; 32], scheduler::Error> {
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Request Snapshot cannot be serialized: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+pub(super) fn calculate(snapshot: &net::request::Snapshot) -> Result<[u8; 32], Error> {
     let view = View::new(snapshot);
     let mut hasher = Sha256::new();
     hasher.update(b"memory-request-snapshot-v1\0");
-    serde_json::to_writer(Sink(&mut hasher), &view).map_err(|error| {
-        scheduler::Error::Message(format!("Request Snapshot cannot be serialized: {error}"))
-    })?;
+    serde_json::to_writer(Sink(&mut hasher), &view)?;
     Ok(hasher.finalize().into())
 }
 
@@ -248,10 +252,14 @@ mod tests {
         field: &str,
         change: impl FnOnce(&mut net::request::Snapshot),
     ) {
-        let expected = of(base).unwrap();
+        let expected = base.digest().unwrap();
         let mut changed = base.clone();
         change(&mut changed);
-        assert_ne!(expected, of(&changed).unwrap(), "{field} was not hashed");
+        assert_ne!(
+            expected,
+            changed.digest().unwrap(),
+            "{field} was not hashed"
+        );
     }
 
     #[test]
@@ -260,14 +268,14 @@ mod tests {
         let body = net::Body::Bytes(bytes);
         let encoded = serde_json::to_vec(&Body::new(&body)).unwrap();
         let snapshot = snapshot(body);
-        let first = of(&snapshot).unwrap();
-        let second = of(&snapshot).unwrap();
+        let first = snapshot.digest().unwrap();
+        let second = snapshot.digest().unwrap();
         let mut json = snapshot.clone();
         json.body = net::Body::Json(serde_json::json!([]));
 
         assert!(encoded.len() < 256);
         assert_eq!(first, second);
-        assert_ne!(first, of(&json).unwrap());
+        assert_ne!(first, json.digest().unwrap());
     }
 
     #[test]

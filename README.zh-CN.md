@@ -2,9 +2,10 @@
 
 简体中文 | [English](README.md)
 
-`crawler` 是一个使用 Rust 编写的单进程爬虫运行时。v3 提供内存调度器、HTTP 下载器、中间件生命周期、
-异步 Spider 处理器、规则模式、CSS Healing、AI Selector 和本地 JSONL 数据输出，并完成 Task/Trace
-运行种子、按 Worker 能力领取 Request，以及确定性的响应字符集解码。
+`crawler` 是一个使用 Rust 编写的爬虫运行时。默认单进程形态提供内存调度器、HTTP 下载器、中间件
+生命周期、异步 Spider 处理器、规则模式、CSS Healing、AI Selector 和本地 JSONL 数据输出；`contrib`
+还提供 Redis 7 单实例调度器，用同一套 Engine 合同支持持久化的多 Worker 队列。运行时已完成
+Task/Trace 运行种子、按 Worker 能力领取 Request，以及确定性的响应字符集解码。
 
 完整的当前功能、运行模型与扩展边界见[架构与功能说明](docs/architecture.zh-CN.md)。
 
@@ -39,6 +40,38 @@ Worker 通过本地 Spider node 注册表恢复处理函数，不保存 Rust 函
 Rules 启动时，每条初始 Request 都先经过 `before_scheduler`，再把 Trace Snapshot 与准入后的
 Requests 原子写入 Scheduler。所有初始 Request 都被过滤仍是一轮有效运行：Trace Snapshot 会被
 保存，Engine 正常结束。
+
+## Redis Scheduler
+
+`contrib::scheduler::redis::Redis` 完整实现核心 `Scheduler` 和 `Init` 合同。它与 Memory 使用相同的
+装配方式，Engine 不包含 Redis 特例：
+
+```rust
+use contrib::scheduler::redis::Redis;
+use spider::{engine, net};
+
+let scheduler = Redis::new("redis://127.0.0.1:6379")?
+    .with_namespace("crawler")?;
+
+let mut engine = engine::Engine::new()
+    .with_worker_id("worker-01")
+    .with_modes([net::Mode::Http])
+    .with_scheduler(scheduler)
+    .with_spider(BasicSpider::new())
+    .build();
+
+engine.start().await?;
+```
+
+所有 Redis key 都按 namespace 隔离；正常 `close()` 只释放客户端资源，不会删除排队数据。Redis 保存
+Trace Snapshot、Request 状态、按能力领取的租约、结算、统计和 Item。每个已接受的非空 Item `Payload`
+都写成一条 Redis Stream entry，保持 at-least-once 语义，不做业务 Item 去重。
+
+本版本只支持 Redis 7+ 单实例 primary，不支持 Redis Cluster。多 key Lua 状态转换依赖单实例原子性，
+Cluster 将作为独立 Scheduler 设计。需要可恢复持久化时，必须启用 AOF（`appendonly yes`）并配置
+`maxmemory-policy noeviction`。`appendfsync` 是运维侧在更强持久性与写入吞吐/延迟之间的选择
+（例如 `always` 与 `everysec`）。应监控 Stream 增长并配置明确的外部保留策略；Scheduler 不会自动
+trim Item 输出。
 
 在处理函数中通过 `self.tx.request(...)` 提交的新请求会进入同一个 Scheduler 队列；通过
 `self.tx.item(...)` 提交的数据经过 Item 中间件后由 Scheduler 提交。
@@ -210,9 +243,10 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 - 代码模式与 YAML 规则模式
 - 本地 JSONL Item 输出
 
-v3 Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker ID 和支持的下载模式，能力筛选
+Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker ID 和支持的下载模式，能力筛选
 必须和领取原子完成。真实 Browser Downloader 与 HTTP/browser 混合端到端执行属于 v5；可选的
-API/Redis/MySQL Scheduler 与 Master 控制面属于 v4，且 v4 不依赖 Browser 实现。
+API、MySQL Scheduler、Master 控制面、Item 回放和运行期链路追踪仍属于后续 v4 工作，且不依赖
+Browser 实现。Redis 已通过共享 Scheduler 一致性测试。
 Engine 默认使用 `worker-1` 和 HTTP 模式；`with_worker_id(...)` 与 `with_modes(...)` 可替换这些启动时冻结的值，
 空 Worker ID 或空 mode 集合会在执行前被拒绝。
 

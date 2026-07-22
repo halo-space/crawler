@@ -1,5 +1,6 @@
 mod body;
 pub mod config;
+pub mod digest;
 mod model;
 pub mod snapshot;
 mod template;

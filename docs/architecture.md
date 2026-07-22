@@ -4,7 +4,7 @@ This document describes the features implemented by the current source tree, the
 
 ## 1. Positioning and Current Scope
 
-`crawler` is a Rust 2024 workspace. Its currently runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader by default. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
+`crawler` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` also provides a Redis 7 standalone Scheduler for durable multi-Worker queues. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
 
 The workspace contains four crates:
 
@@ -12,7 +12,7 @@ The workspace contains four crates:
 | --- | --- |
 | `spider` | Core runtime, public data objects, extension contracts, default Memory Scheduler, and HTTP Downloader |
 | `macros` | The `#[spider]` procedural macro, including code-mode construction, node registration, and dispatch bindings |
-| `contrib` | Boundary for replaceable external Schedulers; the API, Redis, and MySQL modules are currently placeholders |
+| `contrib` | Replaceable external Scheduler implementations; Redis is implemented, while API and MySQL remain future work |
 | `examples` | Runnable code-mode and Rules-mode examples |
 
 ### 1.1 Capability Status
@@ -32,7 +32,8 @@ The workspace contains four crates:
 | Middleware | Implemented | Lifecycle Registry plus built-in validate, dedup, rate limit, and retry capabilities |
 | Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots; attachment download is not implemented |
 | Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
-| API/Redis/MySQL Schedulers | Planned | v4 `contrib` capabilities; each must implement the complete Scheduler contract |
+| Redis Scheduler | Implemented | Redis 7+ standalone only; namespaced complete Scheduler/Init contract, Lua-atomic transitions, and Redis Stream Item output |
+| API/MySQL Schedulers | Planned | Separate v4 `contrib` implementations; each must implement the complete Scheduler contract |
 | Master control plane | Planned | A v4 capability, not part of the core Scheduler itself |
 | Runtime tracing | Planned | v4 will use `fasttrace`; this is separate from the business `trace_id` |
 
@@ -59,6 +60,7 @@ flowchart LR
     A["Kameo Engine Actor<br/>single coordinator"]
     S["Scheduler contract"]
     M["Memory Scheduler"]
+    Z["Redis 7 Scheduler"]
     W["Request Worker"]
     MW["Middleware Registry"]
     D["Downloader"]
@@ -66,6 +68,7 @@ flowchart LR
     E["Unified Executor"]
     O["Request / Item output tasks"]
     P["JSONL Item output"]
+    I["Redis Stream Item output"]
     F["Item failure snapshots"]
 
     C --> X
@@ -73,6 +76,7 @@ flowchart LR
     X --> A
     A --> S
     S --> M
+    S --> Z
     A --> W
     W --> MW
     W --> D
@@ -83,6 +87,7 @@ flowchart LR
     A --> O
     O --> S
     M --> P
+    Z --> I
     O -. on submission failure .-> F
 ```
 
@@ -281,10 +286,56 @@ Memory atomically maintains its queues, known Request IDs, processing records, a
 
 Memory is an unregistered process-local Scheduler. Engine owns the Worker identity and frozen mode
 capabilities, then supplies them to each claim; Memory does not discover or select among a fleet of Workers;
-registration, heartbeat, and cross-Worker eligibility belong to v4 contrib Schedulers. It reads
+registration, heartbeat, and cross-Worker eligibility belong to the concrete v4 contrib Scheduler or API control plane that needs them. It reads
 Trace Snapshots from an immutable in-process map and has no remote cache, transport retry, or
 temporary Trace-storage failure path. It does not restore its Request queue after process exit, and
 the current implementation does not write local Request files under `data/requests/`.
+
+### 6.3 Redis Implementation and Operations
+
+`contrib::scheduler::redis::Redis` is a complete persistent implementation of the same `Scheduler`
+and `Init` contract. It is not a Redis client wrapped by Engine: Redis itself owns immutable Trace
+Snapshots, canonical Request replay identity, capability-scoped queue ordering, leases, acknowledgements,
+release, refresh, settlement, retry, terminal records, statistics, and Item submission. The Engine only
+switches its assembly dependency:
+
+```rust
+let scheduler = contrib::scheduler::redis::Redis::new("redis://127.0.0.1:6379")?
+    .with_namespace("crawler")?;
+
+let engine = spider::engine::Engine::new()
+    .with_scheduler(scheduler)
+    .with_spider(MySpider::new())
+    .build();
+```
+
+`Redis::new` validates the connection URL and `with_namespace` validates the key namespace. Every
+Redis key is scoped below that namespace, and `close()` drops only local client resources. It never
+deletes persisted work; a new Scheduler instance using the same URL and namespace can continue it.
+Redis returns `initializes_run() == false`, so a code-mode Worker consumes externally initialized
+runs; explicit Rules `init` remains atomic and supported.
+
+All state transitions that need shared atomicity execute in Redis Lua scripts. Claim atomically
+recovers expired leases, selects compatible work in global priority/FIFO order, increments the
+execution version, and establishes ownership using Redis server time. Init and Request replay also
+remain all-or-nothing: a conflicting Request Snapshot rejects the whole collection, while an exact
+replay is a no-op. Transient connection and availability failures remain `Scheduler::Unavailable`,
+rather than being reclassified as ownership loss.
+
+`push_items` serializes the full collection before mutation and appends one Redis Stream entry for
+each accepted non-empty Item Payload. The entry preserves the Payload identity, framework Item IDs, business
+Item JSON, and available Trace metadata. Submission is at-least-once: retrying the same Payload
+creates another complete Stream entry, and Redis does not provide business Item deduplication. Item
+Stream retention and replay are independent concerns; this Scheduler does not trim the Stream.
+
+The implementation targets one Redis 7+ standalone primary. It intentionally does not support
+Redis Cluster, because its namespace spans several keys and its Lua transitions rely on
+single-instance atomicity. Cluster is a future separate Scheduler design, not a connection flag.
+Durable deployments must enable AOF (`appendonly yes`) and set `maxmemory-policy noeviction`.
+`appendfsync` is deliberately an operator choice: `always` trades throughput and latency for a
+smaller persistence window, while `everysec` commonly offers higher throughput with up to roughly
+one second of acknowledged-write exposure. Operators must also monitor Redis capacity and choose an
+explicit Item Stream retention policy.
 
 ## 7. Complete Request Lifecycle
 
@@ -670,7 +721,7 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/scheduler/contract.rs` | Public Scheduler contract |
 | `spider/src/scheduler/init.rs` | Run-seed initialization contract |
 | `spider/src/scheduler/memory.rs` | Public Memory implementation and submodule composition |
-| `spider/src/scheduler/memory/digest.rs` | Canonically hash initial Request Snapshots for replay comparison without materializing Body JSON |
+| `spider/src/net/request/digest.rs` | Canonically hash initial Request Snapshots for replay comparison; shared by Memory and Redis |
 | `spider/src/scheduler/memory/claim.rs` | Coordinate one capability-aware claim from queued Snapshot to processing Request |
 | `spider/src/scheduler/memory/queue.rs` | Ready/delayed queue ordering |
 | `spider/src/scheduler/memory/reclaim.rs` | Recover expired acknowledged and unacknowledged leases |
@@ -684,7 +735,12 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `macros/src/spider/model.rs` | Parse the user Spider model and methods |
 | `macros/src/spider/check.rs` | Validate macro input constraints |
 | `macros/src/spider/bind.rs` | Generate node registration and handler bindings |
-| `contrib/src/scheduler/*` | Boundary for future external Scheduler implementations |
+| `contrib/src/scheduler/redis/scheduler.rs` | Redis public type, lifecycle, and Scheduler/Init contract wiring |
+| `contrib/src/scheduler/redis/request.rs` | Redis Trace/Request storage, claim, restore, and lease recovery |
+| `contrib/src/scheduler/redis/settle.rs` | Redis acknowledgement, release, refresh, success, and failure transitions |
+| `contrib/src/scheduler/redis/item.rs` | Redis Stream Item submission and Trace metadata projection |
+| `contrib/src/scheduler/redis/{key,model,script,validate,error}.rs` | Key isolation, stored records, Lua loading, boundary validation, and error mapping |
+| `contrib/src/scheduler/{api,mysql}.rs` | Future external Scheduler boundaries |
 
 Names rely on module context. For example, `request::State`, `memory::State`, and `registry::Bind` do not repeat their module names. Files likewise avoid mixing unrelated parsing, storage, and control-plane responsibilities.
 
@@ -693,13 +749,13 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 ### Release Boundaries
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
-- v4: API, Redis, and MySQL Schedulers; Master control plane; auditable Item snapshot replay; `fasttrace` runtime tracing. These implementations depend on the v3 Scheduler contract, not on Browser delivery.
+- v4: the shared backend-neutral Scheduler conformance suite and the Redis 7 standalone Scheduler are implemented. API and MySQL Schedulers, the Master control plane, auditable Item snapshot replay, and `fasttrace` runtime tracing remain separate work. These implementations depend on the core Scheduler contract, not on Browser delivery.
 - v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:
 
 - replacing the Scheduler must not change the business shape of Engine, Spider, Downloader, Middleware, Request, Response, or Item;
-- API/Redis/MySQL implementations must provide atomic claims, leases, lease refresh, version validation, retry, terminal states, Trace reads, and Item submission themselves;
+- Redis, API, and MySQL implementations must provide atomic claims, leases, lease refresh, version validation, retry, terminal states, Trace reads, and Item submission themselves; every lease-backed implementation must recover expired leases even while the Worker is online, while offline-Worker recovery can only trigger that transition earlier;
 - Worker capability filtering must be atomic with the Scheduler claim, rather than claiming an incompatible Request and dropping it in the Downloader;
 - Browser must implement the existing `Download` contract and produce the same `Response` model;
 - `fasttrace` span context is operational telemetry and must not replace business `task_id / trace_id`.
@@ -711,6 +767,7 @@ These capabilities must preserve the existing core contracts:
 - providing a partial XPath implementation;
 - batching an entire Trace's Items at Engine shutdown;
 - using Item ID for business deduplication;
+- supporting Redis Cluster through the standalone Redis Scheduler; Cluster needs a separate Scheduler design;
 - downloading Item attachments; that capability is unimplemented and has no assigned release;
 - making the core `spider` crate depend on `contrib` or a control-plane implementation.
 

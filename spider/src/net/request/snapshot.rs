@@ -115,6 +115,10 @@ impl TryFrom<net::Request> for Snapshot {
 }
 
 impl Snapshot {
+    pub fn digest(&self) -> Result<[u8; 32], super::digest::Error> {
+        super::digest::calculate(self)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.id.is_empty() {
             return Err("Request Snapshot id must not be empty".to_string());

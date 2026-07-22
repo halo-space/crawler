@@ -6,5 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
+redis = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 spider = { path = "../spider" }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

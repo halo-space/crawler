@@ -4,7 +4,7 @@
 
 ## 1. 定位与当前范围
 
-`crawler` 是一个 Rust 2024 workspace。当前可运行形态是单进程异步爬虫运行时，默认使用内存 Scheduler 和 HTTP Downloader。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
+`crawler` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 还提供 Redis 7 单实例 Scheduler，用于持久化多 Worker 队列。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
 
 当前 workspace 包含四个 crate：
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | `spider` | 核心运行时、公共数据对象、扩展合同，以及默认 Memory Scheduler 和 HTTP Downloader |
 | `macros` | `#[spider]` 过程宏；生成代码模式 Spider 的构造、node 注册和分发连接代码 |
-| `contrib` | 外部 Scheduler 等可替换实现的边界；当前 API、Redis、MySQL 模块仍是占位结构 |
+| `contrib` | 可替换外部 Scheduler 的实现边界；Redis 已实现，API 与 MySQL 仍是后续工作 |
 | `examples` | 可运行的代码模式和 Rules 模式示例 |
 
 ### 1.1 能力状态
@@ -32,7 +32,8 @@
 | Middleware | 已实现 | 生命周期 Registry，以及 validate、dedup、rate limit、retry 内置能力 |
 | Item 输出 | 已实现 | Schema 校验、媒体规范化、JSONL 输出和提交失败快照；附件下载尚未实现 |
 | Worker 能力领取 | 已实现 | Memory 只在当前 Worker 配置的 Request mode 范围内领取并判断待处理工作 |
-| API/Redis/MySQL Scheduler | 规划中 | v4 `contrib` 能力；必须完整实现相同 Scheduler 合同 |
+| Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；按 namespace 隔离，完整实现 Scheduler/Init 合同、Lua 原子转换与 Redis Stream Item 输出 |
+| API/MySQL Scheduler | 规划中 | 独立的 v4 `contrib` 实现；必须完整实现相同 Scheduler 合同 |
 | Master control-plane | 规划中 | v4 能力，不属于核心 Scheduler 本身 |
 | 运行期链路追踪 | 规划中 | v4 使用 `fasttrace`；与业务 `trace_id` 是两个概念 |
 
@@ -59,6 +60,7 @@ flowchart LR
     A["Kameo Engine Actor<br/>单一协调者"]
     S["Scheduler 合同"]
     M["Memory Scheduler"]
+    Z["Redis 7 Scheduler"]
     W["Request Worker"]
     MW["Middleware Registry"]
     D["Downloader"]
@@ -66,6 +68,7 @@ flowchart LR
     E["统一 Executor"]
     O["Request / Item 输出任务"]
     P["JSONL Item 输出"]
+    I["Redis Stream Item 输出"]
     F["Item 失败快照"]
 
     C --> X
@@ -73,6 +76,7 @@ flowchart LR
     X --> A
     A --> S
     S --> M
+    S --> Z
     A --> W
     W --> MW
     W --> D
@@ -83,6 +87,7 @@ flowchart LR
     A --> O
     O --> S
     M --> P
+    Z --> I
     O -. 提交失败时 .-> F
 ```
 
@@ -279,9 +284,46 @@ Memory 在一个受互斥锁保护的状态中原子维护队列、已知 Reques
 - Snapshot 恢复、version/retry 溢出或队列转换失败都会形成带原 Request ID 和原因的显式终态记录，不允许只增加计数后丢弃。
 
 Memory 是不注册到集群的进程内 Scheduler。Engine 持有 Worker 身份和启动时冻结的 mode 能力，并在
-每次领取时传入；Memory 不会发现或选择 Worker 集合。注册、心跳和跨 Worker 领取资格留给 v4 contrib Scheduler。它从
+每次领取时传入；Memory 不会发现或选择 Worker 集合。注册、心跳和跨 Worker 领取资格留给确实需要它们的 v4 contrib Scheduler 或 API control-plane。它从
 不可变的进程内映射读取 Trace Snapshot，不存在远程 cache、传输重试或“Trace 存储临时不可用”
 分支。进程退出后不恢复 Request 队列；当前也不会在 `data/requests/` 写本地 Request 文件快照。
+
+### 6.3 Redis 实现与运维边界
+
+`contrib::scheduler::redis::Redis` 是同一套 `Scheduler` 和 `Init` 合同的完整持久化实现。它不是
+由 Engine 包装的 Redis client：Trace Snapshot、规范化 Request 重放身份、按能力领取的队列顺序、租约、
+ack、release、续租、结算、重试、终态记录、统计和 Item 提交都由 Redis 自身负责。Engine 只替换装配依赖：
+
+```rust
+let scheduler = contrib::scheduler::redis::Redis::new("redis://127.0.0.1:6379")?
+    .with_namespace("crawler")?;
+
+let engine = spider::engine::Engine::new()
+    .with_scheduler(scheduler)
+    .with_spider(MySpider::new())
+    .build();
+```
+
+`Redis::new` 校验连接 URL，`with_namespace` 校验 key namespace。所有 Redis key 都位于该 namespace
+之下；`close()` 只释放本地客户端资源，绝不删除持久化任务。新的 Scheduler 实例只要使用相同 URL 与
+namespace 就能继续已有数据。Redis 的 `initializes_run()` 返回 `false`，所以代码模式 Worker 只消费
+外部已初始化的运行；显式 Rules `init` 仍然受支持且保持原子性。
+
+需要跨进程原子性的状态转换都在 Redis Lua 脚本中执行。领取会原子回收过期租约、按全局 priority/FIFO
+顺序选择兼容任务、推进执行 version，并使用 Redis server time 建立执行权。Init 与 Request 重放也是
+全有或全无：存在冲突 Snapshot 时拒绝整批，一致重放为 no-op。临时连接或可用性错误保持为
+`Scheduler::Unavailable`，不能改判为执行权丢失。
+
+`push_items` 会先序列化完整集合，再为每组已接受的非空 Item Payload 追加一条 Redis Stream entry。entry
+保存 Payload 身份、框架 Item ID、业务 Item JSON 和可用的 Trace 元数据。提交采用 at-least-once 语义：
+重试同一 Payload 会产生另一条完整 Stream entry，Redis 不做业务 Item 去重。Stream 保留与回放是独立
+能力；当前 Scheduler 不会 trim Stream。
+
+该实现只面向 Redis 7+ 单实例 primary，不支持 Redis Cluster。namespace 跨多个 key，Lua 状态转换依赖
+单实例原子性，因此 Cluster 是未来独立的 Scheduler 设计，而不是该类型的连接参数。需要可恢复持久化时，
+必须启用 AOF（`appendonly yes`）并设置 `maxmemory-policy noeviction`。`appendfsync` 由运维侧在
+持久化强度与写入吞吐/延迟之间选择：`always` 缩小持久化窗口但降低吞吐，`everysec` 通常吞吐更高，
+但已确认写入可能暴露约一秒。还应监控 Redis 容量，并为 Item Stream 选择明确的外部保留策略。
 
 ## 7. 单条 Request 的完整生命周期
 
@@ -643,7 +685,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/scheduler/contract.rs` | Scheduler 公共合同 |
 | `spider/src/scheduler/init.rs` | 运行种子初始化合同 |
 | `spider/src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |
-| `spider/src/scheduler/memory/digest.rs` | 对初始 Request Snapshot 做规范化流式摘要，只用于重放比较且不展开 Body JSON |
+| `spider/src/net/request/digest.rs` | 对初始 Request Snapshot 做规范化流式摘要，供 Memory 与 Redis 共用重放比较 |
 | `spider/src/scheduler/memory/claim.rs` | 协调一次按能力领取，从排队 Snapshot 生成 processing Request |
 | `spider/src/scheduler/memory/queue.rs` | ready/delayed 排队顺序 |
 | `spider/src/scheduler/memory/reclaim.rs` | 回收已 ack 与未 ack 的过期租约 |
@@ -657,7 +699,12 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `macros/src/spider/model.rs` | 解析用户 Spider 结构和方法模型 |
 | `macros/src/spider/check.rs` | 宏输入约束校验 |
 | `macros/src/spider/bind.rs` | 生成 node 注册与 handler 绑定代码 |
-| `contrib/src/scheduler/*` | 后续外部 Scheduler 实现边界 |
+| `contrib/src/scheduler/redis/scheduler.rs` | Redis 对外类型、生命周期及 Scheduler/Init 合同连接 |
+| `contrib/src/scheduler/redis/request.rs` | Redis Trace/Request 存储、领取、恢复和租约回收 |
+| `contrib/src/scheduler/redis/settle.rs` | Redis ack、release、续租、success 与 failure 转换 |
+| `contrib/src/scheduler/redis/item.rs` | Redis Stream Item 提交与 Trace 元数据投影 |
+| `contrib/src/scheduler/redis/{key,model,script,validate,error}.rs` | key 隔离、存储记录、Lua 加载、边界校验和错误映射 |
+| `contrib/src/scheduler/{api,mysql}.rs` | 后续外部 Scheduler 边界 |
 
 命名依赖模块上下文表达含义。例如 `request::State`、`memory::State`、`registry::Bind` 不重复附加模块名前缀；文件也不混入无关的解析、存储或控制面职责。
 
@@ -666,13 +713,13 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 ### 版本边界
 
 - v3：按 Worker 能力范围原子领取 Request；确定性响应字符集解码，以及基于 fixture 的更完整页面回归。这些合同均已实现。
-- v4：API、Redis、MySQL Scheduler；Master control-plane；可审计 Item 快照回放；`fasttrace` 运行期链路追踪。这些实现依赖 v3 Scheduler 合同，不依赖 Browser 交付。
+- v4：后端无关的 Scheduler 共享一致性套件与 Redis 7 单实例 Scheduler 已实现。API、MySQL Scheduler、Master control-plane、可审计 Item 快照回放和 `fasttrace` 运行期链路追踪仍是独立工作。这些实现依赖核心 Scheduler 合同，不依赖 Browser 交付。
 - v5：真实 Browser Downloader，以及 HTTP/browser 混合端到端 Engine 验收；按能力领取的语义仍属于 v3 合同。
 
 这些能力必须沿用当前核心合同：
 
 - Scheduler 替换不能改变 Engine、Spider、Downloader、Middleware、Request、Response 或 Item 的业务形态；
-- API/Redis/MySQL 实现必须自行完成领取原子性、租约、续租、版本校验、重试、终态、Trace 读取和 Item 提交；
+- Redis、API、MySQL 实现必须自行完成领取原子性、租约、续租、版本校验、重试、终态、Trace 读取和 Item 提交；所有提供租约的实现都必须在 Worker 仍在线时按租约到期恢复，offline Worker 只能提前触发同一回收，不得替代超时恢复；
 - Worker 能力筛选必须在 Scheduler 领取时原子完成，不能先领取不兼容 Request 再由 Downloader 丢弃；
 - Browser 必须实现现有 `Download` 合同，输出同一个 `Response` 模型；
 - `fasttrace` 的 span context 只用于运行期观测，不能替代业务 `task_id / trace_id`。
@@ -684,6 +731,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 - 不提供 XPath 子集；
 - 不在 Engine 末尾批量提交整个 Trace 的 Items；
 - 不让 Item ID 承担业务去重；
+- Redis 单实例 Scheduler 不支持 Redis Cluster；Cluster 需要独立的 Scheduler 设计；
 - 不下载 Item 附件；该能力尚未实现，也没有分配版本；
 - 不让核心 `spider` crate 依赖 `contrib` 或控制面实现。
 

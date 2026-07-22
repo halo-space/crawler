@@ -2,10 +2,11 @@
 
 [简体中文](README.zh-CN.md) | English
 
-`crawler` is a single-process Rust crawler runtime. The v3 runtime uses the in-memory Scheduler, the
-HTTP downloader, middleware hooks, async Spider handlers, CSS healing, explicit AI selectors, and
-local JSONL item output. It also includes Task/Trace run seeds, capability-aware Scheduler claims,
-and deterministic response charset decoding.
+`crawler` is a Rust crawler runtime. Its default single-process topology uses the in-memory
+Scheduler, HTTP downloader, middleware hooks, async Spider handlers, CSS healing, explicit AI
+selectors, and local JSONL item output. `contrib` also provides a Redis 7 standalone Scheduler for
+durable multi-Worker queues while preserving the same Engine contract. The runtime includes
+Task/Trace run seeds, capability-aware Scheduler claims, and deterministic response charset decoding.
 
 See the [architecture and feature overview](docs/architecture.md) for the complete runtime model,
 current capabilities, and extension boundaries.
@@ -32,6 +33,40 @@ that node through its local Spider registry.
 Rules startup runs every generated initial Request through `before_scheduler`, then atomically stores
 the Trace Snapshot with the accepted Requests. A run whose initial Requests are all filtered remains
 valid: its Trace Snapshot is stored and the Engine exits normally.
+
+## Redis Scheduler
+
+`contrib::scheduler::redis::Redis` is a complete implementation of the core `Scheduler` and `Init`
+contracts. It is assembled exactly like Memory; Engine has no Redis-specific path:
+
+```rust
+use contrib::scheduler::redis::Redis;
+use spider::{engine, net};
+
+let scheduler = Redis::new("redis://127.0.0.1:6379")?
+    .with_namespace("crawler")?;
+
+let mut engine = engine::Engine::new()
+    .with_worker_id("worker-01")
+    .with_modes([net::Mode::Http])
+    .with_scheduler(scheduler)
+    .with_spider(BasicSpider::new())
+    .build();
+
+engine.start().await?;
+```
+
+All Redis keys are isolated by the selected namespace; normal `close()` releases client resources
+without deleting queued work. Redis stores Trace Snapshots, Request state, capability-scoped leases,
+settlements, statistics, and Items. Each accepted non-empty Item `Payload` becomes one Redis Stream
+entry and remains at-least-once; it does not perform business Item deduplication.
+
+This release supports one Redis 7+ standalone primary only. It does not support Redis Cluster: the
+multi-key Lua transitions rely on single-instance atomicity, so Cluster will be a separate Scheduler
+design. For durable use, enable AOF (`appendonly yes`) and set `maxmemory-policy noeviction`.
+`appendfsync` is an operator choice between stronger durability and write throughput/latency (for
+example, `always` versus `everysec`). Monitor Stream growth and apply an explicit retention policy;
+the Scheduler does not trim Item output automatically.
 
 In rules mode, extractor expressions determine result cardinality directly: zero matches produce
 `null`, one match produces a scalar or element object, and multiple matches produce an array.
@@ -193,10 +228,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
-The v3 Scheduler contract receives the Engine-owned Worker ID and supported download modes for
+The Scheduler contract receives the Engine-owned Worker ID and supported download modes for
 `next_requests` and pending-work checks; filtering must be atomic with claim. A real Browser Downloader and mixed
-HTTP/browser end-to-end execution remain v5 work. The optional API/Redis/MySQL Schedulers and Master
-control plane remain v4 work and do not depend on Browser implementation.
+HTTP/browser end-to-end execution remain v5 work. Redis is the available v4 persistent Scheduler;
+API and MySQL Schedulers, the Master control plane, Item replay, and runtime tracing remain separate
+v4 work and do not depend on Browser implementation. Redis is covered by the shared Scheduler
+conformance suite.
 Engine defaults to `worker-1` and HTTP mode. `with_worker_id(...)` and `with_modes(...)` replace
 those frozen startup values; an empty Worker ID or mode set is rejected before execution.
 

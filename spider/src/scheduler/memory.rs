@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::{item, net, payload, scheduler, stats, trace};
 
 mod claim;
-mod digest;
 mod queue;
 mod reclaim;
 mod restore;
@@ -149,7 +148,9 @@ impl scheduler::Scheduler for Memory {
             }
             validate::request(&request)?;
             let snapshot = queue::snapshot(request)?;
-            let digest = digest::of(&snapshot)?;
+            let digest = snapshot
+                .digest()
+                .map_err(|error| scheduler::Error::Message(error.to_string()))?;
             queued.push((snapshot, digest));
         }
 
@@ -399,7 +400,9 @@ impl scheduler::Init for Memory {
             }
             validate::request(&request)?;
             let snapshot = queue::snapshot(request)?;
-            let digest = digest::of(&snapshot)?;
+            let digest = snapshot
+                .digest()
+                .map_err(|error| scheduler::Error::Message(error.to_string()))?;
             queue.push((snapshot, digest));
         }
 
