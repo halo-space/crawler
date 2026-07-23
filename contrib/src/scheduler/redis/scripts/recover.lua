@@ -7,6 +7,11 @@ local key = KEYS[1]
 
 local MAX_SEQUENCE = '99999999999999999999999999999999'
 
+local function has_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    return actual == 'none' or actual == expected
+end
+
 local function parse_i32(value, minimum, maximum)
     if type(value) ~= 'string' or not string.match(value, '^%-?%d+$') then return nil end
     local parsed = tonumber(value)
@@ -37,6 +42,7 @@ local function next_sequence()
     return string.char(unpack(digits))
 end
 
+if not has_type(key, 'hash') then return 'CORRUPT_REQUEST' end
 if redis.call('EXISTS', key) == 0 then return 'REQUEST_NOT_FOUND' end
 if redis.call('HGET', key, 'leased_by') ~= worker_id then return 'LEASE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= version then return 'VERSION_MISMATCH' end
@@ -57,17 +63,30 @@ if retry < max_retry then
     priority = parse_i32(redis.call('HGET', key, 'priority'), -2147483648, 2147483647)
     if not priority then return 'CORRUPT_REQUEST_PRIORITY' end
 end
+local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
+local completion = prefix .. 'request:' .. token .. ':completion:' .. version
+if not has_type(KEYS[2], 'zset') then return 'CORRUPT_LEASES' end
+if not has_type(prefix .. 'processing:' .. mode, 'set') then return 'CORRUPT_PROCESSING' end
+local reset_failed_workers = not has_type(failed_workers, 'list')
+local reset_completion = not has_type(completion, 'hash')
+if retry < max_retry then
+    if not has_type(KEYS[3], 'hash') then return 'CORRUPT_META' end
+    if not has_type(prefix .. 'queue:' .. mode .. ':ready', 'zset') then
+        return 'CORRUPT_READY_QUEUE'
+    end
+end
+
 local sequence = nil
 if retry < max_retry then
     sequence = next_sequence()
     if not sequence then return 'SEQUENCE_OVERFLOW' end
 end
 
-local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
+if reset_failed_workers then redis.call('DEL', failed_workers) end
+if reset_completion then redis.call('DEL', completion) end
 if redis.call('LPOS', failed_workers, worker_id) == false then
     redis.call('RPUSH', failed_workers, worker_id)
 end
-local completion = prefix .. 'request:' .. token .. ':completion:' .. version
 redis.call('HSET', completion,
     'task_id', redis.call('HGET', key, 'task_id'),
     'trace_id', redis.call('HGET', key, 'trace_id'),
@@ -93,7 +112,8 @@ if retry < max_retry then
 else
     redis.call('HSET', key,
         'state', 'failed', 'retry_count', retry, 'next_time', '0',
-        'ack_version', '', 'updated_time', now)
+        'leased_by', '', 'lease_time', '0', 'ack_version', '',
+        'queue_kind', '', 'queue_member', '', 'updated_time', now)
 end
 
 return 'OK'

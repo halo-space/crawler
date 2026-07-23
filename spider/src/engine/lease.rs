@@ -14,6 +14,7 @@ const RETRY_DELAY: Duration = Duration::from_millis(25);
 pub(super) async fn execute_with_lease<S, F>(
     scheduler: &S,
     request: &net::Request,
+    claim_started: tokio::time::Instant,
     execution: impl Future<Output = payload::Payload>,
     settle: impl FnOnce(payload::Payload) -> F,
 ) -> Result<(), crate::Error>
@@ -27,7 +28,8 @@ where
 
     let mut payload = payload::Payload::for_request(request, request.leased_by.clone());
     payload.state = net::State::Processing;
-    let deadline = claimed_deadline(request.lease_time, policy.timeout(), request.id.as_str())?;
+    let deadline = expires_at(Some(policy), claim_started, request.id.as_str())?
+        .expect("a Scheduler lease must produce a deadline");
     let refresh = refresh(scheduler, payload, policy, deadline);
     tokio::pin!(execution);
     tokio::pin!(refresh);
@@ -58,12 +60,12 @@ where
 {
     loop {
         match refresh_until(scheduler, &payload, deadline, policy.interval()).await {
-            Ok(refreshed_at) => {
-                deadline = match checked_deadline(refreshed_at, policy.timeout(), &payload.id) {
+            Ok(refresh_started) => {
+                deadline = match checked_deadline(refresh_started, policy.timeout(), &payload.id) {
                     Ok(deadline) => deadline,
                     Err(error) => return error,
                 };
-                let next_refresh = refreshed_at
+                let next_refresh = refresh_started
                     .checked_add(policy.interval())
                     .unwrap_or(deadline)
                     .min(deadline);
@@ -109,19 +111,14 @@ where
     }
 }
 
-fn claimed_deadline(
-    lease_time: i64,
-    timeout: Duration,
+pub(super) fn expires_at(
+    policy: Option<scheduler::Lease>,
+    started: tokio::time::Instant,
     request_id: &str,
-) -> Result<tokio::time::Instant, scheduler::Error> {
-    let elapsed = crate::utils::time::now_millis()
-        .saturating_sub(lease_time)
-        .max(0) as u64;
-    checked_deadline(
-        tokio::time::Instant::now(),
-        timeout.saturating_sub(Duration::from_millis(elapsed)),
-        request_id,
-    )
+) -> Result<Option<tokio::time::Instant>, scheduler::Error> {
+    policy
+        .map(|policy| checked_deadline(started, policy.timeout(), request_id))
+        .transpose()
 }
 
 fn checked_deadline(
@@ -301,6 +298,7 @@ mod tests {
         let result = execute_with_lease(
             &scheduler,
             &request,
+            tokio::time::Instant::now(),
             async { payload::Payload::new() },
             settle,
         )
@@ -322,6 +320,7 @@ mod tests {
             execute_with_lease(
                 &scheduler,
                 &request,
+                tokio::time::Instant::now(),
                 async { payload::Payload::new() },
                 settle,
             ),
@@ -334,24 +333,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_refresh_respects_the_claimed_lease_deadline() {
+    async fn initial_refresh_uses_the_claim_start_not_the_stored_lease_time() {
         let policy =
             scheduler::Lease::new(Duration::from_millis(100), Duration::from_millis(50)).unwrap();
         let scheduler = TestScheduler::unavailable(policy);
         let mut request = claimed_request();
-        request.lease_time -= 90;
+        request.lease_time = i64::MAX;
+        let claim_started = tokio::time::Instant::now() - Duration::from_millis(90);
 
         let result = tokio::time::timeout(
             Duration::from_millis(50),
             execute_with_lease(
                 &scheduler,
                 &request,
+                claim_started,
                 std::future::pending::<payload::Payload>(),
                 settle,
             ),
         )
         .await
-        .expect("the original claim deadline must bound refresh retries");
+        .expect("the claim-start deadline must bound refresh retries");
 
         assert!(matches!(
             result,
@@ -372,6 +373,7 @@ mod tests {
             execute_with_lease(
                 &scheduler,
                 &request,
+                tokio::time::Instant::now(),
                 std::future::pending::<payload::Payload>(),
                 settle,
             ),
@@ -398,6 +400,7 @@ mod tests {
             execute_with_lease(
                 &scheduler,
                 &request,
+                tokio::time::Instant::now(),
                 std::future::pending::<payload::Payload>(),
                 settle,
             ),
@@ -422,6 +425,7 @@ mod tests {
         let result = execute_with_lease(
             &scheduler,
             &request,
+            tokio::time::Instant::now(),
             async { payload::Payload::new() },
             |_| async {
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -444,6 +448,7 @@ mod tests {
         let result = execute_with_lease(
             &scheduler,
             &request,
+            tokio::time::Instant::now(),
             async { payload::Payload::new() },
             |_| async {
                 tokio::time::sleep(Duration::from_millis(25)).await;

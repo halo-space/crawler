@@ -67,6 +67,11 @@ engine.start().await?;
 Trace Snapshot、Request 状态、按能力领取的租约、结算、统计和 Item。每个已接受的非空 Item `Payload`
 都写成一条 Redis Stream entry，保持 at-least-once 语义，不做业务 Item 去重。
 
+Redis 会限制每次领取的重复维护工作：一次 `next_requests` 最多回收并巡检 128 条租约；对传入的每个
+mode，最多提升并巡检 128 条延迟 Request。在回收、延迟提升、巡检或选择任务时发现单条 Request 记录缺失，
+会清理对应的悬挂索引；租约或队列元数据损坏则会移出活动索引，写入完成记录并转为失败终态。两者都不会
+阻塞后续正常 Request。共享索引的 Redis 类型损坏则会在状态写入前明确使本次领取失败。
+
 本版本只支持 Redis 7+ 单实例 primary，不支持 Redis Cluster。多 key Lua 状态转换依赖单实例原子性，
 Cluster 将作为独立 Scheduler 设计。需要可恢复持久化时，必须启用 AOF（`appendonly yes`）并配置
 `maxmemory-policy noeviction`。`appendfsync` 是运维侧在更强持久性与写入吞吐/延迟之间的选择
@@ -180,6 +185,9 @@ Request 进入本地执行槽后先通过 `Scheduler::ack` 确认执行权，长
 每 10 秒续租。最终 Payload 生成前明确丢失执行权时，Engine 终止执行且不提交结算；Payload 生成后
 以 `success / failure` 为最终依据，并发续租错误不能取消结算，临时结算错误只重试同一个 Payload，
 不会重新执行 Request。已确认执行失败时会保留有序且不重复的失败 Worker；未 ack 的领取过期不消费尝试次数。
+每条由成功 `next_requests` 调用返回的 Request，都以该调用前立即记录的单调时刻计算首个本地租约
+截止点，因此 Scheduler 处理与网络耗时会占用这份保守的租约预算。Engine 不会把 Worker 墙钟与
+Scheduler 服务端时间比较；一次成功续租会从自身的单调起点开始计算下一个本地截止点。
 Memory 只从进程内不可变映射读取 Trace Snapshot。Engine 直接跟踪克隆出来的 Tx 生产者，不再通过固定空闲等待窗口猜测是否仍有输出。
 Engine 内部由一个 Kameo Actor 统一协调，Request 和输出 I/O 仍在独立 Tokio 任务中执行。
 当前 Request 内直接 await 的 Tx 调用可以使用完整 Request 上下文；移动到独立任务中的 Tx clone

@@ -9,9 +9,15 @@ use crate::{downloader, engine, middleware, payload, scheduler, stats};
 const MAX_ATTEMPTS: usize = 3;
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
+enum Ack {
+    Accepted,
+    Expired,
+}
+
 /// Executes and settles one claimed Request.
 pub(in crate::engine) async fn execute<S, D, E>(
     request: crate::net::Request,
+    claim_started: tokio::time::Instant,
     scheduler: Arc<S>,
     downloader: Arc<D>,
     executor: Arc<E>,
@@ -24,11 +30,18 @@ where
 {
     let mut payload = payload::Payload::for_request(&request, request.leased_by.clone());
     payload.state = crate::net::State::Processing;
-    if let Err(error) = retry_ack(scheduler.as_ref(), &payload).await {
-        if !error.is_ownership_loss() {
-            let _ = retry_release(scheduler.as_ref(), &payload).await;
+    let expires_at =
+        engine::lease::expires_at(scheduler.lease(), claim_started, request.id.as_str())
+            .map_err(crate::Error::Scheduler)?;
+    match acknowledge(scheduler.as_ref(), &payload, expires_at).await {
+        Ok(Ack::Accepted) => {}
+        Ok(Ack::Expired) => return release_unstarted(scheduler.as_ref(), &payload).await,
+        Err(error) => {
+            if !error.is_ownership_loss() {
+                let _ = retry_release(scheduler.as_ref(), &payload).await;
+            }
+            return Err(crate::Error::Scheduler(error));
         }
-        return Err(crate::Error::Scheduler(error));
     }
 
     let start_time = crate::utils::time::now_millis();
@@ -65,6 +78,7 @@ where
     engine::lease::execute_with_lease(
         scheduler.as_ref(),
         &request,
+        claim_started,
         execution,
         move |payload| async move {
             if payload.state == crate::net::State::Failed {
@@ -75,6 +89,37 @@ where
         },
     )
     .await
+}
+
+async fn acknowledge<S: scheduler::Scheduler>(
+    scheduler: &S,
+    payload: &payload::Payload,
+    expires_at: Option<tokio::time::Instant>,
+) -> Result<Ack, scheduler::Error> {
+    let Some(expires_at) = expires_at else {
+        retry_ack(scheduler, payload).await?;
+        return Ok(Ack::Accepted);
+    };
+    if tokio::time::Instant::now() >= expires_at {
+        return Ok(Ack::Expired);
+    }
+
+    match tokio::time::timeout_at(expires_at, retry_ack(scheduler, payload)).await {
+        Ok(Ok(())) if tokio::time::Instant::now() < expires_at => Ok(Ack::Accepted),
+        Ok(Ok(())) | Err(_) => Ok(Ack::Expired),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
+async fn release_unstarted<S: scheduler::Scheduler>(
+    scheduler: &S,
+    payload: &payload::Payload,
+) -> Result<(), crate::Error> {
+    match retry_release(scheduler, payload).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.is_ownership_loss() => Ok(()),
+        Err(error) => Err(crate::Error::Scheduler(error)),
+    }
 }
 
 fn panic_message(panic: Box<dyn Any + Send>) -> String {
@@ -137,6 +182,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
     use super::*;
     use crate::scheduler::Scheduler;
 
@@ -156,6 +204,30 @@ mod tests {
             _request: crate::net::Request,
         ) -> Result<crate::net::Response, downloader::Error> {
             panic!("download exploded")
+        }
+    }
+
+    struct CountingDownload {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl downloader::Download for CountingDownload {
+        async fn open(&self) -> Result<(), downloader::Error> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), downloader::Error> {
+            Ok(())
+        }
+
+        async fn fetch(
+            &self,
+            _request: crate::net::Request,
+        ) -> Result<crate::net::Response, downloader::Error> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(downloader::Error::UnsupportedMode(
+                "the expired acknowledgement must not download".to_string(),
+            ))
         }
     }
 
@@ -199,6 +271,7 @@ mod tests {
 
         execute(
             request,
+            tokio::time::Instant::now(),
             scheduler.clone(),
             Arc::new(PanickingDownload),
             Arc::new(Executor),
@@ -222,5 +295,51 @@ mod tests {
                 "failure settlement exposed {secret}: {errors}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn expired_acknowledgement_releases_without_downloading_or_retrying() {
+        let lease =
+            scheduler::Lease::new(Duration::from_millis(10), Duration::from_millis(1)).unwrap();
+        let scheduler = Arc::new(scheduler::Memory::new().with_lease(lease));
+        let request = crate::net::Request::follow("https://example.com").unwrap();
+        let request_id = request.id.clone();
+        scheduler
+            .push(payload::Payload::new().requests(vec![request]))
+            .await
+            .unwrap();
+        let claimed = scheduler
+            .next_requests(1, "worker-1", &[crate::net::Mode::Http])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        execute(
+            claimed,
+            tokio::time::Instant::now() - Duration::from_millis(20),
+            scheduler.clone(),
+            Arc::new(CountingDownload {
+                calls: calls.clone(),
+            }),
+            Arc::new(Executor),
+            Arc::new(middleware::Registry::new()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(scheduler.processing_len(), 0);
+        assert_eq!(scheduler.queued_len(), 1);
+
+        let reclaimed = scheduler
+            .next_requests(1, "worker-1", &[crate::net::Mode::Http])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(reclaimed.id, request_id);
+        assert_eq!(reclaimed.retry_count, 0);
     }
 }

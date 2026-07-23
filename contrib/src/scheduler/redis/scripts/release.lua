@@ -5,6 +5,11 @@ local key = KEYS[1]
 
 local MAX_SEQUENCE = '99999999999999999999999999999999'
 
+local function has_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    return actual == 'none' or actual == expected
+end
+
 local function parse_priority(value)
     if type(value) ~= 'string' or not string.match(value, '^%-?%d+$') then return nil end
     local parsed = tonumber(value)
@@ -35,6 +40,7 @@ local function next_sequence()
     return string.char(unpack(digits))
 end
 
+if not has_type(key, 'hash') then return 'CORRUPT_REQUEST' end
 if redis.call('EXISTS', key) == 0 then return 'REQUEST_NOT_FOUND' end
 if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
@@ -59,6 +65,12 @@ local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
 local priority = parse_priority(redis.call('HGET', key, 'priority'))
 if not priority then return 'CORRUPT_REQUEST_PRIORITY' end
+if not has_type(KEYS[2], 'zset') then return 'CORRUPT_LEASES' end
+if not has_type(KEYS[3], 'hash') then return 'CORRUPT_META' end
+if not has_type(prefix .. 'processing:' .. mode, 'set') then return 'CORRUPT_PROCESSING' end
+if not has_type(prefix .. 'queue:' .. mode .. ':ready', 'zset') then
+    return 'CORRUPT_READY_QUEUE'
+end
 local sequence = next_sequence()
 if not sequence then return 'SEQUENCE_OVERFLOW' end
 local member = pad(sequence, 32) .. '|' .. token

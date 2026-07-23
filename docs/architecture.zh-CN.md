@@ -314,6 +314,13 @@ namespace 就能继续已有数据。Redis 的 `initializes_run()` 返回 `false
 全有或全无：存在冲突 Snapshot 时拒绝整批，一致重放为 no-op。临时连接或可用性错误保持为
 `Scheduler::Unavailable`，不能改判为执行权丢失。
 
+为限制积压时的重复维护工作，一次 `next_requests` 最多回收并巡检 128 条租约，并对传入的每个 mode 最多
+提升并巡检 128 条延迟 Request；其余到期记录保留在索引中，交给后续领取处理，不会丢弃。回收、延迟
+提升、巡检或 ready 队列选择发现记录缺失时，会移除悬挂的索引项；
+发现租约或队列元数据损坏（包括队列归属不匹配）时，会移除其活动索引、记录终态失败及完成记录，然后
+继续选择后续正常 Request。这不会吞掉共享索引损坏：共享索引的 Redis 类型非法时，领取会在任何状态
+写入前失败。ready 队列清理同样最多丢弃 128 条非法条目，之后交给下一次领取继续处理。
+
 `push_items` 会先序列化完整集合，再为每组已接受的非空 Item Payload 追加一条 Redis Stream entry。entry
 保存 Payload 身份、框架 Item ID、业务 Item JSON 和可用的 Trace 元数据。提交采用 at-least-once 语义：
 重试同一 Payload 会产生另一条完整 Stream entry，Redis 不做业务 Item 去重。Stream 保留与回放是独立
@@ -366,6 +373,10 @@ sequenceDiagram
 - `ack` 在 Downloader 执行前发生；ack 失败时不会继续下载该 Request。
 - `release` 用于主动归还尚未完成的执行权，不等于失败，也不增加重试次数。
 - 租约维护覆盖下载、解析以及最终 `success / failure` 重试过程。
+- Engine 在每次 `next_requests` 尝试前立即记录单调 `claim_started`，只有调用成功时才保留该时刻。
+  每条返回的 Request 都以该时刻加 Scheduler 超时作为首个本地租约截止点，因此 Scheduler 处理与网络
+  耗时会占用这份保守预算；Engine 不会将 Worker 墙钟与 Scheduler 服务端时间比较。一次成功续租从自身
+  单调起点开始计算下一个本地截止点。
 - 最终 Payload 生成前，明确丢失执行权、租约过期或其他不可重试的续租错误会终止执行且不进入结算；临时续租错误在当前 lease deadline 内重试，下载和解析继续运行。
 - 执行生成不可变最终 Payload 后，以 `success / failure` 为最终依据。并发续租错误只停止后续续租，不能取消结算；临时结算错误只重试同一个 Payload，不重新执行 Request。
 - Middleware Retry 是当前 Worker 内的下载、解析或 Item 提交重试。

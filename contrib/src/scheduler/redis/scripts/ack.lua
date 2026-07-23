@@ -2,6 +2,12 @@ local key = KEYS[1]
 local payload = cjson.decode(ARGV[1])
 local lease_timeout = tonumber(ARGV[2])
 
+local function has_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    return actual == 'none' or actual == expected
+end
+
+if not has_type(key, 'hash') then return 'CORRUPT_REQUEST' end
 if redis.call('EXISTS', key) == 0 then return 'REQUEST_NOT_FOUND' end
 if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end

@@ -9,6 +9,11 @@ local lease_timeout = tonumber(ARGV[4])
 
 local MAX_I64 = '9223372036854775807'
 
+local function has_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    return actual == 'none' or actual == expected
+end
+
 local function canonical_counter(value)
     if type(value) ~= 'string' or not string.match(value, '^%d+$') then return nil end
     value = string.gsub(value, '^0+', '')
@@ -75,6 +80,7 @@ local function merged_stats()
     return values
 end
 
+if not has_type(completion, 'hash') then return 'CORRUPT_COMPLETION' end
 if redis.call('EXISTS', completion) == 1 then
     if redis.call('HGET', completion, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
     if redis.call('HGET', completion, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
@@ -84,6 +90,7 @@ if redis.call('EXISTS', completion) == 1 then
     return 'OK'
 end
 
+if not has_type(key, 'hash') then return 'CORRUPT_REQUEST' end
 if redis.call('EXISTS', key) == 0 then return 'REQUEST_NOT_FOUND' end
 if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
@@ -99,6 +106,10 @@ if redis.call('HGET', key, 'ack_version') ~= payload.version then return 'NOT_AC
 
 local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
+if #payload.stats > 0 and not has_type(stats_key, 'hash') then return 'CORRUPT_STATS' end
+if not has_type(leases, 'zset') then return 'CORRUPT_LEASES' end
+local processing = prefix .. 'processing:' .. mode
+if not has_type(processing, 'set') then return 'CORRUPT_PROCESSING' end
 
 local stats, stats_error = merged_stats()
 if not stats then return stats_error end
@@ -111,9 +122,11 @@ if #stats > 0 then
     end
     redis.call('HSET', unpack(command))
 end
-redis.call('SREM', prefix .. 'processing:' .. mode, token)
+redis.call('SREM', processing, token)
 redis.call('ZREM', leases, token)
-redis.call('HSET', key, 'state', 'done', 'ack_version', '', 'updated_time', now)
+redis.call('HSET', key,
+    'state', 'done', 'leased_by', '', 'lease_time', '0', 'ack_version', '',
+    'queue_kind', '', 'queue_member', '', 'updated_time', now)
 redis.call('HSET', completion,
     'task_id', payload.task_id, 'trace_id', payload.trace_id, 'node', payload.node,
     'worker_id', payload.worker_id, 'state', payload.state, 'error', '')

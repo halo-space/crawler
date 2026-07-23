@@ -6,6 +6,11 @@ local requests = cjson.decode(ARGV[5])
 
 local MAX_SEQUENCE = '99999999999999999999999999999999'
 
+local function has_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    return actual == 'none' or actual == expected
+end
+
 local function increment(value)
     if type(value) ~= 'string' or not string.match(value, '^%d+$') then return nil end
     value = string.gsub(value, '^0+', '')
@@ -39,6 +44,10 @@ local function plan_sequences(count)
     return sequences, current
 end
 
+if not has_type(KEYS[1], 'hash') then return 'CORRUPT_META' end
+if not has_type(KEYS[2], 'hash') then return 'CORRUPT_TRACES' end
+if not has_type(KEYS[3], 'hash') then return 'CORRUPT_TRACE_TASKS' end
+
 if redis.call('HEXISTS', KEYS[2], trace_id) == 1 then
     return 'TRACE_EXISTS:' .. trace_id
 end
@@ -49,7 +58,15 @@ for _, request in ipairs(requests) do
         return 'DUPLICATE:' .. request.id
     end
     seen[request.id] = true
-    if redis.call('EXISTS', prefix .. 'request:' .. request.token) == 1 then
+    local key = prefix .. 'request:' .. request.token
+    if not has_type(key, 'hash') then return 'CORRUPT_REQUEST:' .. request.id end
+    if not has_type(prefix .. 'queue:' .. request.mode .. ':ready', 'zset') then
+        return 'CORRUPT_READY_QUEUE'
+    end
+    if not has_type(prefix .. 'queue:' .. request.mode .. ':delayed', 'zset') then
+        return 'CORRUPT_DELAYED_QUEUE'
+    end
+    if redis.call('EXISTS', key) == 1 then
         return 'REQUEST_EXISTS:' .. request.id
     end
 end

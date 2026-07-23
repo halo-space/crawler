@@ -2,7 +2,8 @@ use spider::scheduler::Init;
 use spider::{Scheduler, payload, trace};
 
 use super::common::{
-    HTTP, WORKER_A, WORKER_B, namespace, owned_request, request, scheduler, succeed,
+    HTTP, WORKER_A, WORKER_B, namespace, owned_request, processing_payload, request, request_key,
+    scheduler, succeed,
 };
 use crate::redis_fixture::Fixture;
 
@@ -108,4 +109,72 @@ async fn namespaces_isolate_identical_request_ids() {
     right.close().await.unwrap();
     fixture.clear(&left_namespace).await;
     fixture.clear(&right_namespace).await;
+}
+
+#[tokio::test]
+async fn terminal_settlement_clears_lease_and_queue_fields() {
+    let Some(fixture) = Fixture::connect().await else {
+        return;
+    };
+    let namespace = namespace("terminal-fields");
+    let scheduler = scheduler(&fixture, &namespace);
+    scheduler.open().await.unwrap();
+
+    scheduler
+        .push(payload::Payload::new().requests(vec![request(
+            "terminal-success",
+            "https://example.com/terminal-success",
+        )]))
+        .await
+        .unwrap();
+    let succeeded = scheduler
+        .next_requests(1, WORKER_A, HTTP)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    succeed(&scheduler, &succeeded).await;
+
+    let mut failed_request = request("terminal-failure", "https://example.com/terminal-failure");
+    failed_request.max_retry_count = 1;
+    scheduler
+        .push(payload::Payload::new().requests(vec![failed_request]))
+        .await
+        .unwrap();
+    let failed = scheduler
+        .next_requests(1, WORKER_A, HTTP)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    scheduler.ack(&processing_payload(&failed)).await.unwrap();
+    let mut failure =
+        payload::Payload::for_request(&failed, failed.leased_by.clone()).failed("failed");
+    failure.start_time = Some(1);
+    failure.end_time = Some(2);
+    scheduler.failure(&failure).await.unwrap();
+
+    let mut connection = fixture.connection().await;
+    for (id, state) in [("terminal-success", "done"), ("terminal-failure", "failed")] {
+        let key = request_key(&namespace, id);
+        for (field, expected) in [
+            ("state", state),
+            ("leased_by", ""),
+            ("lease_time", "0"),
+            ("ack_version", ""),
+            ("queue_kind", ""),
+            ("queue_member", ""),
+        ] {
+            let actual = redis::cmd("HGET")
+                .arg(&key)
+                .arg(field)
+                .query_async::<String>(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(actual, expected, "unexpected {field} for {id}");
+        }
+    }
+
+    scheduler.close().await.unwrap();
+    fixture.clear(&namespace).await;
 }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use redis::AsyncCommands as _;
+use serde_json::Value;
 use spider::{net, payload, scheduler, trace};
 
 use super::Redis;
@@ -124,15 +125,45 @@ impl Redis {
 
         let mut requests = Vec::with_capacity(encoded.len());
         for encoded in encoded {
-            let claimed = serde_json::from_str::<Claimed>(&encoded).map_err(|error| {
+            let value = serde_json::from_str::<Value>(&encoded).map_err(|error| {
                 scheduler::Error::InvalidRequest {
                     id: "unknown".to_string(),
                     message: format!("claimed Redis Request cannot be decoded: {error}"),
                 }
             })?;
-            match Self::restore(&claimed) {
-                Ok(request) => requests.push(request),
-                Err(error) => self.recover(&claimed, &error.to_string()).await?,
+            let token = claim_field(&value, "token")?;
+            let version = claim_field(&value, "version")?;
+            let id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown")
+                .to_string();
+            match serde_json::from_value::<Claimed>(value) {
+                Ok(claimed) if key::token(&claimed.id) == token => match Self::restore(&claimed) {
+                    Ok(request) => requests.push(request),
+                    Err(error) => {
+                        self.recover(&token, worker_id, &version, &id, &error.to_string())
+                            .await?
+                    }
+                },
+                Ok(_) => {
+                    let error = scheduler::Error::InvalidRequest {
+                        id: id.clone(),
+                        message: "claimed Redis Request id does not match its queue token"
+                            .to_string(),
+                    };
+                    self.recover(&token, worker_id, &version, &id, &error.to_string())
+                        .await?;
+                }
+                Err(error) => {
+                    let error = scheduler::Error::InvalidRequest {
+                        id: id.clone(),
+                        message: format!("claimed Redis Request cannot be decoded: {error}"),
+                    };
+                    self.recover(&token, worker_id, &version, &id, &error.to_string())
+                        .await?;
+                }
             }
         }
         Ok(requests)
@@ -287,23 +318,42 @@ impl Redis {
         Ok(request)
     }
 
-    async fn recover(&self, claimed: &Claimed, reason: &str) -> Result<(), scheduler::Error> {
+    async fn recover(
+        &self,
+        token: &str,
+        worker_id: &str,
+        version: &str,
+        id: &str,
+        reason: &str,
+    ) -> Result<(), scheduler::Error> {
         let mut connection = self.connection().await?;
         let result: String = self
             .scripts
             .recover
             .prepare_invoke()
-            .key(self.keys.request(&claimed.id))
+            .key(self.keys.request_token(token))
             .key(self.keys.leases())
             .key(self.keys.meta())
             .arg(self.keys.prefix())
-            .arg(key::token(&claimed.id))
-            .arg(&claimed.leased_by)
-            .arg(&claimed.version)
+            .arg(token)
+            .arg(worker_id)
+            .arg(version)
             .arg(reason)
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
-        Self::result(result, &claimed.id)
+        Self::result(result, id)
     }
+}
+
+fn claim_field(value: &Value, field: &str) -> Result<String, scheduler::Error> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| scheduler::Error::InvalidRequest {
+            id: "unknown".to_string(),
+            message: format!("claimed Redis Request has no valid {field}"),
+        })
 }

@@ -11,6 +11,11 @@ local lease_timeout = tonumber(ARGV[4])
 local MAX_I64 = '9223372036854775807'
 local MAX_SEQUENCE = '99999999999999999999999999999999'
 
+local function has_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    return actual == 'none' or actual == expected
+end
+
 local function parse_i32(value, minimum, maximum)
     if type(value) ~= 'string' or not string.match(value, '^%-?%d+$') then return nil end
     local parsed = tonumber(value)
@@ -107,6 +112,7 @@ local function merged_stats()
     return values
 end
 
+if not has_type(completion, 'hash') then return 'CORRUPT_COMPLETION' end
 if redis.call('EXISTS', completion) == 1 then
     if redis.call('HGET', completion, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
     if redis.call('HGET', completion, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
@@ -116,6 +122,7 @@ if redis.call('EXISTS', completion) == 1 then
     return 'OK'
 end
 
+if not has_type(key, 'hash') then return 'CORRUPT_REQUEST' end
 if redis.call('EXISTS', key) == 0 then return 'REQUEST_NOT_FOUND' end
 if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
@@ -143,6 +150,18 @@ if retry < max_retry_count then
     priority = parse_i32(redis.call('HGET', key, 'priority'), -2147483648, 2147483647)
     if not priority then return 'CORRUPT_REQUEST_PRIORITY' end
 end
+if #payload.stats > 0 and not has_type(stats_key, 'hash') then return 'CORRUPT_STATS' end
+if not has_type(leases, 'zset') then return 'CORRUPT_LEASES' end
+local processing = prefix .. 'processing:' .. mode
+if not has_type(processing, 'set') then return 'CORRUPT_PROCESSING' end
+local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
+if not has_type(failed_workers, 'list') then return 'CORRUPT_FAILED_WORKERS' end
+if retry < max_retry_count then
+    if not has_type(meta, 'hash') then return 'CORRUPT_META' end
+    if not has_type(prefix .. 'queue:' .. mode .. ':ready', 'zset') then
+        return 'CORRUPT_READY_QUEUE'
+    end
+end
 
 local stats, stats_error = merged_stats()
 if not stats then return stats_error end
@@ -161,11 +180,10 @@ if #stats > 0 then
     end
     redis.call('HSET', unpack(command))
 end
-local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
 if redis.call('LPOS', failed_workers, payload.worker_id) == false then
     redis.call('RPUSH', failed_workers, payload.worker_id)
 end
-redis.call('SREM', prefix .. 'processing:' .. mode, token)
+redis.call('SREM', processing, token)
 redis.call('ZREM', leases, token)
 redis.call('HSET', completion,
     'task_id', payload.task_id, 'trace_id', payload.trace_id, 'node', payload.node,
@@ -186,6 +204,7 @@ if retry < max_retry_count then
 else
     redis.call('HSET', key,
         'state', 'failed', 'retry_count', retry, 'next_time', '0',
-        'ack_version', '', 'updated_time', now)
+        'leased_by', '', 'lease_time', '0', 'ack_version', '',
+        'queue_kind', '', 'queue_member', '', 'updated_time', now)
 end
 return 'OK'

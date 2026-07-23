@@ -1,5 +1,6 @@
 use kameo::actor::ActorRef;
 use kameo::message::{Context, Message};
+use tokio::time::Instant;
 
 use super::{Engine, task};
 use crate::{downloader, engine, scheduler};
@@ -13,6 +14,7 @@ pub(super) fn spawn<S, D, E>(
     engine: &mut Engine<S, D, E>,
     actor_ref: ActorRef<Engine<S, D, E>>,
     request: crate::net::Request,
+    claim_started: Instant,
 ) where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
@@ -24,7 +26,12 @@ pub(super) fn spawn<S, D, E>(
     let registry = engine.registry.clone();
     let handle = tokio::spawn(async move {
         let result = task::protect(engine::request::task::execute(
-            request, scheduler, downloader, executor, registry,
+            request,
+            claim_started,
+            scheduler,
+            downloader,
+            executor,
+            registry,
         ))
         .await;
         let id = tokio::task::id();

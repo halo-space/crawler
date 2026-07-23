@@ -61,6 +61,14 @@ without deleting queued work. Redis stores Trace Snapshots, Request state, capab
 settlements, statistics, and Items. Each accepted non-empty Item `Payload` becomes one Redis Stream
 entry and remains at-least-once; it does not perform business Item deduplication.
 
+Redis bounds recurring claim maintenance: one `next_requests` call recovers at most 128 expired
+leases, inspects at most 128 lease records, and promotes and inspects at most 128 delayed Requests
+for each requested mode. Missing per-Request records found while recovering, promoting, inspecting,
+or selecting work have their dangling indexes removed; records with malformed lease or queue metadata
+are removed from active indexes and moved to terminal failure with a completion record. Neither blocks
+later valid Requests. A corrupt shared index type instead fails the claim explicitly before state
+mutation.
+
 This release supports one Redis 7+ standalone primary only. It does not support Redis Cluster: the
 multi-key Lua transitions rely on single-instance atomicity, so Cluster will be a separate Scheduler
 design. For durable use, enable AOF (`appendonly yes`) and set `maxmemory-policy noeviction`.
@@ -153,6 +161,10 @@ and refresh interval; Memory defaults to a 30-second timeout and a 10-second int
 ownership loss before the final Payload exists stops execution without settlement. Once that Payload
 exists, `success / failure` is authoritative: a concurrent refresh error cannot cancel settlement,
 and transient settlement errors retry the same Payload without re-executing the Request.
+For every Request returned by a successful `next_requests` call, Engine derives its initial local lease
+deadline from a monotonic instant recorded immediately before that attempt, so Scheduler and network
+latency consume part of the conservative lease budget. It never compares a Worker's wall clock with
+Scheduler server time; a successful refresh starts the next local deadline from its own monotonic start.
 Failures after acknowledgment preserve ordered, duplicate-free failed Worker history; claim expiry
 before acknowledgment does not consume an attempt. Memory reads Trace Snapshots only from its
 immutable in-process map.

@@ -322,6 +322,16 @@ remain all-or-nothing: a conflicting Request Snapshot rejects the whole collecti
 replay is a no-op. Transient connection and availability failures remain `Scheduler::Unavailable`,
 rather than being reclassified as ownership loss.
 
+Recurring maintenance is deliberately bounded under backlog: one `next_requests` invocation recovers
+and inspects at most 128 lease records, and promotes and inspects at most 128 delayed Requests for
+each requested mode. Additional due entries remain indexed for later claims rather than being dropped.
+When recovery, promotion, or ready-queue selection finds a missing record, it removes the dangling
+index entry. Malformed lease or queue metadata, including a mismatched queue membership, is quarantined
+by removing its active entries, recording a terminal failure and completion, then continuing with
+later valid Requests. This does not hide shared-index corruption: an invalid Redis type for a shared
+index rejects the claim before it mutates state. Ready-queue cleanup is likewise bounded to 128
+discarded invalid entries before the claim yields to a later invocation.
+
 `push_items` serializes the full collection before mutation and appends one Redis Stream entry for
 each accepted non-empty Item Payload. The entry preserves the Payload identity, framework Item IDs, business
 Item JSON, and available Trace metadata. Submission is at-least-once: retrying the same Payload
@@ -378,6 +388,11 @@ The important semantics are:
 - `ack` happens before Downloader execution. A failed ack prevents the download.
 - `release` returns unfinished ownership voluntarily; it is not failure and does not increment retry count.
 - Lease maintenance covers download, parsing, and retries of final `success / failure` settlement.
+- Immediately before each `next_requests` attempt, Engine records a monotonic `claim_started` and
+  retains it only for a successful call. For every Request returned by that call, that instant plus
+  the Scheduler timeout is its initial local lease deadline. Scheduler and network latency therefore
+  consume part of this conservative budget; Engine never compares a Worker's wall clock with Scheduler
+  server time. A successful refresh begins the next local deadline from its own monotonic start.
 - Before a final Payload exists, explicit ownership loss, lease expiry, or another terminal refresh error cancels execution and prevents settlement. Transient refresh errors retry within the current lease deadline while execution continues.
 - After execution produces an immutable final Payload, `success / failure` is authoritative. A concurrent refresh error stops further refreshes but cannot cancel settlement; transient settlement errors retry the same Payload without executing the Request again.
 - Middleware Retry is a local Worker retry for downloading, parsing, or Item submission.

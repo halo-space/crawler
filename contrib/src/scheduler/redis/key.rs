@@ -53,7 +53,11 @@ impl Keys {
     }
 
     pub(super) fn request(&self, id: &str) -> String {
-        self.key(&format!("request:{}", token(id)))
+        self.request_token(&token(id))
+    }
+
+    pub(super) fn request_token(&self, token: &str) -> String {
+        self.key(&format!("request:{token}"))
     }
 
     pub(super) fn completion(&self, id: &str, version: i64) -> String {
