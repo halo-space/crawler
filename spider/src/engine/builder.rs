@@ -13,7 +13,7 @@ pub struct Builder<S = scheduler::Memory, D = downloader::Downloader, F = ()> {
     pub(super) spider_factory: F,
     pub(super) registry: middleware::Registry,
     pub(super) schemas: Arc<crate::item::schema::Store>,
-    pub(super) ai: Option<Arc<crate::selector::ai::Client>>,
+    pub(super) ai: Option<Arc<crate::ai::OpenAI>>,
     pub(super) middlewares: Vec<middleware::Spec>,
     pub(super) worker: Worker,
 }
@@ -99,9 +99,9 @@ impl<S, D, F> Builder<S, D, F> {
         self
     }
 
-    /// Selects the Worker-local AI Client used by every parsed Response.
-    pub fn with_ai(mut self, client: crate::selector::ai::Client) -> Self {
-        self.ai = Some(Arc::new(client));
+    /// Selects the Worker-local OpenAI provider used by every parsed Response.
+    pub fn with_ai(mut self, openai: crate::ai::OpenAI) -> Self {
+        self.ai = Some(Arc::new(openai));
         self
     }
 

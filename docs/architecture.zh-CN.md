@@ -29,7 +29,7 @@
 | CSS Healing | 已实现 | 普通 CSS 失败后执行确定性全文档候选评分；需要显式开启 |
 | Regex 与 JSON | 已实现 | Regex 选择器，以及代码模式的 `Response::json<T>()` |
 | AI Selector | 已实现 | 独立的 OpenAI-compatible JSON 对象提取，不属于 CSS Healing fallback |
-| AI 运行时配置 | 已实现 | 通过 `Engine::with_ai` 注入一个 Worker 本地可复用 Client；provider 配置不进入 Rules 或 Trace Snapshot |
+| AI 运行时配置 | 已实现 | 通过 `Engine::with_ai` 注入一个 Worker 本地可复用的 `ai::OpenAI` provider；provider 配置不进入 Rules 或 Trace Snapshot |
 | Middleware | 已实现 | 生命周期 Registry，以及 validate、dedup、rate limit、retry 内置能力 |
 | Item 输出 | 已实现 | Schema 校验、媒体规范化、JSONL 输出和提交失败快照；附件下载计划在 v5 实现 |
 | Worker 能力领取 | 已实现 | Memory 只在当前 Worker 配置的 Request mode 范围内领取并判断待处理工作 |
@@ -563,12 +563,12 @@ Healing 不保存历史节点指纹、不改写或持久化修复后的 selector
 - Regex 返回所有捕获结果；存在第一捕获组时优先返回该组，否则返回完整匹配。
 - `Response::json<T>()` 先经过统一的响应文本解码合同，再反序列化结构化 JSON。
 - AI 是与 CSS、Regex 并列的显式 selector。Rules AI extractor 只包含 `kind: ai` 和非空 `expr`；提示词描述期望的对象字段，provider 配置不属于 DSL。
-- Worker 通过 `Client::new` 或 `Client::from_env` 构造一个 `selector::ai::Client`，再用 `Engine::with_ai` 注入。这个 Client 持有一个可复用的 `async-openai` Client，用于调用 OpenAI-compatible Chat Completion endpoint。
-- 统一 Executor 在解析前把共享 Client 挂到 Response；代码 handler 与 Rules 都调用 `response.ai(expr).await`。Response clone 共享同一个 Client，该字段保持 crate-private、不可序列化，也不会出现在 Response Debug 输出中。
-- `Client::from_env` 在 Worker 装配阶段读取 API Key。provider 配置和密钥都不会进入 Rules、Trace Snapshot、Request、Payload、Scheduler 或 Item。`base_url` 必须是绝对 HTTP(S) base endpoint，不能包含 user information、query 或 fragment。Client Debug 可以标识这个已校验的 endpoint 和 model，但绝不显示密钥；provider 失败也不包含请求 URL 或原始响应正文。
-- 本地 Rules 装配发现 AI extractor 未配置 Client 时直接拒绝；远程恢复的 Rules Trace 在没有 Client 的 Worker 上执行到 AI 时返回明确错误，不转换为 Scheduler 能力或 fallback。
+- 业务层从自己的配置或密钥来源取得 `base_url`、`api_key` 和 `model_name`，构造一个 `ai::OpenAI`，再用 `Engine::with_ai` 注入；crawler 不读取这些环境变量。`ai::OpenAI` 持有一个可复用的 `async-openai` Client，用于调用 OpenAI-compatible Chat Completion endpoint。
+- 统一 Executor 在解析前把共享 provider 挂到 Response；代码 handler 与 Rules 都调用 `response.ai(expr).await`。Response clone 共享同一个 provider，该字段保持 crate-private、不可序列化，也不会出现在 Response Debug 输出中。
+- provider 配置和密钥不会进入 Rules、Trace Snapshot、Request、Payload、Scheduler 或 Item。`base_url` 必须是绝对 HTTP(S) base endpoint，不能包含 user information、query 或 fragment。`OpenAI` Debug 可以标识这个已校验的 endpoint 和 model，但绝不显示密钥；provider 失败也不包含请求 URL 或原始响应正文。
+- 本地 Rules 装配发现 AI extractor 未配置 provider 时直接拒绝；远程恢复的 Rules Trace 在没有 provider 的 Worker 上执行到 AI 时返回明确错误，不转换为 Scheduler 能力或 fallback。
 - 每次调用都设置 `response_format=json_object`，并追加统一的“只返回对象”硬约束；运行时继续拒绝数组、标量、Markdown 和说明文字。Response 正文缓冲区在字符集解码前限制为 1 MiB；包含 `expr`、固定约束和解码后正文的完整 UTF-8 prompt 另行限制为 1 MiB。provider HTTP body 在 HTTP 内容解码后、`async-openai` 完整缓冲前按 4 MiB 流式限制；单次 provider 调用 60 秒超时，不在 `error_parse` 之外增加重试层。
-- Client 会清空 `async-openai` 隐式读取的 organization/project，构造时验证 Authorization header，阻断依赖对原始错误正文的日志输出，并把 provider 失败映射为有界分类，避免响应正文进入 Scheduler 错误存储。
+- `ai::OpenAI` 使用显式的私有 provider 配置，完全不读取 `async-openai` 的环境变量默认值；构造时验证 Authorization header，阻断依赖对原始错误正文的日志输出，并把 provider 失败映射为有界分类，避免响应正文进入 Scheduler 错误存储。
 - AI 可用性不参与按能力领取。凡是能从同一任务池领取 Request、且对应 Rules 可能执行 AI 的 Worker，都必须使用等价的 provider endpoint 和 model；凭据继续属于 Worker 本地配置。
 - AI 不生成 CSS，CSS Healing 也不会把候选交给 AI。
 
@@ -724,8 +724,11 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/selector/css/healing.rs` | Healing 配置与总体流程 |
 | `spider/src/selector/css/healing/reference.rs` | CSS AST 到评分参考结构 |
 | `spider/src/selector/css/healing/score.rs` | DOM 候选遍历、关系判断与评分 |
-| `spider/src/selector/ai.rs` | 校验并持有可复用的 Worker 本地 Client，然后执行一次 JSON 提取 |
-| `spider/src/selector/ai/transport.rs` | 执行单次 provider 请求，并在依赖缓冲前限制 HTTP 解码后的正文 |
+| `spider/src/ai.rs` | AI 运行时公共入口并导出 `OpenAI` |
+| `spider/src/ai/openai.rs` | 校验 provider 配置、持有可复用实例并执行模型调用 |
+| `spider/src/ai/transport.rs` | 执行单次 provider 请求，并在依赖缓冲前限制 HTTP 解码后的正文 |
+| `spider/src/error/ai.rs` | AI provider 构造与调用错误 |
+| `spider/src/selector/ai.rs` | 从 Response 构造 prompt，并执行 JSON 对象提取合同 |
 | `macros/src/spider/model.rs` | 解析用户 Spider 结构和方法模型 |
 | `macros/src/spider/check.rs` | 宏输入约束校验 |
 | `macros/src/spider/bind.rs` | 生成 node 注册与 handler 绑定代码 |
@@ -743,7 +746,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 ### 版本边界
 
 - v3：按 Worker 能力范围原子领取 Request；确定性响应字符集解码，以及基于 fixture 的更完整页面回归。这些合同均已实现。
-- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler，以及 Engine 级 Worker 本地 AI Client 注入均已实现。API、MySQL Scheduler、Master control-plane、可审计 Item 快照回放和 `fasttrace` 运行期链路追踪仍是独立工作。这些实现依赖核心 Scheduler 合同，不依赖 Browser 交付。
+- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler，以及 Engine 级 Worker 本地 `ai::OpenAI` provider 注入均已实现。API、MySQL Scheduler、Master control-plane、可审计 Item 快照回放和 `fasttrace` 运行期链路追踪仍是独立工作。这些实现依赖核心 Scheduler 合同，不依赖 Browser 交付。
 - v5：真实 Browser Downloader、HTTP/browser 混合端到端 Engine 验收，以及独立的 Item 附件下载。附件下载和 Browser 下载是互不依赖的两个交付项；按能力领取的语义仍属于 v3 合同。
 
 这些能力必须沿用当前核心合同：

@@ -115,22 +115,25 @@ provider 配置属于 Worker 本地运行配置，只构造一次并由代码模
 `response.ai(expr).await` 复用：
 
 ```rust
-let client = selector::ai::Client::from_env(
+use spider::{ai, engine};
+
+let openai = ai::OpenAI::new(
     "https://api.example.com/v1",
-    "OPENAI_API_KEY",
+    api_key,
     "model-name",
 )?;
 let mut engine = engine::Engine::new()
-    .with_ai(client)
+    .with_ai(openai)
     .with_rules(rules)
     .with_spider(Newspaper::new())
     .build();
 ```
 
-`Client::from_env` 在 Worker 装配时读取密钥；provider 配置和密钥都不会进入 Rules 或 Trace
-Snapshot。`base_url` 必须是绝对 HTTP(S) 端点，不能内嵌凭据，也不能包含 query 或 fragment。
-凡是能从同一个任务池领取 AI 工作的 Worker，都必须配置等价的 provider endpoint 和 model。
-AI 不生成 CSS，也不会被 CSS Healing 自动调用。请求会同时设置
+业务层负责从环境变量、配置中心或其他密钥来源取得 `base_url`、`api_key` 和 `model_name`，再构造
+`ai::OpenAI`；crawler 不负责读取这些值。provider 配置和密钥不会进入 Rules 或 Trace Snapshot。
+`base_url` 必须是绝对 HTTP(S) 端点，不能内嵌凭据，也不能包含 query 或 fragment。凡是能从同一个
+任务池领取 AI 工作的 Worker，都必须配置等价的 provider endpoint 和 model。AI 不生成 CSS，也
+不会被 CSS Healing 自动调用。请求会同时设置
 `response_format=json_object`；数组、标量、Markdown 和说明文字在返回后仍会被拒绝。Response
 正文缓冲区在字符集解码前限制为 1 MiB；包含 `expr`、固定约束和解码后正文的完整 UTF-8 prompt
 另行限制为 1 MiB。provider HTTP body 在 HTTP 内容解码后、`async-openai` 完整缓冲前限制为
@@ -280,7 +283,7 @@ Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker I
 必须和领取原子完成。真实 Browser Downloader 与 HTTP/browser 混合端到端执行属于 v5；可选的
 API、MySQL Scheduler、Master 控制面、Item 回放和运行期链路追踪仍属于后续 v4 工作，且不依赖
 Browser 实现。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用
-Client，Rules 只保留提示词。Redis 已通过共享 Scheduler 一致性测试。
+的 `ai::OpenAI` provider，Rules 只保留提示词。Redis 已通过共享 Scheduler 一致性测试。
 Engine 默认使用 `worker-1` 和 HTTP 模式；`with_worker_id(...)` 与 `with_modes(...)` 可替换这些启动时冻结的值，
 空 Worker ID 或空 mode 集合会在执行前被拒绝。
 

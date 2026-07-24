@@ -112,24 +112,28 @@ Provider configuration is Worker-local and is constructed once, then reused by c
 selection through `response.ai(expr).await`:
 
 ```rust
-let client = selector::ai::Client::from_env(
+use spider::{ai, engine};
+
+let openai = ai::OpenAI::new(
     "https://api.example.com/v1",
-    "OPENAI_API_KEY",
+    api_key,
     "model-name",
 )?;
 let mut engine = engine::Engine::new()
-    .with_ai(client)
+    .with_ai(openai)
     .with_rules(rules)
     .with_spider(Newspaper::new())
     .build();
 ```
 
-`Client::from_env` reads the secret while the Worker is assembled; neither provider settings nor
-credentials enter Rules or Trace snapshots. `base_url` must be an absolute HTTP(S) endpoint without
-embedded credentials, a query, or a fragment. Every Worker that can claim AI work from the same task
-pool must use an equivalent provider endpoint and model. AI does not generate CSS and is not invoked
-by CSS healing. The request also sets `response_format=json_object`; arrays, scalars, Markdown, and
-prose are rejected after the response is received. The Response body buffer is limited to 1 MiB
+The application obtains `base_url`, `api_key`, and `model_name` from its chosen configuration or
+secret source before constructing `ai::OpenAI`; crawler does not read those values from the
+environment. Provider settings and credentials never enter Rules or Trace snapshots. `base_url`
+must be an absolute HTTP(S) endpoint without embedded credentials, a query, or a fragment. Every
+Worker that can claim AI work from the same task pool must use an equivalent provider endpoint and
+model. AI does not generate CSS and is not invoked by CSS healing. The request also sets
+`response_format=json_object`; arrays, scalars, Markdown, and prose are rejected after the response
+is received. The Response body buffer is limited to 1 MiB
 before character-set decoding. The complete UTF-8 prompt, including `expr`, the fixed constraint,
 and decoded content, is independently limited to 1 MiB. The provider HTTP body is limited to 4 MiB
 after HTTP content decoding and before `async-openai` buffers it. Each provider attempt has a
@@ -272,8 +276,8 @@ The Scheduler contract receives the Engine-owned Worker ID and supported downloa
 HTTP/browser end-to-end execution remain v5 work. Redis is the available v4 persistent Scheduler;
 API and MySQL Schedulers, the Master control plane, Item replay, and runtime tracing remain separate
 v4 work and do not depend on Browser implementation. AI provider configuration is already
-Worker-local: one reusable Client is injected through `Engine::with_ai`, while Rules retain only the
-prompt. Redis is covered by the shared Scheduler conformance suite.
+Worker-local: one reusable `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules
+retain only the prompt. Redis is covered by the shared Scheduler conformance suite.
 Engine defaults to `worker-1` and HTTP mode. `with_worker_id(...)` and `with_modes(...)` replace
 those frozen startup values; an empty Worker ID or mode set is rejected before execution.
 

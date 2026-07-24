@@ -116,10 +116,10 @@ mod tests {
     }
 
     fn response_with_ai(body: &str, output: &str) -> net::Response {
-        let (base_url, _) = crate::selector::ai::test_support::server(Some(output));
-        let client = selector::ai::Client::new(base_url, "secret", "test-model").unwrap();
+        let (base_url, _) = crate::ai::test_support::server(Some(output));
+        let openai = crate::ai::OpenAI::new(base_url, "secret", "test-model").unwrap();
         let mut response = response(body);
-        response.attach_ai(Some(std::sync::Arc::new(client)));
+        response.attach_ai(Some(std::sync::Arc::new(openai)));
         response
     }
 
@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ai_extractor_without_client_returns_an_explicit_error() {
+    async fn ai_extractor_without_provider_returns_an_explicit_error() {
         let spec = graph::rules::Parse {
             fields: IndexMap::from([(
                 "title".to_string(),
@@ -270,7 +270,7 @@ mod tests {
 
         let error = parse(&spec, &response("<h1>Rust</h1>")).await.unwrap_err();
 
-        assert!(error.to_string().contains("AI client is not configured"));
+        assert!(error.to_string().contains("AI provider is not configured"));
     }
 
     #[test]

@@ -5,7 +5,8 @@ use bytes::Bytes;
 use spider::scheduler::{Init, Scheduler};
 use spider::{downloader, engine, net, payload};
 
-mod support;
+#[path = "support/ai.rs"]
+mod ai;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Claim {
@@ -526,11 +527,11 @@ async fn remote_scheduler_consumes_existing_requests_without_creating_a_seed() {
 }
 
 #[tokio::test]
-async fn remote_rules_trace_uses_the_worker_ai_client_without_persisting_it() {
+async fn remote_rules_trace_uses_worker_openai_without_persisting_it() {
     let config = ai_rules();
     let scheduler = remote_rules(&config).await;
-    let provider = support::ai::Server::start([r#"{"title":"Remote Rust"}"#]);
-    let client = spider::selector::ai::Client::new(
+    let provider = ai::Server::start([r#"{"title":"Remote Rust"}"#]);
+    let openai = spider::ai::OpenAI::new(
         provider.base_url(),
         "provider-sentinel-secret",
         "provider-sentinel-model",
@@ -547,7 +548,7 @@ async fn remote_rules_trace_uses_the_worker_ai_client_without_persisting_it() {
     }
     let mut runtime = engine::Builder::new()
         .with_scheduler(scheduler)
-        .with_ai(client)
+        .with_ai(openai)
         .with_downloader(ai_downloader())
         .with_spider(EmptySpider::new())
         .build();
@@ -571,7 +572,7 @@ async fn remote_rules_trace_uses_the_worker_ai_client_without_persisting_it() {
 }
 
 #[tokio::test]
-async fn remote_rules_trace_without_a_worker_ai_client_records_the_failure() {
+async fn remote_rules_trace_without_worker_openai_records_the_failure() {
     let scheduler = remote_rules(&ai_rules()).await;
     let mut runtime = engine::Builder::new()
         .with_scheduler(scheduler)
@@ -590,7 +591,7 @@ async fn remote_rules_trace_without_a_worker_ai_client_records_the_failure() {
             .inner
             .errors()
             .iter()
-            .any(|error| error.contains("AI client is not configured"))
+            .any(|error| error.contains("AI provider is not configured"))
     );
 }
 

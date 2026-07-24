@@ -36,6 +36,7 @@ url = "2"
 uuid = { version = "1", features = ["v7"] }
 validator = { git = "https://github.com/halo-space/validator.git", rev = "2b3128a" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "brotli", "deflate", "stream"] }
+secrecy = "0.10"
 cookie_store = { version = "0.22.1", default-features = false, features = ["serde"] }
 psl = "2.1.219"
 scrape-core = "0.2.9"

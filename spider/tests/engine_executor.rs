@@ -9,7 +9,8 @@ use spider::middleware::{BoxFuture, Middleware, Next, Spec};
 use spider::scheduler::{Init, Scheduler};
 use spider::{downloader, engine, net, payload};
 
-mod support;
+#[path = "support/ai.rs"]
+mod ai;
 
 #[macros::spider]
 struct RulesSpider;
@@ -375,7 +376,7 @@ graph:
     .unwrap()
 }
 
-fn assert_ai_request(request: &support::ai::Request) {
+fn assert_ai_request(request: &ai::Request) {
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/v1/chat/completions");
     assert_eq!(
@@ -386,8 +387,8 @@ fn assert_ai_request(request: &support::ai::Request) {
 }
 
 #[test]
-#[should_panic(expected = "Rules config uses an AI extractor but Engine has no AI client")]
-fn rules_ai_without_a_client_panics_during_build() {
+#[should_panic(expected = "Rules config uses an AI extractor but Engine has no AI provider")]
+fn rules_ai_without_a_provider_panics_during_build() {
     let _engine = engine::Builder::new()
         .with_rules(ai_rules())
         .with_spider(RulesSpider::new())
@@ -405,15 +406,14 @@ fn rules_trace_does_not_persist_ai_provider_configuration() {
 }
 
 #[tokio::test]
-async fn code_parse_retry_keeps_ai_client_after_scheduler_replacement() {
-    let provider = support::ai::Server::start(["not JSON", r#"{"title":"Rust"}"#]);
-    let client =
-        spider::selector::ai::Client::new(provider.base_url(), "engine-secret", "engine-model")
-            .unwrap();
+async fn code_parse_retry_keeps_openai_after_scheduler_replacement() {
+    let provider = ai::Server::start(["not JSON", r#"{"title":"Rust"}"#]);
+    let openai =
+        spider::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
     let value = Arc::new(Mutex::new(None));
     let scheduler = LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new())));
     let mut engine = engine::Builder::new()
-        .with_ai(client)
+        .with_ai(openai)
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(AiCodeSpider::new(value.clone()))
@@ -432,13 +432,12 @@ async fn code_parse_retry_keeps_ai_client_after_scheduler_replacement() {
 }
 
 #[tokio::test]
-async fn rules_code_and_declarative_parsers_share_the_engine_ai_client() {
-    let provider = support::ai::Server::start([r#"{"source":"code"}"#, r#"{"source":"rules"}"#]);
-    let client =
-        spider::selector::ai::Client::new(provider.base_url(), "engine-secret", "engine-model")
-            .unwrap();
+async fn rules_code_and_declarative_parsers_share_engine_openai() {
+    let provider = ai::Server::start([r#"{"source":"code"}"#, r#"{"source":"rules"}"#]);
+    let openai =
+        spider::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
     let mut engine = engine::Builder::new()
-        .with_ai(client)
+        .with_ai(openai)
         .with_rules(ai_rules())
         .with_spider(AiRulesSpider::new())
         .with_downloader(TestDownload)
@@ -453,15 +452,14 @@ async fn rules_code_and_declarative_parsers_share_the_engine_ai_client() {
 }
 
 #[tokio::test]
-async fn rules_builder_keeps_ai_client_after_scheduler_replacement() {
-    let provider = support::ai::Server::start([r#"{"title":"Rust"}"#]);
-    let client =
-        spider::selector::ai::Client::new(provider.base_url(), "engine-secret", "engine-model")
-            .unwrap();
+async fn rules_builder_keeps_openai_after_scheduler_replacement() {
+    let provider = ai::Server::start([r#"{"title":"Rust"}"#]);
+    let openai =
+        spider::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
     let scheduler = LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new())));
     let mut engine = engine::Builder::new()
         .with_rules(ai_rules())
-        .with_ai(client)
+        .with_ai(openai)
         .with_scheduler(scheduler)
         .with_spider(RulesSpider::new())
         .with_downloader(TestDownload)

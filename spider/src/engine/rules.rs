@@ -22,7 +22,7 @@ pub struct Builder<S, D, F> {
     pub(super) config: config::Config,
     pub(super) registry: middleware::Registry,
     pub(super) schemas: Arc<crate::item::schema::Store>,
-    pub(super) ai: Option<Arc<crate::selector::ai::Client>>,
+    pub(super) ai: Option<Arc<crate::ai::OpenAI>>,
     pub(super) middlewares: Vec<middleware::Spec>,
     pub(super) worker: super::worker::Worker,
 }
@@ -75,9 +75,9 @@ impl<S, D, F> Builder<S, D, F> {
         self
     }
 
-    /// Selects the Worker-local AI Client used by every parsed Response.
-    pub fn with_ai(mut self, client: crate::selector::ai::Client) -> Self {
-        self.ai = Some(Arc::new(client));
+    /// Selects the Worker-local OpenAI provider used by every parsed Response.
+    pub fn with_ai(mut self, openai: crate::ai::OpenAI) -> Self {
+        self.ai = Some(Arc::new(openai));
         self
     }
 
@@ -130,7 +130,7 @@ where
     }
 }
 
-fn validate_ai(config: &config::Config, client: Option<&crate::selector::ai::Client>) {
+fn validate_ai(config: &config::Config, openai: Option<&crate::ai::OpenAI>) {
     let uses_ai = config.graph.nodes.values().any(|node| {
         node.parse.fields.values().any(|field| {
             field
@@ -140,8 +140,8 @@ fn validate_ai(config: &config::Config, client: Option<&crate::selector::ai::Cli
         })
     });
     assert!(
-        !uses_ai || client.is_some(),
-        "Rules config uses an AI extractor but Engine has no AI client"
+        !uses_ai || openai.is_some(),
+        "Rules config uses an AI extractor but Engine has no AI provider"
     );
 }
 

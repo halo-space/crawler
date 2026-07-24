@@ -22,6 +22,7 @@ psl = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 scrape-core = { workspace = true }
+secrecy = { workspace = true }
 selectors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

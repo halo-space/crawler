@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod config;
 pub mod downloader;
 pub mod graph;
@@ -15,6 +16,9 @@ pub mod stats;
 /// are converted into this type when they enter the shared runtime flow.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("ai failed: {0}")]
+    Ai(#[from] ai::Error),
+
     #[error("download failed: {0}")]
     Download(#[from] downloader::Error),
 

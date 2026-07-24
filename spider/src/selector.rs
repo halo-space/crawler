@@ -1,4 +1,4 @@
-pub mod ai;
+pub(crate) mod ai;
 pub mod css;
 pub mod json;
 pub mod regex;

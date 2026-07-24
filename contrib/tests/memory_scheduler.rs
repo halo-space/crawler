@@ -1,4 +1,5 @@
-mod support;
+#[path = "support/scheduler/conformance.rs"]
+mod conformance;
 
 use spider::Memory;
 use spider::scheduler::Lease;
@@ -16,17 +17,13 @@ fn memory() -> Memory {
 }
 
 fn memory_with_short_lease() -> Memory {
-    let (timeout, refresh) = support::scheduler::Timing::memory().lease();
+    let (timeout, refresh) = conformance::Timing::memory().lease();
     let lease = Lease::new(timeout, refresh).unwrap();
     memory().with_lease(lease)
 }
 
 #[tokio::test]
 async fn conforms_to_the_scheduler_contract() {
-    support::scheduler::run(memory, true, support::scheduler::Timing::memory()).await;
-    support::scheduler::lease(
-        memory_with_short_lease(),
-        support::scheduler::Timing::memory(),
-    )
-    .await;
+    conformance::run(memory, true, conformance::Timing::memory()).await;
+    conformance::lease(memory_with_short_lease(), conformance::Timing::memory()).await;
 }

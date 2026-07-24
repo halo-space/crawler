@@ -9,14 +9,14 @@ use crate::{net, spider};
 pub struct Executor<P> {
     spider: Arc<P>,
     schemas: Arc<crate::item::schema::Store>,
-    ai: Option<Arc<crate::selector::ai::Client>>,
+    ai: Option<Arc<crate::ai::OpenAI>>,
 }
 
 impl<P> Executor<P> {
     pub(crate) fn new(
         spider: Arc<P>,
         schemas: Arc<crate::item::schema::Store>,
-        ai: Option<Arc<crate::selector::ai::Client>>,
+        ai: Option<Arc<crate::ai::OpenAI>>,
     ) -> Self {
         Self {
             spider,

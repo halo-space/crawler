@@ -29,7 +29,7 @@ The workspace contains four crates:
 | CSS Healing | Implemented | Deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
 | Regex and JSON | Implemented | Regex selection and code-mode `Response::json<T>()` |
 | AI Selector | Implemented | Explicit OpenAI-compatible JSON-object extraction, independent of CSS Healing |
-| AI runtime configuration | Implemented | One reusable Worker-local Client is injected with `Engine::with_ai`; provider configuration does not enter Rules or Trace snapshots |
+| AI runtime configuration | Implemented | One reusable Worker-local `ai::OpenAI` provider is injected with `Engine::with_ai`; provider configuration does not enter Rules or Trace snapshots |
 | Middleware | Implemented | Lifecycle Registry plus built-in validate, dedup, rate limit, and retry capabilities |
 | Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots; attachment download is planned for v5 |
 | Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
@@ -605,12 +605,12 @@ Healing stores no historical fingerprints, does not rewrite or persist a repaire
 - Regex returns every capture. It uses capture group one when present, otherwise the full match.
 - `Response::json<T>()` follows the shared response-text decoding contract before deserialization.
 - AI is an explicit selector alongside CSS and Regex. A Rules AI extractor contains only `kind: ai` and its non-empty `expr`; the prompt describes the expected object fields, while provider configuration is not part of the DSL.
-- The Worker constructs one `selector::ai::Client` through `Client::new` or `Client::from_env` and injects it through `Engine::with_ai`. The Client owns one reusable `async-openai` client for an OpenAI-compatible Chat Completion endpoint.
-- The unified Executor attaches the shared Client to each Response immediately before parsing. Code handlers and Rules both call `response.ai(expr).await`; Response clones share the same Client, which is crate-private, non-serializable, and omitted from Response Debug output.
-- `Client::from_env` resolves the API key during Worker assembly. Provider settings and credentials never enter Rules, Trace Snapshot, Request, Payload, Scheduler, or Item data. `base_url` must be an absolute HTTP(S) base endpoint without user information, a query, or a fragment. Client Debug may identify that validated endpoint and model, but never the key; provider failures omit request URLs and raw response content.
-- Local Rules assembly rejects an AI extractor without a configured Client. A remotely restored Rules Trace fails explicitly when it reaches AI on a Worker without a Client; this is not converted into a Scheduler capability or fallback.
+- The application resolves `base_url`, `api_key`, and `model_name` from its chosen configuration or secret source, constructs one `ai::OpenAI`, and injects it through `Engine::with_ai`. Crawler does not read these values from environment variables. `ai::OpenAI` owns one reusable `async-openai` client for an OpenAI-compatible Chat Completion endpoint.
+- The unified Executor attaches the shared provider to each Response immediately before parsing. Code handlers and Rules both call `response.ai(expr).await`; Response clones share it through a crate-private field. Provider configuration is non-serializable and omitted from Response Debug output.
+- Provider settings and credentials never enter Rules, Trace Snapshot, Request, Payload, Scheduler, or Item data. `base_url` must be an absolute HTTP(S) base endpoint without user information, a query, or a fragment. `OpenAI` Debug may identify that validated endpoint and model, but never the key; provider failures omit request URLs and raw response content.
+- Local Rules assembly rejects an AI extractor without a configured provider. A remotely restored Rules Trace fails explicitly when it reaches AI on a Worker without a provider; this is not converted into a Scheduler capability or fallback.
 - Every call requests `response_format=json_object` and appends the same mandatory object-only output instruction. Runtime parsing rejects arrays, scalars, Markdown, and prose. The Response body buffer is limited to 1 MiB before character-set decoding; the complete UTF-8 prompt, including `expr`, the fixed constraint, and decoded content, independently must fit within 1 MiB. The provider HTTP body is streamed through a 4 MiB bound after HTTP content decoding and before `async-openai` can buffer it. A provider attempt times out after 60 seconds and does not add a retry layer outside `error_parse`.
-- The Client clears `async-openai` organization/project defaults, validates the Authorization header during construction, suppresses dependency logging of raw error bodies, and maps provider failures to bounded classifications so response content cannot enter Scheduler error storage.
+- `ai::OpenAI` uses an explicit private provider configuration that never reads `async-openai` environment defaults, validates the Authorization header during construction, suppresses dependency logging of raw error bodies, and maps provider failures to bounded classifications so response content cannot enter Scheduler error storage.
 - AI availability is not part of capability-aware claiming. Every Worker that can claim Requests from the same task pool whose Rules can reach AI must use an equivalent provider endpoint and model; credentials remain Worker-local.
 - AI does not generate CSS, and CSS Healing never delegates candidates to AI.
 
@@ -770,8 +770,11 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/selector/css/healing.rs` | Healing configuration and orchestration |
 | `spider/src/selector/css/healing/reference.rs` | CSS AST to scoring reference model |
 | `spider/src/selector/css/healing/score.rs` | DOM candidate traversal, relationships, and scoring |
-| `spider/src/selector/ai.rs` | Validate and own the reusable Worker-local Client, then perform one JSON extraction |
-| `spider/src/selector/ai/transport.rs` | Execute one provider request and bound its HTTP-decoded body before dependency buffering |
+| `spider/src/ai.rs` | Public AI runtime entry and `OpenAI` export |
+| `spider/src/ai/openai.rs` | Validate provider configuration, own the reusable provider and execute model calls |
+| `spider/src/ai/transport.rs` | Execute one provider request and bound its HTTP-decoded body before dependency buffering |
+| `spider/src/error/ai.rs` | AI provider construction and call errors |
+| `spider/src/selector/ai.rs` | Build prompts from Responses and enforce the JSON-object extraction contract |
 | `macros/src/spider/model.rs` | Parse the user Spider model and methods |
 | `macros/src/spider/check.rs` | Validate macro input constraints |
 | `macros/src/spider/bind.rs` | Generate node registration and handler bindings |
@@ -789,7 +792,7 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 ### Release Boundaries
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
-- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, and Engine-level Worker-local AI Client injection are implemented. API and MySQL Schedulers, the Master control plane, auditable Item snapshot replay, and `fasttrace` runtime tracing remain separate work. These implementations depend on the core Scheduler contract, not on Browser delivery.
+- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, and Engine-level Worker-local `ai::OpenAI` provider injection are implemented. API and MySQL Schedulers, the Master control plane, auditable Item snapshot replay, and `fasttrace` runtime tracing remain separate work. These implementations depend on the core Scheduler contract, not on Browser delivery.
 - v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance, and a separate Item attachment downloader. Attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:

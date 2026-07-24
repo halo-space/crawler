@@ -1,6 +1,7 @@
+#[path = "support/scheduler/conformance.rs"]
+mod conformance;
 #[path = "support/redis.rs"]
 mod redis_fixture;
-mod support;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,7 +9,7 @@ use std::time::Duration;
 use contrib::scheduler::redis::Redis;
 use spider::scheduler::Lease;
 
-const TIMING: support::scheduler::Timing = support::scheduler::Timing::new(
+const TIMING: conformance::Timing = conformance::Timing::new(
     Duration::from_secs(2),
     Duration::from_millis(250),
     Duration::from_millis(300),
@@ -29,7 +30,7 @@ async fn conforms_to_the_scheduler_contract() {
         let url = url.clone();
         let namespaces = namespaces.clone();
         async move {
-            support::scheduler::run(
+            conformance::run(
                 {
                     let url = url.clone();
                     let namespaces = namespaces.clone();
@@ -39,7 +40,7 @@ async fn conforms_to_the_scheduler_contract() {
                 TIMING,
             )
             .await;
-            support::scheduler::lease(scheduler(&url, &namespaces, lease), TIMING).await;
+            conformance::lease(scheduler(&url, &namespaces, lease), TIMING).await;
         }
     })
     .await;

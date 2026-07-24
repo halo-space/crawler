@@ -1,5 +1,6 @@
 #![allow(clippy::module_inception)]
 
+pub mod ai;
 pub mod config;
 pub mod downloader;
 pub mod engine;

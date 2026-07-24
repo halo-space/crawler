@@ -5,9 +5,9 @@ use std::fmt;
 use std::sync::Arc;
 use url::Url;
 
-use crate::middleware;
 use crate::net::{Cookies, Error, Headers, Request, StatusCode};
 use crate::selector;
+use crate::{ai, middleware};
 
 mod encoding;
 
@@ -34,7 +34,7 @@ pub struct Response {
     pub vals: HashMap<String, Value>,
     pub kwargs: HashMap<String, Value>,
     pub middlewares: Vec<middleware::Spec>,
-    pub(crate) ai: Option<Arc<selector::ai::Client>>,
+    pub(crate) ai: Option<Arc<ai::OpenAI>>,
 }
 
 impl fmt::Debug for Response {
@@ -102,21 +102,13 @@ impl Response {
         selector::css::parse(self)
     }
 
-    /// Extracts one JSON object through the AI Client selected by the Engine.
+    /// Extracts one JSON object through the OpenAI provider selected by the Engine.
     pub async fn ai(&self, expr: &str) -> Result<Value, selector::Error> {
-        let expr = expr.trim();
-        if expr.is_empty() {
-            return Err(selector::Error::Ai("prompt cannot be empty".to_string()));
-        }
-        let client = self
-            .ai
-            .as_deref()
-            .ok_or_else(|| selector::Error::Ai("AI client is not configured".to_string()))?;
-        client.select(self, expr).await
+        selector::ai::select(self.ai.as_deref(), self, expr).await
     }
 
-    pub(crate) fn attach_ai(&mut self, client: Option<Arc<selector::ai::Client>>) {
-        self.ai = client;
+    pub(crate) fn attach_ai(&mut self, openai: Option<Arc<ai::OpenAI>>) {
+        self.ai = openai;
     }
 
     pub fn urljoin(&self, url: &str) -> Result<String, Error> {
@@ -446,7 +438,7 @@ mod tests {
         );
         assert_eq!(
             response.ai("extract data").await.unwrap_err(),
-            selector::Error::Ai("AI client is not configured".to_string())
+            selector::Error::Ai("AI provider is not configured".to_string())
         );
     }
 
@@ -491,9 +483,9 @@ mod tests {
                 .args(serde_json::json!({"api_key": "middleware-secret"})),
         );
         response.attach_ai(Some(Arc::new(
-            selector::ai::Client::new(
+            ai::OpenAI::new(
                 "https://provider.example/v1",
-                "ai-client-secret",
+                "ai-provider-secret",
                 "model-secret",
             )
             .unwrap(),
@@ -520,7 +512,7 @@ mod tests {
             "middleware-secret",
             "proxy-user",
             "proxy-password",
-            "ai-client-secret",
+            "ai-provider-secret",
             "model-secret",
             "provider.example",
         ] {
