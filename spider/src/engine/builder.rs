@@ -13,6 +13,7 @@ pub struct Builder<S = scheduler::Memory, D = downloader::Downloader, F = ()> {
     pub(super) spider_factory: F,
     pub(super) registry: middleware::Registry,
     pub(super) schemas: Arc<crate::item::schema::Store>,
+    pub(super) ai: Option<Arc<crate::selector::ai::Client>>,
     pub(super) middlewares: Vec<middleware::Spec>,
     pub(super) worker: Worker,
 }
@@ -26,6 +27,7 @@ impl Builder<scheduler::Memory, downloader::Downloader, ()> {
             spider_factory: (),
             registry: middleware::Registry::with_schemas(schemas.clone()),
             schemas,
+            ai: None,
             middlewares: Vec::new(),
             worker: Worker::default(),
         }
@@ -46,6 +48,7 @@ impl<S, D, F> Builder<S, D, F> {
             spider_factory: self.spider_factory,
             registry: self.registry,
             schemas: self.schemas,
+            ai: self.ai,
             middlewares: self.middlewares,
             worker: self.worker,
         }
@@ -58,6 +61,7 @@ impl<S, D, F> Builder<S, D, F> {
             spider_factory: self.spider_factory,
             registry: self.registry,
             schemas: self.schemas,
+            ai: self.ai,
             middlewares: self.middlewares,
             worker: self.worker,
         }
@@ -70,6 +74,7 @@ impl<S, D, F> Builder<S, D, F> {
             spider_factory,
             registry: self.registry,
             schemas: self.schemas,
+            ai: self.ai,
             middlewares: self.middlewares,
             worker: self.worker,
         }
@@ -83,6 +88,7 @@ impl<S, D, F> Builder<S, D, F> {
             config,
             registry: self.registry,
             schemas: self.schemas,
+            ai: self.ai,
             middlewares: self.middlewares,
             worker: self.worker,
         }
@@ -90,6 +96,12 @@ impl<S, D, F> Builder<S, D, F> {
 
     pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
         self.worker.set_id(worker_id);
+        self
+    }
+
+    /// Selects the Worker-local AI Client used by every parsed Response.
+    pub fn with_ai(mut self, client: crate::selector::ai::Client) -> Self {
+        self.ai = Some(Arc::new(client));
         self
     }
 
@@ -128,7 +140,7 @@ where
             spider.tx().set_trace(task_id.clone(), trace_id.clone());
             (task_id, trace_id)
         });
-        let executor = engine::executor::Executor::new(Arc::new(spider), self.schemas);
+        let executor = engine::executor::Executor::new(Arc::new(spider), self.schemas, self.ai);
 
         Runtime::new(
             self.scheduler,

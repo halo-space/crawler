@@ -5,6 +5,8 @@ use bytes::Bytes;
 use spider::scheduler::{Init, Scheduler};
 use spider::{downloader, engine, net, payload};
 
+mod support;
+
 #[derive(Debug, PartialEq, Eq)]
 struct Claim {
     limit: usize,
@@ -192,21 +194,9 @@ impl downloader::Download for SlowDownload {
         self.max_active.fetch_max(active, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(75)).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
-        let url = request.url.clone();
-        Ok(net::Response {
-            vals: request.vals.clone(),
-            kwargs: request.kwargs.clone(),
-            middlewares: request.middlewares.clone(),
-            request,
-            url,
-            status: net::StatusCode(200),
-            reason: Some("OK".to_string()),
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Bytes::new(),
-        })
+        let mut response = net::Response::new(request, net::StatusCode(200), Bytes::new());
+        response.reason = Some("OK".to_string());
+        Ok(response)
     }
 }
 
@@ -253,6 +243,53 @@ fn requests(count: usize) -> Vec<net::Request> {
     (0..count)
         .map(|index| net::Request::follow(format!("https://example.com/{index}")).unwrap())
         .collect()
+}
+
+const REMOTE_AI_TRACE: &str = "remote-ai-trace";
+
+fn ai_rules() -> spider::config::Config {
+    spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: remote-ai-rules
+  start: [{node: index, url: https://example.com/article}]
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          article:
+            extractors:
+              - kind: ai
+                expr: extract the article as JSON
+  edges: []
+"#,
+    )
+    .unwrap()
+}
+
+async fn remote_rules(config: &spider::config::Config) -> ClaimScheduler {
+    let scheduler = ClaimScheduler::remote();
+    let task_id = config.spider.name.clone();
+    let requests = config
+        .initial_requests(task_id.clone(), REMOTE_AI_TRACE, Default::default())
+        .unwrap();
+    scheduler
+        .init(
+            REMOTE_AI_TRACE.to_string(),
+            spider::trace::Snapshot::rules(task_id, config.clone()),
+            requests,
+        )
+        .await
+        .unwrap();
+    scheduler
+}
+
+fn ai_downloader() -> SlowDownload {
+    SlowDownload {
+        active: Arc::new(AtomicUsize::new(0)),
+        max_active: Arc::new(AtomicUsize::new(0)),
+    }
 }
 
 #[tokio::test]
@@ -486,6 +523,75 @@ async fn remote_scheduler_consumes_existing_requests_without_creating_a_seed() {
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.scheduler().inner.trace_len(), 0);
     assert_eq!(runtime.scheduler().inner.done_len(), 1);
+}
+
+#[tokio::test]
+async fn remote_rules_trace_uses_the_worker_ai_client_without_persisting_it() {
+    let config = ai_rules();
+    let scheduler = remote_rules(&config).await;
+    let provider = support::ai::Server::start([r#"{"title":"Remote Rust"}"#]);
+    let client = spider::selector::ai::Client::new(
+        provider.base_url(),
+        "provider-sentinel-secret",
+        "provider-sentinel-model",
+    )
+    .unwrap();
+    let trace = scheduler.trace(REMOTE_AI_TRACE).await.unwrap().unwrap();
+    let encoded = serde_json::to_string(&trace).unwrap();
+    for sentinel in [
+        provider.base_url(),
+        "provider-sentinel-secret",
+        "provider-sentinel-model",
+    ] {
+        assert!(!encoded.contains(sentinel), "{sentinel}");
+    }
+    let mut runtime = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_ai(client)
+        .with_downloader(ai_downloader())
+        .with_spider(EmptySpider::new())
+        .build();
+
+    runtime.start().await.unwrap();
+
+    assert_eq!(runtime.scheduler().inner.done_len(), 1);
+    assert_eq!(runtime.scheduler().inner.failed_len(), 0);
+    let requests = provider.finish();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/v1/chat/completions");
+    assert_eq!(
+        requests[0].headers.get("authorization").map(String::as_str),
+        Some("Bearer provider-sentinel-secret")
+    );
+    assert_eq!(
+        requests[0].body["model"],
+        serde_json::Value::from("provider-sentinel-model")
+    );
+}
+
+#[tokio::test]
+async fn remote_rules_trace_without_a_worker_ai_client_records_the_failure() {
+    let scheduler = remote_rules(&ai_rules()).await;
+    let mut runtime = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(ai_downloader())
+        .with_spider(EmptySpider::new())
+        .build();
+
+    runtime.start().await.unwrap();
+
+    assert_eq!(runtime.scheduler().inner.done_len(), 0);
+    assert_eq!(runtime.scheduler().inner.failed_len(), 1);
+    assert_eq!(runtime.scheduler().inner.processing_len(), 0);
+    assert!(
+        runtime
+            .scheduler()
+            .inner
+            .errors()
+            .iter()
+            .any(|error| error.contains("AI client is not configured"))
+    );
 }
 
 #[tokio::test]

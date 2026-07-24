@@ -218,21 +218,7 @@ impl downloader::Download for FlakyDownload {
 }
 
 fn response(request: net::Request, status: u16) -> net::Response {
-    let url = request.url.clone();
-    net::Response {
-        vals: request.vals.clone(),
-        kwargs: request.kwargs.clone(),
-        middlewares: request.middlewares.clone(),
-        request,
-        url,
-        status: net::StatusCode(status),
-        reason: None,
-        version: net::HttpVersion::Http11,
-        redirects: Vec::new(),
-        headers: net::Headers::new(),
-        cookies: net::Cookies::new(),
-        body: Bytes::new(),
-    }
+    net::Response::new(request, net::StatusCode(status), Bytes::new())
 }
 
 #[derive(serde::Serialize)]

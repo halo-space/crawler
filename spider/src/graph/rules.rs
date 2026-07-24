@@ -35,7 +35,6 @@ pub enum Extractor {
     },
     Ai {
         expr: String,
-        args: crate::selector::ai::Config,
     },
 }
 
@@ -54,11 +53,8 @@ impl Extractor {
         }
     }
 
-    pub fn ai(expr: impl Into<String>, args: crate::selector::ai::Config) -> Self {
-        Self::Ai {
-            expr: expr.into(),
-            args,
-        }
+    pub fn ai(expr: impl Into<String>) -> Self {
+        Self::Ai { expr: expr.into() }
     }
 
     pub fn expr(&self) -> &str {

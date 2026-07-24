@@ -195,21 +195,13 @@ mod tests {
 
         async fn fetch(&self, request: net::Request) -> Result<net::Response, downloader::Error> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let url = request.url.clone();
-            Ok(net::Response {
-                vals: request.vals.clone(),
-                kwargs: request.kwargs.clone(),
-                middlewares: request.middlewares.clone(),
+            let mut response = net::Response::new(
                 request,
-                url,
-                status: net::StatusCode(200),
-                reason: Some("OK".to_string()),
-                version: net::HttpVersion::Http11,
-                redirects: Vec::new(),
-                headers: net::Headers::new(),
-                cookies: net::Cookies::new(),
-                body: bytes::Bytes::from_static(b"<h1>book</h1>"),
-            })
+                net::StatusCode(200),
+                bytes::Bytes::from_static(b"<h1>book</h1>"),
+            );
+            response.reason = Some("OK".to_string());
+            Ok(response)
         }
     }
 

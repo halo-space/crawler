@@ -22,6 +22,7 @@ pub struct Builder<S, D, F> {
     pub(super) config: config::Config,
     pub(super) registry: middleware::Registry,
     pub(super) schemas: Arc<crate::item::schema::Store>,
+    pub(super) ai: Option<Arc<crate::selector::ai::Client>>,
     pub(super) middlewares: Vec<middleware::Spec>,
     pub(super) worker: super::worker::Worker,
 }
@@ -35,6 +36,7 @@ impl<S, D, F> Builder<S, D, F> {
             config: self.config,
             registry: self.registry,
             schemas: self.schemas,
+            ai: self.ai,
             middlewares: self.middlewares,
             worker: self.worker,
         }
@@ -48,6 +50,7 @@ impl<S, D, F> Builder<S, D, F> {
             config: self.config,
             registry: self.registry,
             schemas: self.schemas,
+            ai: self.ai,
             middlewares: self.middlewares,
             worker: self.worker,
         }
@@ -61,6 +64,7 @@ impl<S, D, F> Builder<S, D, F> {
             config: self.config,
             registry: self.registry,
             schemas: self.schemas,
+            ai: self.ai,
             middlewares: self.middlewares,
             worker: self.worker,
         }
@@ -68,6 +72,12 @@ impl<S, D, F> Builder<S, D, F> {
 
     pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
         self.worker.set_id(worker_id);
+        self
+    }
+
+    /// Selects the Worker-local AI Client used by every parsed Response.
+    pub fn with_ai(mut self, client: crate::selector::ai::Client) -> Self {
+        self.ai = Some(Arc::new(client));
         self
     }
 
@@ -98,12 +108,13 @@ where
     F::Spider: std::any::Any + spider::Spider + 'static,
 {
     pub fn build(self) -> Runtime<S, D, F> {
+        validate_ai(&self.config, self.ai.as_deref());
         let (tx, events) = tx::channel(MAX_EVENTS);
         let spider = self.spider_factory.build(tx);
         validate_item_functions(&spider, &self.config);
         let config = Arc::new(self.config);
         let schemas = self.schemas;
-        let executor = super::executor::Executor::new(Arc::new(spider), schemas.clone());
+        let executor = super::executor::Executor::new(Arc::new(spider), schemas.clone(), self.ai);
         let trace_id = config.next_trace_id();
 
         super::runtime::Runtime::new(
@@ -117,6 +128,21 @@ where
         )
         .with_init(Init::new(config, trace_id, schemas))
     }
+}
+
+fn validate_ai(config: &config::Config, client: Option<&crate::selector::ai::Client>) {
+    let uses_ai = config.graph.nodes.values().any(|node| {
+        node.parse.fields.values().any(|field| {
+            field
+                .extractors
+                .iter()
+                .any(|extractor| matches!(extractor, crate::graph::rules::Extractor::Ai { .. }))
+        })
+    });
+    assert!(
+        !uses_ai || client.is_some(),
+        "Rules config uses an AI extractor but Engine has no AI client"
+    );
 }
 
 fn validate_item_functions<P>(spider: &P, config: &config::Config)

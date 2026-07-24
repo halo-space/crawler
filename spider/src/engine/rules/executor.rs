@@ -85,7 +85,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
     use indexmap::IndexMap;
     use serde_json::Value;
 
@@ -95,20 +94,9 @@ mod tests {
 
     fn response(body: &str) -> net::Response {
         let request = net::Request::follow("https://example.com/books").unwrap();
-        net::Response {
-            vals: request.vals.clone(),
-            kwargs: request.kwargs.clone(),
-            middlewares: request.middlewares.clone(),
-            request,
-            url: "https://example.com/books".to_string(),
-            status: net::StatusCode(200),
-            reason: Some("OK".to_string()),
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Bytes::from(body.to_string()),
-        }
+        let mut response = net::Response::new(request, net::StatusCode(200), body.to_string());
+        response.reason = Some("OK".to_string());
+        response
     }
 
     #[test]

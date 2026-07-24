@@ -208,7 +208,6 @@ fn http_url_is_valid(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
 
     use bytes::Bytes;
     use serde_json::Value;
@@ -242,20 +241,13 @@ mod tests {
     }
 
     fn response(url: &str, status: u16) -> Response {
-        Response {
-            request: Request::follow("https://example.com/article").unwrap(),
-            url: url.to_string(),
-            status: crate::net::StatusCode(status),
-            reason: None,
-            version: crate::net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: crate::net::Headers::new(),
-            cookies: crate::net::Cookies::new(),
-            body: Bytes::new(),
-            vals: HashMap::new(),
-            kwargs: HashMap::new(),
-            middlewares: Vec::new(),
-        }
+        let mut response = Response::new(
+            Request::follow("https://example.com/article").unwrap(),
+            crate::net::StatusCode(status),
+            Bytes::new(),
+        );
+        response.url = url.to_string();
+        response
     }
 
     #[test]

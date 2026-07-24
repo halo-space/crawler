@@ -104,19 +104,35 @@ args:
 ```
 
 AI 是与 CSS 并列的独立 extractor。它通过 OpenAI-compatible Chat Completion API 发送当前
-Response 文本和 `expr` 提示词，并将模型内容直接解析为 JSON：
+Response 文本和 `expr` 提示词，结果严格限定为一个 JSON 对象：
 
 ```yaml
 - kind: ai
-  expr: "提取文章信息，只返回合法 JSON。"
-  args:
-    base_url: "https://api.example.com/v1"
-    api_key: "env:OPENAI_API_KEY"
-    model_name: "..."
+  expr: '按 {"title":"xx","content":"xx"} 提取文章。'
 ```
 
-AI 不生成 CSS，也不会被 CSS Healing 自动调用。Rules 快照只保存环境变量引用，Worker 在执行
-Selector 时才读取真正的 API Key。`base_url` 必须是绝对 HTTP(S) 端点，不能内嵌凭据，也不能包含 query 或 fragment。
+provider 配置属于 Worker 本地运行配置，只构造一次并由代码模式和 Rules 模式通过
+`response.ai(expr).await` 复用：
+
+```rust
+let client = selector::ai::Client::from_env(
+    "https://api.example.com/v1",
+    "OPENAI_API_KEY",
+    "model-name",
+)?;
+let mut engine = engine::Engine::new()
+    .with_ai(client)
+    .with_rules(rules)
+    .with_spider(Newspaper::new())
+    .build();
+```
+
+`Client::from_env` 在 Worker 装配时读取密钥；provider 配置和密钥都不会进入 Rules 或 Trace
+Snapshot。`base_url` 必须是绝对 HTTP(S) 端点，不能内嵌凭据，也不能包含 query 或 fragment。
+凡是能从同一个任务池领取 AI 工作的 Worker，都必须配置等价的 provider endpoint 和 model。
+AI 不生成 CSS，也不会被 CSS Healing 自动调用。请求会同时设置
+`response_format=json_object`；数组、标量、Markdown 和说明文字在返回后仍会被拒绝。AI 输入
+上限为 1 MiB，每次 provider 调用超时为 60 秒；重试继续只使用已有 `error_parse` 策略。
 
 ## 规则模式
 
@@ -261,8 +277,8 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker ID 和支持的下载模式，能力筛选
 必须和领取原子完成。真实 Browser Downloader 与 HTTP/browser 混合端到端执行属于 v5；可选的
 API、MySQL Scheduler、Master 控制面、Item 回放和运行期链路追踪仍属于后续 v4 工作，且不依赖
-Browser 实现。把 AI provider 配置从每个 extractor 上移为 Engine 注入的单个 Worker Client，也作为
-独立的 v4 变更规划。Redis 已通过共享 Scheduler 一致性测试。
+Browser 实现。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用
+Client，Rules 只保留提示词。Redis 已通过共享 Scheduler 一致性测试。
 Engine 默认使用 `worker-1` 和 HTTP 模式；`with_worker_id(...)` 与 `with_modes(...)` 可替换这些启动时冻结的值，
 空 Worker ID 或空 mode 集合会在执行前被拒绝。
 

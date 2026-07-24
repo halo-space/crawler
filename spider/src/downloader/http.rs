@@ -129,20 +129,14 @@ impl Http {
             request.headers.clear();
         }
         request.cookies.clone_from(&cookies);
-        Ok(net::Response {
-            vals: request.vals.clone(),
-            kwargs: request.kwargs.clone(),
-            middlewares: request.middlewares.clone(),
-            request,
-            url,
-            status,
-            reason,
-            version,
-            redirects,
-            headers,
-            cookies,
-            body,
-        })
+        let mut output = net::Response::new(request, status, body);
+        output.url = url;
+        output.reason = reason;
+        output.version = version;
+        output.redirects = redirects;
+        output.headers = headers;
+        output.cookies = cookies;
+        Ok(output)
     }
 }
 

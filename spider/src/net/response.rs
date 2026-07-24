@@ -2,6 +2,7 @@ use bytes::Bytes;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use url::Url;
 
 use crate::middleware;
@@ -33,6 +34,7 @@ pub struct Response {
     pub vals: HashMap<String, Value>,
     pub kwargs: HashMap<String, Value>,
     pub middlewares: Vec<middleware::Spec>,
+    pub(crate) ai: Option<Arc<selector::ai::Client>>,
 }
 
 impl fmt::Debug for Response {
@@ -62,6 +64,25 @@ fn debug_origin(value: &str) -> String {
 }
 
 impl Response {
+    /// Creates a response and copies the parsing context carried by its request.
+    pub fn new(request: Request, status: StatusCode, body: impl Into<Bytes>) -> Self {
+        Self {
+            url: request.url.clone(),
+            vals: request.vals.clone(),
+            kwargs: request.kwargs.clone(),
+            middlewares: request.middlewares.clone(),
+            request,
+            status,
+            reason: None,
+            version: HttpVersion::default(),
+            redirects: Vec::new(),
+            headers: Headers::new(),
+            cookies: Cookies::new(),
+            body: body.into(),
+            ai: None,
+        }
+    }
+
     pub fn body(&self) -> &Bytes {
         &self.body
     }
@@ -79,6 +100,23 @@ impl Response {
 
     pub fn css(&self) -> Result<scrape_core::Soup, Error> {
         selector::css::parse(self)
+    }
+
+    /// Extracts one JSON object through the AI Client selected by the Engine.
+    pub async fn ai(&self, expr: &str) -> Result<Value, selector::Error> {
+        let expr = expr.trim();
+        if expr.is_empty() {
+            return Err(selector::Error::Ai("prompt cannot be empty".to_string()));
+        }
+        let client = self
+            .ai
+            .as_deref()
+            .ok_or_else(|| selector::Error::Ai("AI client is not configured".to_string()))?;
+        client.select(self, expr).await
+    }
+
+    pub(crate) fn attach_ai(&mut self, client: Option<Arc<selector::ai::Client>>) {
+        self.ai = client;
     }
 
     pub fn urljoin(&self, url: &str) -> Result<String, Error> {
@@ -122,6 +160,7 @@ mod tests {
             vals: HashMap::new(),
             kwargs: HashMap::new(),
             middlewares: Vec::new(),
+            ai: None,
         }
     }
 
@@ -133,6 +172,29 @@ mod tests {
             .unwrap();
         response.body = Bytes::from_static(body);
         response
+    }
+
+    #[test]
+    fn new_copies_request_parse_context() {
+        let mut request = Request::follow("https://example.com/list/").unwrap();
+        request
+            .vals
+            .insert("category".to_string(), Value::from("books"));
+        request.kwargs.insert("page".to_string(), Value::from(2));
+        request.middlewares.push(middleware::Spec::new("custom"));
+
+        let response = Response::new(request, StatusCode(201), "body");
+
+        assert_eq!(response.url, "https://example.com/list/");
+        assert_eq!(response.status, StatusCode(201));
+        assert_eq!(response.body(), &Bytes::from_static(b"body"));
+        assert_eq!(response.vals["category"], Value::from("books"));
+        assert_eq!(response.kwargs["page"], Value::from(2));
+        assert_eq!(response.middlewares.len(), 1);
+        assert_eq!(response.version, HttpVersion::Http11);
+        assert!(response.headers.is_empty());
+        assert!(response.cookies.is_empty());
+        assert!(response.ai.is_none());
     }
 
     #[test]
@@ -171,6 +233,7 @@ mod tests {
             vals,
             kwargs: HashMap::new(),
             middlewares: Vec::new(),
+            ai: None,
         };
 
         let next = response.follow("../detail/1").unwrap();
@@ -373,6 +436,20 @@ mod tests {
         assert_eq!(response.body().as_ref(), BODY);
     }
 
+    #[tokio::test]
+    async fn ai_validates_the_prompt_and_requires_a_client() {
+        let response = html_response("body");
+
+        assert_eq!(
+            response.ai("  ").await.unwrap_err(),
+            selector::Error::Ai("prompt cannot be empty".to_string())
+        );
+        assert_eq!(
+            response.ai("extract data").await.unwrap_err(),
+            selector::Error::Ai("AI client is not configured".to_string())
+        );
+    }
+
     #[test]
     fn debug_redacts_response_content_and_url_credentials() {
         let mut response = html_response("response-body-secret");
@@ -413,6 +490,14 @@ mod tests {
             middleware::Spec::new("custom")
                 .args(serde_json::json!({"api_key": "middleware-secret"})),
         );
+        response.attach_ai(Some(Arc::new(
+            selector::ai::Client::new(
+                "https://provider.example/v1",
+                "ai-client-secret",
+                "model-secret",
+            )
+            .unwrap(),
+        )));
 
         let debug = format!("{response:?}");
 
@@ -435,6 +520,9 @@ mod tests {
             "middleware-secret",
             "proxy-user",
             "proxy-password",
+            "ai-client-secret",
+            "model-secret",
+            "provider.example",
         ] {
             assert!(!debug.contains(secret), "Debug exposed {secret}: {debug}");
         }

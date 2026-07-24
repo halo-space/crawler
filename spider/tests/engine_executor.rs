@@ -9,6 +9,8 @@ use spider::middleware::{BoxFuture, Middleware, Next, Spec};
 use spider::scheduler::{Init, Scheduler};
 use spider::{downloader, engine, net, payload};
 
+mod support;
+
 #[macros::spider]
 struct RulesSpider;
 
@@ -87,6 +89,50 @@ impl RetryingRequestSpider {
 #[macros::spider]
 struct RetryingRulesSpider {
     attempts: Arc<AtomicUsize>,
+}
+
+#[macros::spider]
+struct AiCodeSpider {
+    value: Arc<Mutex<Option<Value>>>,
+}
+
+#[macros::spider]
+impl AiCodeSpider {
+    fn name(&self) -> &str {
+        "ai-code"
+    }
+
+    async fn start(&self) -> Result<(), spider::Error> {
+        let request = net::Request::follow("https://example.com/article")
+            .map_err(spider::Error::Net)?
+            .with_middleware(
+                Spec::new("retry")
+                    .hook("error_parse")
+                    .args(serde_json::json!({"count": 1, "backoff": [0]})),
+            );
+        self.tx.request(vec![request]).await
+    }
+
+    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+        let value = response.ai("extract the article as JSON").await?;
+        *self.value.lock().unwrap() = Some(value);
+        Ok(())
+    }
+}
+
+#[macros::spider]
+struct AiRulesSpider;
+
+#[macros::spider]
+impl AiRulesSpider {
+    fn name(&self) -> &str {
+        "ai-rules"
+    }
+
+    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+        response.ai("extract metadata as JSON").await?;
+        Ok(())
+    }
 }
 
 #[macros::spider(item = RulesItem)]
@@ -302,23 +348,126 @@ impl downloader::Download for TestDownload {
             return Err(downloader::Error::UnsupportedMode("fail".to_string()));
         }
 
-        let url = request.url.clone();
-
-        Ok(net::Response {
-            vals: request.vals.clone(),
-            kwargs: request.kwargs.clone(),
-            middlewares: request.middlewares.clone(),
-            request,
-            url,
-            status: net::StatusCode(200),
-            reason: Some("OK".to_string()),
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Bytes::new(),
-        })
+        let mut response = net::Response::new(request, net::StatusCode(200), Bytes::new());
+        response.reason = Some("OK".to_string());
+        Ok(response)
     }
+}
+
+fn ai_rules() -> spider::config::Config {
+    spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: ai-rules
+  start: [{node: index, url: https://example.com/article}]
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          article:
+            extractors:
+              - kind: ai
+                expr: extract the article as JSON
+  edges: []
+"#,
+    )
+    .unwrap()
+}
+
+fn assert_ai_request(request: &support::ai::Request) {
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/v1/chat/completions");
+    assert_eq!(
+        request.headers.get("authorization").map(String::as_str),
+        Some("Bearer engine-secret")
+    );
+    assert_eq!(request.body["model"], Value::from("engine-model"));
+}
+
+#[test]
+#[should_panic(expected = "Rules config uses an AI extractor but Engine has no AI client")]
+fn rules_ai_without_a_client_panics_during_build() {
+    let _engine = engine::Builder::new()
+        .with_rules(ai_rules())
+        .with_spider(RulesSpider::new())
+        .build();
+}
+
+#[test]
+fn rules_trace_does_not_persist_ai_provider_configuration() {
+    let encoded =
+        serde_json::to_string(&spider::trace::Snapshot::rules("ai-rules", ai_rules())).unwrap();
+
+    for provider_field in ["base_url", "api_key", "model_name"] {
+        assert!(!encoded.contains(provider_field), "{provider_field}");
+    }
+}
+
+#[tokio::test]
+async fn code_parse_retry_reuses_the_engine_ai_client() {
+    let provider = support::ai::Server::start(["not JSON", r#"{"title":"Rust"}"#]);
+    let client =
+        spider::selector::ai::Client::new(provider.base_url(), "engine-secret", "engine-model")
+            .unwrap();
+    let value = Arc::new(Mutex::new(None));
+    let mut engine = engine::Builder::new()
+        .with_ai(client)
+        .with_downloader(TestDownload)
+        .with_spider(AiCodeSpider::new(value.clone()))
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(
+        *value.lock().unwrap(),
+        Some(serde_json::json!({"title": "Rust"}))
+    );
+    let requests = provider.finish();
+    assert_eq!(requests.len(), 2);
+    requests.iter().for_each(assert_ai_request);
+}
+
+#[tokio::test]
+async fn rules_code_and_declarative_parsers_share_the_engine_ai_client() {
+    let provider = support::ai::Server::start([r#"{"source":"code"}"#, r#"{"source":"rules"}"#]);
+    let client =
+        spider::selector::ai::Client::new(provider.base_url(), "engine-secret", "engine-model")
+            .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_ai(client)
+        .with_rules(ai_rules())
+        .with_spider(AiRulesSpider::new())
+        .with_downloader(TestDownload)
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(engine.scheduler().done_len(), 1);
+    let requests = provider.finish();
+    assert_eq!(requests.len(), 2);
+    requests.iter().for_each(assert_ai_request);
+}
+
+#[tokio::test]
+async fn rules_builder_accepts_the_ai_client_after_rules() {
+    let provider = support::ai::Server::start([r#"{"title":"Rust"}"#]);
+    let client =
+        spider::selector::ai::Client::new(provider.base_url(), "engine-secret", "engine-model")
+            .unwrap();
+    let mut engine = engine::Builder::new()
+        .with_rules(ai_rules())
+        .with_ai(client)
+        .with_spider(RulesSpider::new())
+        .with_downloader(TestDownload)
+        .build();
+
+    engine.start().await.unwrap();
+
+    assert_eq!(engine.scheduler().done_len(), 1);
+    let requests = provider.finish();
+    assert_eq!(requests.len(), 1);
+    assert_ai_request(&requests[0]);
 }
 
 #[tokio::test]
@@ -514,21 +663,9 @@ impl downloader::Download for RulesDownload {
         } else {
             "<h1> Second Book </h1>"
         };
-        let url = request.url.clone();
-        Ok(net::Response {
-            vals: request.vals.clone(),
-            kwargs: request.kwargs.clone(),
-            middlewares: request.middlewares.clone(),
-            request,
-            url,
-            status: net::StatusCode(200),
-            reason: Some("OK".to_string()),
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Bytes::from(body),
-        })
+        let mut response = net::Response::new(request, net::StatusCode(200), body);
+        response.reason = Some("OK".to_string());
+        Ok(response)
     }
 }
 
@@ -1108,21 +1245,9 @@ graph:
 }
 
 fn response(request: net::Request, body: &str) -> net::Response {
-    let url = request.url.clone();
-    net::Response {
-        vals: request.vals.clone(),
-        kwargs: request.kwargs.clone(),
-        middlewares: request.middlewares.clone(),
-        request,
-        url,
-        status: net::StatusCode(200),
-        reason: Some("OK".to_string()),
-        version: net::HttpVersion::Http11,
-        redirects: Vec::new(),
-        headers: net::Headers::new(),
-        cookies: net::Cookies::new(),
-        body: Bytes::copy_from_slice(body.as_bytes()),
-    }
+    let mut response = net::Response::new(request, net::StatusCode(200), body.to_string());
+    response.reason = Some("OK".to_string());
+    response
 }
 
 struct RetryDownload {
@@ -1171,22 +1296,9 @@ impl downloader::Download for LifecycleDownload {
     async fn fetch(&self, request: net::Request) -> Result<net::Response, downloader::Error> {
         self.calls.lock().unwrap().push("downloader.fetch");
 
-        let url = request.url.clone();
-
-        Ok(net::Response {
-            vals: request.vals.clone(),
-            kwargs: request.kwargs.clone(),
-            middlewares: request.middlewares.clone(),
-            request,
-            url,
-            status: net::StatusCode(200),
-            reason: Some("OK".to_string()),
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Bytes::new(),
-        })
+        let mut response = net::Response::new(request, net::StatusCode(200), Bytes::new());
+        response.reason = Some("OK".to_string());
+        Ok(response)
     }
 }
 
@@ -1251,21 +1363,9 @@ impl downloader::Download for SlowDownload {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
 
-        let url = request.url.clone();
-        Ok(net::Response {
-            vals: request.vals.clone(),
-            kwargs: request.kwargs.clone(),
-            middlewares: request.middlewares.clone(),
-            request,
-            url,
-            status: net::StatusCode(200),
-            reason: Some("OK".to_string()),
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Bytes::new(),
-        })
+        let mut response = net::Response::new(request, net::StatusCode(200), Bytes::new());
+        response.reason = Some("OK".to_string());
+        Ok(response)
     }
 }
 

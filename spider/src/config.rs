@@ -206,7 +206,7 @@ graph:
     }
 
     #[test]
-    fn ai_extractor_config_is_validated() {
+    fn ai_extractor_only_accepts_a_prompt() {
         let rules = r#"
 spider:
   name: ai
@@ -220,29 +220,59 @@ graph:
             extractors:
               - kind: ai
                 expr: 提取文章并返回 JSON
-                args:
-                  base_url: https://api.example.com/v1
-                  api_key: env:OPENAI_API_KEY
-                  model_name: model
   edges: []
 "#;
         assert!(Config::from_yaml(rules).is_ok());
 
-        let error =
-            Config::from_yaml(&rules.replace("api_key: env:OPENAI_API_KEY", "api_key: secret"))
-                .unwrap_err();
-        assert!(error.to_string().contains("env:VARIABLE"));
+        let old_args = rules.replace(
+            "                expr: 提取文章并返回 JSON",
+            "                expr: 提取文章并返回 JSON\n                args:\n                  base_url: https://api.example.com/v1\n                  api_key: env:OPENAI_API_KEY\n                  model_name: model",
+        );
+        let error = Config::from_yaml(&old_args).unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("unknown field"));
+        assert!(error.contains("args"));
 
-        let error = Config::from_yaml(&rules.replace(
+        for provider_field in [
+            "base_url: https://api.example.com/v1",
+            "api_key: env:OPENAI_API_KEY",
             "model_name: model",
-            "model_name: model\n                  temperature: 0.2",
-        ))
-        .unwrap_err();
-        assert!(error.to_string().contains("unknown field"));
+        ] {
+            let rules = rules.replace(
+                "                expr: 提取文章并返回 JSON",
+                &format!(
+                    "                expr: 提取文章并返回 JSON\n                {provider_field}"
+                ),
+            );
+            let error = Config::from_yaml(&rules).unwrap_err();
+            assert!(error.to_string().contains("unknown field"));
+        }
     }
 
     #[test]
-    fn typed_selector_configs_survive_snapshot_round_trip() {
+    fn ai_extractor_prompt_cannot_be_empty() {
+        let rules = r#"
+spider:
+  name: ai
+  start: [{node: index, url: https://example.com}]
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          article:
+            extractors:
+              - kind: ai
+                expr: "  "
+  edges: []
+"#;
+
+        let error = Config::from_yaml(rules).unwrap_err();
+        assert!(error.to_string().contains("extractor expr is empty"));
+    }
+
+    #[test]
+    fn extractors_survive_snapshot_round_trip() {
         let rules = r#"
 spider:
   name: selectors
@@ -263,14 +293,18 @@ graph:
             extractors:
               - kind: ai
                 expr: 提取文章并返回 JSON
-                args:
-                  base_url: https://api.example.com/v1
-                  api_key: env:OPENAI_API_KEY
-                  model_name: model
   edges: []
 "#;
         let config = Config::from_yaml(rules).unwrap();
         let encoded = serde_json::to_value(crate::trace::Snapshot::rules("task", config)).unwrap();
+        assert_eq!(
+            encoded["dsl"]["graph"]["nodes"]["index"]["parse"]["fields"]["article"]["extractors"]
+                [0],
+            serde_json::json!({
+                "kind": "ai",
+                "expr": "提取文章并返回 JSON",
+            })
+        );
         let restored = serde_json::from_value::<crate::trace::Snapshot>(encoded)
             .unwrap()
             .dsl
@@ -282,10 +316,10 @@ graph:
         };
         assert_eq!(args.healing().unwrap().min(), 0.7);
 
-        let graph::rules::Extractor::Ai { args, .. } = &fields["article"].extractors[0] else {
+        let graph::rules::Extractor::Ai { expr } = &fields["article"].extractors[0] else {
             panic!("article extractor must remain AI");
         };
-        assert_eq!(args.model_name(), "model");
+        assert_eq!(expr, "提取文章并返回 JSON");
     }
 
     #[test]

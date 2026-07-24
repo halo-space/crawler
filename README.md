@@ -101,20 +101,36 @@ args:
 ```
 
 AI is an independent extractor that sends the current Response text and `expr` prompt through an
-OpenAI-compatible Chat Completion endpoint and parses the model content as JSON:
+OpenAI-compatible Chat Completion endpoint. Its result is strictly one JSON object:
 
 ```yaml
 - kind: ai
-  expr: "Extract the article and return valid JSON only."
-  args:
-    base_url: "https://api.example.com/v1"
-    api_key: "env:OPENAI_API_KEY"
-    model_name: "..."
+  expr: 'Extract the article as {"title":"...","content":"..."}.'
 ```
 
-AI does not generate CSS and is not invoked by CSS healing. Rules persist only the environment
-variable reference; the Worker resolves the actual API key when the selector runs. `base_url` must
-be an absolute HTTP(S) endpoint without embedded credentials, a query, or a fragment.
+Provider configuration is Worker-local and is constructed once, then reused by code and Rules
+selection through `response.ai(expr).await`:
+
+```rust
+let client = selector::ai::Client::from_env(
+    "https://api.example.com/v1",
+    "OPENAI_API_KEY",
+    "model-name",
+)?;
+let mut engine = engine::Engine::new()
+    .with_ai(client)
+    .with_rules(rules)
+    .with_spider(Newspaper::new())
+    .build();
+```
+
+`Client::from_env` reads the secret while the Worker is assembled; neither provider settings nor
+credentials enter Rules or Trace snapshots. `base_url` must be an absolute HTTP(S) endpoint without
+embedded credentials, a query, or a fragment. Every Worker that can claim AI work from the same task
+pool must use an equivalent provider endpoint and model. AI does not generate CSS and is not invoked
+by CSS healing. The request also sets `response_format=json_object`; arrays, scalars, Markdown, and
+prose are rejected after the response is received. AI input is limited to 1 MiB and each provider
+attempt has a 60-second timeout; retries remain controlled by the existing `error_parse` policy.
 
 ## Rules Mode
 
@@ -252,9 +268,9 @@ The Scheduler contract receives the Engine-owned Worker ID and supported downloa
 `next_requests` and pending-work checks; filtering must be atomic with claim. A real Browser Downloader and mixed
 HTTP/browser end-to-end execution remain v5 work. Redis is the available v4 persistent Scheduler;
 API and MySQL Schedulers, the Master control plane, Item replay, and runtime tracing remain separate
-v4 work and do not depend on Browser implementation. Moving AI provider configuration from each
-extractor into one Engine-injected Worker client is also planned as an independent v4 change. Redis
-is covered by the shared Scheduler conformance suite.
+v4 work and do not depend on Browser implementation. AI provider configuration is already
+Worker-local: one reusable Client is injected through `Engine::with_ai`, while Rules retain only the
+prompt. Redis is covered by the shared Scheduler conformance suite.
 Engine defaults to `worker-1` and HTTP mode. `with_worker_id(...)` and `with_modes(...)` replace
 those frozen startup values; an empty Worker ID or mode set is rejected before execution.
 

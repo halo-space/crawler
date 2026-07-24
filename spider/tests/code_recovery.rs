@@ -17,21 +17,9 @@ impl downloader::Download for Download {
     }
 
     async fn fetch(&self, request: net::Request) -> Result<net::Response, downloader::Error> {
-        let url = request.url.clone();
-        Ok(net::Response {
-            vals: request.vals.clone(),
-            kwargs: request.kwargs.clone(),
-            middlewares: request.middlewares.clone(),
-            request,
-            url,
-            status: net::StatusCode(200),
-            reason: Some("OK".to_string()),
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Bytes::new(),
-        })
+        let mut response = net::Response::new(request, net::StatusCode(200), Bytes::new());
+        response.reason = Some("OK".to_string());
+        Ok(response)
     }
 }
 

@@ -289,23 +289,8 @@ impl downloader::Download for RulesDownload {
 
     async fn fetch(&self, request: net::Request) -> Result<net::Response, downloader::Error> {
         self.fetched.fetch_add(1, Ordering::SeqCst);
-        let url = request.url.clone();
-        let vals = request.vals.clone();
-        let kwargs = request.kwargs.clone();
-        let middlewares = request.middlewares.clone();
-        Ok(net::Response {
-            request,
-            url,
-            status: net::StatusCode(200),
-            reason: Some("OK".to_string()),
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Default::default(),
-            vals,
-            kwargs,
-            middlewares,
-        })
+        let mut response = net::Response::new(request, net::StatusCode(200), Vec::new());
+        response.reason = Some("OK".to_string());
+        Ok(response)
     }
 }

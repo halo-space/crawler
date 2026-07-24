@@ -38,17 +38,13 @@ pub(super) async fn parse(
                     selector::regex::select(response, expr)
                         .map(|values| values.into_iter().map(Value::String).collect::<Vec<_>>())
                 }
-                graph::rules::Extractor::Ai { expr, args } => {
-                    selector::ai::select(response, expr, args)
-                        .await
-                        .map(|value| {
-                            if value::is_empty(&value) {
-                                Vec::new()
-                            } else {
-                                vec![value]
-                            }
-                        })
-                }
+                graph::rules::Extractor::Ai { expr } => response.ai(expr).await.map(|value| {
+                    if value::is_empty(&value) {
+                        Vec::new()
+                    } else {
+                        vec![value]
+                    }
+                }),
             };
             match selection {
                 Ok(values) if !values.is_empty() => {
@@ -115,7 +111,16 @@ mod tests {
             vals: Default::default(),
             kwargs: Default::default(),
             middlewares: Vec::new(),
+            ai: None,
         }
+    }
+
+    fn response_with_ai(body: &str, output: &str) -> net::Response {
+        let (base_url, _) = crate::selector::ai::test_support::server(Some(output));
+        let client = selector::ai::Client::new(base_url, "secret", "test-model").unwrap();
+        let mut response = response(body);
+        response.attach_ai(Some(std::sync::Arc::new(client)));
+        response
     }
 
     fn healing(min: f64) -> selector::css::Config {
@@ -210,33 +215,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rules_ai_uses_public_selector_and_preserves_json() {
-        let (base_url, _) = crate::selector::ai::test_support::server(Some(
-            r#"{"title":"Rust","author":"Ferris"}"#,
-        ));
+    async fn rules_ai_uses_response_selector_and_preserves_json() {
         let spec = graph::rules::Parse {
             fields: IndexMap::from([(
                 "article".to_string(),
                 graph::rules::Field {
                     required: true,
                     default: None,
-                    extractors: vec![graph::rules::Extractor::ai(
-                        "提取文章并返回 JSON",
-                        selector::ai::Config::new(base_url, "secret", "test-model").unwrap(),
-                    )],
+                    extractors: vec![graph::rules::Extractor::ai("提取文章并返回 JSON")],
                 },
             )]),
         };
-        let fields = parse(&spec, &response("<article>Rust</article>"))
-            .await
-            .unwrap();
+        let response = response_with_ai(
+            "<article>Rust</article>",
+            r#"{"title":"Rust","author":"Ferris"}"#,
+        );
+        let fields = parse(&spec, &response).await.unwrap();
         assert_eq!(fields["article"]["title"], Value::from("Rust"));
         assert_eq!(fields["article"]["author"], Value::from("Ferris"));
     }
 
     #[tokio::test]
-    async fn empty_ai_json_continues_to_next_extractor() {
-        let (base_url, _) = crate::selector::ai::test_support::server(Some("{}"));
+    async fn empty_ai_json_continues_to_non_css_extractor() {
         let spec = graph::rules::Parse {
             fields: IndexMap::from([(
                 "title".to_string(),
@@ -244,17 +244,33 @@ mod tests {
                     required: true,
                     default: None,
                     extractors: vec![
-                        graph::rules::Extractor::ai(
-                            "提取标题并返回 JSON",
-                            selector::ai::Config::new(base_url, "secret", "test-model").unwrap(),
-                        ),
+                        graph::rules::Extractor::ai("提取标题并返回 JSON"),
                         graph::rules::Extractor::regex("<h1>(.*?)</h1>"),
                     ],
                 },
             )]),
         };
-        let fields = parse(&spec, &response("<h1>Fallback</h1>")).await.unwrap();
+        let response = response_with_ai("<h1>Fallback</h1>", "{}");
+        let fields = parse(&spec, &response).await.unwrap();
         assert_eq!(fields["title"], Value::from("Fallback"));
+    }
+
+    #[tokio::test]
+    async fn ai_extractor_without_client_returns_an_explicit_error() {
+        let spec = graph::rules::Parse {
+            fields: IndexMap::from([(
+                "title".to_string(),
+                graph::rules::Field {
+                    required: true,
+                    default: None,
+                    extractors: vec![graph::rules::Extractor::ai("提取标题并返回 JSON")],
+                },
+            )]),
+        };
+
+        let error = parse(&spec, &response("<h1>Rust</h1>")).await.unwrap_err();
+
+        assert!(error.to_string().contains("AI client is not configured"));
     }
 
     #[test]

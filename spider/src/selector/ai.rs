@@ -1,41 +1,35 @@
 //! OpenAI-compatible selector that extracts JSON from the current Response.
 
-use async_openai::Client;
+use async_openai::Client as OpenAI;
 use async_openai::config::OpenAIConfig;
+use async_openai::error::OpenAIError;
 use async_openai::types::chat::{
-    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
+    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs, ResponseFormat,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use std::time::Duration;
+use tracing::instrument::WithSubscriber;
 
 use crate::{net, selector};
 
-#[derive(Clone, Serialize)]
-pub struct Config {
+const MAX_CONTENT_BYTES: usize = 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub struct Client {
+    provider: OpenAI<OpenAIConfig>,
     base_url: String,
-    api_key: ApiKey,
     model_name: String,
 }
 
-#[derive(Clone)]
-enum ApiKey {
-    Direct(String),
-    Env(String),
-}
-
-impl Config {
+impl Client {
     pub fn new(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         model_name: impl Into<String>,
     ) -> Result<Self, selector::Error> {
-        let base_url = base_url.into().trim_end_matches('/').to_string();
         let api_key = api_key.into();
-        let model_name = model_name.into();
-        if api_key.trim().is_empty() {
-            return Err(selector::Error::Ai("api_key cannot be empty".to_string()));
-        }
-        Self::build(base_url, ApiKey::Direct(api_key), model_name)
+        validate_api_key(&api_key)?;
+        Self::build(base_url.into(), api_key, model_name.into())
     }
 
     pub fn from_env(
@@ -49,17 +43,28 @@ impl Config {
                 "api_key environment variable name is invalid".to_string(),
             ));
         }
-        Self::build(base_url.into(), ApiKey::Env(variable), model_name.into())
+        let api_key = std::env::var(&variable).map_err(|_| {
+            selector::Error::Ai(format!(
+                "api_key environment variable is not set: {variable}"
+            ))
+        })?;
+        if api_key.trim().is_empty() {
+            return Err(selector::Error::Ai(format!(
+                "api_key environment variable is empty: {variable}"
+            )));
+        }
+        validate_api_key(&api_key)?;
+        Self::build(base_url.into(), api_key, model_name.into())
     }
 
     fn build(
         base_url: String,
-        api_key: ApiKey,
+        api_key: String,
         model_name: String,
     ) -> Result<Self, selector::Error> {
         let base_url = base_url.trim_end_matches('/').to_string();
         let url = url::Url::parse(&base_url)
-            .map_err(|error| selector::Error::Ai(format!("invalid base_url: {error}")))?;
+            .map_err(|_| selector::Error::Ai("invalid base_url".to_string()))?;
         if !matches!(url.scheme(), "http" | "https") || url.cannot_be_a_base() {
             return Err(selector::Error::Ai(
                 "base_url must be an absolute http or https URL".to_string(),
@@ -85,57 +90,87 @@ impl Config {
                 "model_name cannot be empty".to_string(),
             ));
         }
+        let config = OpenAIConfig::new()
+            .with_org_id("")
+            .with_project_id("")
+            .with_api_base(&base_url)
+            .with_api_key(&api_key);
+        let http = reqwest::Client::builder()
+            .retry(reqwest::retry::never())
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|_| selector::Error::Ai("failed to build AI HTTP client".to_string()))?;
+        // Use the plain service so Engine error_parse remains the only retry policy.
+        let provider = OpenAI::build(http.clone(), config)
+            .with_http_service(async_openai::middleware::ReqwestService::new(http));
         Ok(Self {
+            provider,
             base_url,
-            api_key,
             model_name,
         })
     }
 
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    pub fn model_name(&self) -> &str {
-        &self.model_name
+    pub(crate) async fn select(
+        &self,
+        response: &net::Response,
+        expr: &str,
+    ) -> Result<Value, selector::Error> {
+        if response.body().len() > MAX_CONTENT_BYTES {
+            return Err(selector::Error::Ai(format!(
+                "response body exceeds the AI input limit of {MAX_CONTENT_BYTES} bytes"
+            )));
+        }
+        let body = response
+            .text()
+            .map_err(|error| selector::Error::Ai(error.to_string()))?;
+        let prompt = format!(
+            "{expr}\n\n输出约束：只能返回一个合法 JSON 对象；禁止返回数组、标量、Markdown 代码块或说明文字。必须遵循提取要求中给出的字段结构。\n\n以下是需要提取的页面内容：\n<content>\n{body}\n</content>"
+        );
+        let message = ChatCompletionRequestUserMessageArgs::default()
+            .content(prompt)
+            .build()
+            .map_err(|error| selector::Error::Ai(error.to_string()))?;
+        let completion_request = CreateChatCompletionRequestArgs::default()
+            .model(&self.model_name)
+            .messages([message.into()])
+            .response_format(ResponseFormat::JsonObject)
+            .build()
+            .map_err(|error| selector::Error::Ai(error.to_string()))?;
+        let completion = self
+            .provider
+            .chat()
+            .create(completion_request)
+            // async-openai logs raw 4xx/5xx bodies before returning an error. Isolate only
+            // this provider future so application tracing cannot receive secret response data.
+            .with_subscriber(tracing::subscriber::NoSubscriber::default())
+            .await
+            .map_err(provider_error)?;
+        let json = completion
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.as_deref())
+            .ok_or_else(|| selector::Error::Ai("model response has no content".to_string()))?;
+        let value: Value = serde_json::from_str(json).map_err(|error| {
+            selector::Error::Ai(format!("model content is not valid JSON: {error}"))
+        })?;
+        if !value.is_object() {
+            return Err(selector::Error::Ai(
+                "model content must be a JSON object".to_string(),
+            ));
+        }
+        Ok(value)
     }
 }
 
-impl ApiKey {
-    fn resolve(&self) -> Result<String, selector::Error> {
-        match self {
-            Self::Direct(value) => Ok(value.clone()),
-            Self::Env(variable) => std::env::var(variable)
-                .map_err(|_| {
-                    selector::Error::Ai(format!(
-                        "api_key environment variable is not set: {variable}"
-                    ))
-                })
-                .and_then(|value| {
-                    if value.trim().is_empty() {
-                        Err(selector::Error::Ai(format!(
-                            "api_key environment variable is empty: {variable}"
-                        )))
-                    } else {
-                        Ok(value)
-                    }
-                }),
-        }
+fn validate_api_key(api_key: &str) -> Result<(), selector::Error> {
+    if api_key.trim().is_empty() {
+        return Err(selector::Error::Ai("api_key cannot be empty".to_string()));
     }
-}
-
-impl Serialize for ApiKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::Env(variable) => serializer.serialize_str(&format!("env:{variable}")),
-            Self::Direct(_) => Err(serde::ser::Error::custom(
-                "direct api keys cannot be persisted; use an env:VARIABLE reference",
-            )),
-        }
-    }
+    let authorization = format!("Bearer {api_key}");
+    authorization
+        .parse::<reqwest::header::HeaderValue>()
+        .map(|_| ())
+        .map_err(|_| selector::Error::Ai("api_key is not a valid HTTP credential".to_string()))
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -146,278 +181,45 @@ fn valid_env_name(name: &str) -> bool {
         && chars.all(|char| char == '_' || char.is_ascii_alphanumeric())
 }
 
-impl std::fmt::Debug for Config {
+impl std::fmt::Debug for Client {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("Config")
+            .debug_struct("Client")
             .field("base_url", &display_base_url(&self.base_url))
-            .field("api_key", &"***")
             .field("model_name", &self.model_name)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawConfig {
-    base_url: String,
-    api_key: String,
-    model_name: String,
-}
-
-impl<'de> Deserialize<'de> for Config {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = RawConfig::deserialize(deserializer)?;
-        let variable = raw.api_key.strip_prefix("env:").ok_or_else(|| {
-            serde::de::Error::custom("api_key must use an env:VARIABLE reference")
-        })?;
-        Self::from_env(raw.base_url, variable, raw.model_name).map_err(serde::de::Error::custom)
-    }
-}
-
-pub async fn select(
-    response: &net::Response,
-    expr: &str,
-    config: &Config,
-) -> Result<Value, selector::Error> {
-    let expr = expr.trim();
-    if expr.is_empty() {
-        return Err(selector::Error::Ai("prompt cannot be empty".to_string()));
-    }
-    let body = response
-        .text()
-        .map_err(|error| selector::Error::Ai(error.to_string()))?;
-    let prompt = format!("{expr}\n\n以下是需要提取的页面内容：\n<content>\n{body}\n</content>");
-    let message = ChatCompletionRequestUserMessageArgs::default()
-        .content(prompt)
-        .build()
-        .map_err(|error| selector::Error::Ai(error.to_string()))?;
-    let completion_request = CreateChatCompletionRequestArgs::default()
-        .model(config.model_name())
-        .messages([message.into()])
-        .build()
-        .map_err(|error| selector::Error::Ai(error.to_string()))?;
-    let api_key = config.api_key.resolve()?;
-    let client = Client::with_config(
-        OpenAIConfig::new()
-            .with_api_base(config.base_url())
-            .with_api_key(&api_key),
-    );
-    let completion = client
-        .chat()
-        .create(completion_request)
-        .await
-        .map_err(|error| selector::Error::Ai(redact(error, &api_key, config.base_url())))?;
-    let json = completion
-        .choices
-        .first()
-        .and_then(|choice| choice.message.content.as_deref())
-        .ok_or_else(|| selector::Error::Ai("model response has no content".to_string()))?;
-    serde_json::from_str(json)
-        .map_err(|error| selector::Error::Ai(format!("model content is not valid JSON: {error}")))
-}
-
-fn redact(error: impl std::fmt::Display, secret: &str, base_url: &str) -> String {
-    let mut message = error.to_string();
-    let display = display_base_url(base_url);
-    if display != base_url {
-        message = message.replace(base_url, &display);
-    }
-    message.replace(secret, "***")
+fn provider_error(error: OpenAIError) -> selector::Error {
+    let message = match error {
+        OpenAIError::Reqwest(error) if error.is_timeout() => "AI provider request timed out",
+        OpenAIError::Reqwest(error) if error.is_connect() => "AI provider connection failed",
+        OpenAIError::ApiError(error) => {
+            return selector::Error::Ai(format!(
+                "AI provider returned HTTP {}",
+                error.status_code.as_u16()
+            ));
+        }
+        OpenAIError::JSONDeserialize(..) => "AI provider returned an invalid response",
+        _ => "AI provider request failed",
+    };
+    selector::Error::Ai(message.to_string())
 }
 
 fn display_base_url(base_url: &str) -> String {
     let Ok(mut url) = url::Url::parse(base_url) else {
         return "<invalid>".to_string();
     };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
     url.set_query(None);
     url.set_fragment(None);
     url.to_string().trim_end_matches('/').to_string()
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc::{Receiver, channel};
-
-    pub fn server(content: Option<&str>) -> (String, Receiver<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let response = serde_json::json!({
-            "id": "chatcmpl-test",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": content,
-                },
-                "finish_reason": "stop"
-            }],
-            "created": 0,
-            "model": "test-model",
-            "object": "chat.completion",
-            "usage": null
-        })
-        .to_string();
-        let (sender, receiver) = channel();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            let _ = sender.send(request);
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response.len(),
-                response
-            )
-            .unwrap();
-        });
-        (format!("http://{address}"), receiver)
-    }
-
-    fn read_request(stream: &mut std::net::TcpStream) -> String {
-        let mut bytes = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        let header_end = loop {
-            let count = stream.read(&mut chunk).unwrap();
-            assert!(count > 0);
-            bytes.extend_from_slice(&chunk[..count]);
-            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-                break index + 4;
-            }
-        };
-        let headers = String::from_utf8_lossy(&bytes[..header_end]);
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                line.split_once(':').and_then(|(name, value)| {
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                })
-            })
-            .unwrap_or_default();
-        while bytes.len() < header_end + content_length {
-            let count = stream.read(&mut chunk).unwrap();
-            assert!(count > 0);
-            bytes.extend_from_slice(&chunk[..count]);
-        }
-        String::from_utf8(bytes).unwrap()
-    }
-}
+pub(crate) mod test_support;
 
 #[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-
-    use super::*;
-
-    fn response(body: &str) -> net::Response {
-        net::Response {
-            request: net::Request::follow("https://example.com").unwrap(),
-            url: "https://example.com".to_string(),
-            status: net::StatusCode(200),
-            reason: None,
-            version: net::HttpVersion::Http11,
-            redirects: Vec::new(),
-            headers: net::Headers::new(),
-            cookies: net::Cookies::new(),
-            body: Bytes::from(body.to_string()),
-            vals: Default::default(),
-            kwargs: Default::default(),
-            middlewares: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn validates_config_and_hides_api_key_from_debug() {
-        let config = Config::new("https://example.com/v1/", "secret", "model").unwrap();
-        assert_eq!(config.base_url(), "https://example.com/v1");
-        assert!(!format!("{config:?}").contains("secret"));
-        assert_eq!(
-            redact("provider echoed secret", "secret", "https://example.com/v1"),
-            "provider echoed ***"
-        );
-        assert!(Config::new("not-a-url", "secret", "model").is_err());
-        assert!(Config::new("https://user:pass@example.com/v1", "secret", "model").is_err());
-        assert!(Config::new("https://example.com/v1#chat", "secret", "model").is_err());
-        assert!(Config::new("https://example.com/v1", "", "model").is_err());
-        assert!(Config::new("https://example.com/v1", "secret", "").is_err());
-        assert!(serde_json::to_value(&config).is_err());
-
-        for error in [
-            Config::new("https://example.com/v1?token=url-secret", "secret", "model").unwrap_err(),
-            Config::from_env(
-                "https://example.com/v1?token=url-secret",
-                "OPENAI_API_KEY",
-                "model",
-            )
-            .unwrap_err(),
-        ] {
-            assert_eq!(
-                error,
-                selector::Error::Ai("base_url must not contain a query".to_string())
-            );
-            assert!(!error.to_string().contains("url-secret"));
-        }
-        assert_eq!(
-            redact(
-                "request failed at https://example.com/v1?token=url-secret/chat/completions",
-                "secret",
-                "https://example.com/v1?token=url-secret",
-            ),
-            "request failed at https://example.com/v1/chat/completions"
-        );
-
-        let persisted =
-            Config::from_env("https://example.com/v1", "OPENAI_API_KEY", "model").unwrap();
-        assert_eq!(
-            serde_json::to_value(&persisted).unwrap()["api_key"],
-            Value::from("env:OPENAI_API_KEY")
-        );
-        assert!(Config::from_env("https://example.com/v1", "invalid-name", "model").is_err());
-    }
-
-    #[tokio::test]
-    async fn extracts_json_and_sends_prompt_with_response_body() {
-        let (base_url, request_receiver) = test_support::server(Some(r#"{"title":"Rust"}"#));
-        let config = Config::new(base_url, "secret", "test-model").unwrap();
-        let value = select(&response("<h1>Rust</h1>"), "提取标题并返回 JSON", &config)
-            .await
-            .unwrap();
-        assert_eq!(value["title"], Value::from("Rust"));
-
-        let raw_request = request_receiver.recv().unwrap();
-        assert!(
-            raw_request
-                .to_ascii_lowercase()
-                .contains("authorization: bearer secret")
-        );
-        let body = raw_request.split_once("\r\n\r\n").unwrap().1;
-        let body: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["model"], Value::from("test-model"));
-        let content = body["messages"][0]["content"].as_str().unwrap();
-        assert!(content.contains("提取标题并返回 JSON"));
-        assert!(content.contains("<h1>Rust</h1>"));
-    }
-
-    #[tokio::test]
-    async fn rejects_missing_or_invalid_json_content() {
-        let (base_url, _) = test_support::server(None);
-        let config = Config::new(base_url, "secret", "test-model").unwrap();
-        let error = select(&response("body"), "prompt", &config)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("no content"), "{error}");
-
-        let (base_url, _) = test_support::server(Some("not-json"));
-        let config = Config::new(base_url, "secret", "test-model").unwrap();
-        let error = select(&response("body"), "prompt", &config)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("not valid JSON"));
-    }
-}
+mod tests;

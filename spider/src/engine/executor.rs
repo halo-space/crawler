@@ -9,11 +9,20 @@ use crate::{net, spider};
 pub struct Executor<P> {
     spider: Arc<P>,
     schemas: Arc<crate::item::schema::Store>,
+    ai: Option<Arc<crate::selector::ai::Client>>,
 }
 
 impl<P> Executor<P> {
-    pub(crate) fn new(spider: Arc<P>, schemas: Arc<crate::item::schema::Store>) -> Self {
-        Self { spider, schemas }
+    pub(crate) fn new(
+        spider: Arc<P>,
+        schemas: Arc<crate::item::schema::Store>,
+        ai: Option<Arc<crate::selector::ai::Client>>,
+    ) -> Self {
+        Self {
+            spider,
+            schemas,
+            ai,
+        }
     }
 }
 
@@ -61,8 +70,9 @@ where
     fn parse(
         &self,
         request: net::Request,
-        response: net::Response,
+        mut response: net::Response,
     ) -> impl Future<Output = Result<(), crate::Error>> + Send {
+        response.attach_ai(self.ai.clone());
         let spider = self.spider.clone();
         let schemas = self.schemas.clone();
         async move {
