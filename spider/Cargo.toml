@@ -31,9 +31,11 @@ strsim = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tower = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 validator = { workspace = true }
 
 [dev-dependencies]
+flate2 = { workspace = true }
 macros = { path = "../macros" }

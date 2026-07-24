@@ -12,8 +12,14 @@ use tracing::instrument::WithSubscriber;
 
 use crate::{net, selector};
 
-const MAX_CONTENT_BYTES: usize = 1024 * 1024;
+mod transport;
+
+const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const OUTPUT_CONSTRAINT: &str = "\n\n输出约束：只能返回一个合法 JSON 对象；禁止返回数组、标量、Markdown 代码块或说明文字。必须遵循提取要求中给出的字段结构。";
+const CONTENT_OPEN: &str = "\n\n以下是需要提取的页面内容：\n<content>\n";
+const CONTENT_CLOSE: &str = "\n</content>";
 
 pub struct Client {
     provider: OpenAI<OpenAIConfig>,
@@ -100,9 +106,9 @@ impl Client {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|_| selector::Error::Ai("failed to build AI HTTP client".to_string()))?;
-        // Use the plain service so Engine error_parse remains the only retry policy.
-        let provider = OpenAI::build(http.clone(), config)
-            .with_http_service(async_openai::middleware::ReqwestService::new(http));
+        // Keep error_parse as the only retry policy and bound the decoded provider body.
+        let provider =
+            OpenAI::build(http.clone(), config).with_http_service(transport::Service::new(http));
         Ok(Self {
             provider,
             base_url,
@@ -115,17 +121,13 @@ impl Client {
         response: &net::Response,
         expr: &str,
     ) -> Result<Value, selector::Error> {
-        if response.body().len() > MAX_CONTENT_BYTES {
-            return Err(selector::Error::Ai(format!(
-                "response body exceeds the AI input limit of {MAX_CONTENT_BYTES} bytes"
-            )));
+        if response.body().len() > MAX_RESPONSE_BODY_BYTES {
+            return Err(response_body_too_large());
         }
         let body = response
             .text()
             .map_err(|error| selector::Error::Ai(error.to_string()))?;
-        let prompt = format!(
-            "{expr}\n\n输出约束：只能返回一个合法 JSON 对象；禁止返回数组、标量、Markdown 代码块或说明文字。必须遵循提取要求中给出的字段结构。\n\n以下是需要提取的页面内容：\n<content>\n{body}\n</content>"
-        );
+        let prompt = prompt(expr, &body)?;
         let message = ChatCompletionRequestUserMessageArgs::default()
             .content(prompt)
             .build()
@@ -192,6 +194,11 @@ impl std::fmt::Debug for Client {
 }
 
 fn provider_error(error: OpenAIError) -> selector::Error {
+    if let Some(limit) = transport::body_limit(&error) {
+        return selector::Error::Ai(format!(
+            "AI provider decoded response body exceeds the {limit}-byte limit"
+        ));
+    }
     let message = match error {
         OpenAIError::Reqwest(error) if error.is_timeout() => "AI provider request timed out",
         OpenAIError::Reqwest(error) if error.is_connect() => "AI provider connection failed",
@@ -205,6 +212,40 @@ fn provider_error(error: OpenAIError) -> selector::Error {
         _ => "AI provider request failed",
     };
     selector::Error::Ai(message.to_string())
+}
+
+fn prompt(expr: &str, body: &str) -> Result<String, selector::Error> {
+    let length = [
+        expr.len(),
+        OUTPUT_CONSTRAINT.len(),
+        CONTENT_OPEN.len(),
+        body.len(),
+        CONTENT_CLOSE.len(),
+    ]
+    .into_iter()
+    .try_fold(0_usize, usize::checked_add)
+    .filter(|length| *length <= MAX_PROMPT_BYTES)
+    .ok_or_else(prompt_too_large)?;
+
+    let mut prompt = String::with_capacity(length);
+    prompt.push_str(expr);
+    prompt.push_str(OUTPUT_CONSTRAINT);
+    prompt.push_str(CONTENT_OPEN);
+    prompt.push_str(body);
+    prompt.push_str(CONTENT_CLOSE);
+    Ok(prompt)
+}
+
+fn response_body_too_large() -> selector::Error {
+    selector::Error::Ai(format!(
+        "AI response body exceeds the {MAX_RESPONSE_BODY_BYTES}-byte limit before character decoding"
+    ))
+}
+
+fn prompt_too_large() -> selector::Error {
+    selector::Error::Ai(format!(
+        "AI prompt exceeds the {MAX_PROMPT_BYTES}-byte limit"
+    ))
 }
 
 fn display_base_url(base_url: &str) -> String {

@@ -567,7 +567,7 @@ Healing 不保存历史节点指纹、不改写或持久化修复后的 selector
 - 统一 Executor 在解析前把共享 Client 挂到 Response；代码 handler 与 Rules 都调用 `response.ai(expr).await`。Response clone 共享同一个 Client，该字段保持 crate-private、不可序列化，也不会出现在 Response Debug 输出中。
 - `Client::from_env` 在 Worker 装配阶段读取 API Key。provider 配置和密钥都不会进入 Rules、Trace Snapshot、Request、Payload、Scheduler 或 Item。`base_url` 必须是绝对 HTTP(S) base endpoint，不能包含 user information、query 或 fragment。Client Debug 可以标识这个已校验的 endpoint 和 model，但绝不显示密钥；provider 失败也不包含请求 URL 或原始响应正文。
 - 本地 Rules 装配发现 AI extractor 未配置 Client 时直接拒绝；远程恢复的 Rules Trace 在没有 Client 的 Worker 上执行到 AI 时返回明确错误，不转换为 Scheduler 能力或 fallback。
-- 每次调用都设置 `response_format=json_object`，并追加统一的“只返回对象”硬约束；运行时继续拒绝数组、标量、Markdown 和说明文字。Response 内容超过 1 MiB 时在解码前拒绝；单次 provider 调用 60 秒超时，不在 `error_parse` 之外增加重试层。
+- 每次调用都设置 `response_format=json_object`，并追加统一的“只返回对象”硬约束；运行时继续拒绝数组、标量、Markdown 和说明文字。Response 正文缓冲区在字符集解码前限制为 1 MiB；包含 `expr`、固定约束和解码后正文的完整 UTF-8 prompt 另行限制为 1 MiB。provider HTTP body 在 HTTP 内容解码后、`async-openai` 完整缓冲前按 4 MiB 流式限制；单次 provider 调用 60 秒超时，不在 `error_parse` 之外增加重试层。
 - Client 会清空 `async-openai` 隐式读取的 organization/project，构造时验证 Authorization header，阻断依赖对原始错误正文的日志输出，并把 provider 失败映射为有界分类，避免响应正文进入 Scheduler 错误存储。
 - AI 可用性不参与按能力领取。凡是能从同一任务池领取 Request、且对应 Rules 可能执行 AI 的 Worker，都必须使用等价的 provider endpoint 和 model；凭据继续属于 Worker 本地配置。
 - AI 不生成 CSS，CSS Healing 也不会把候选交给 AI。
@@ -725,6 +725,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/selector/css/healing/reference.rs` | CSS AST 到评分参考结构 |
 | `spider/src/selector/css/healing/score.rs` | DOM 候选遍历、关系判断与评分 |
 | `spider/src/selector/ai.rs` | 校验并持有可复用的 Worker 本地 Client，然后执行一次 JSON 提取 |
+| `spider/src/selector/ai/transport.rs` | 执行单次 provider 请求，并在依赖缓冲前限制 HTTP 解码后的正文 |
 | `macros/src/spider/model.rs` | 解析用户 Spider 结构和方法模型 |
 | `macros/src/spider/check.rs` | 宏输入约束校验 |
 | `macros/src/spider/bind.rs` | 生成 node 注册与 handler 绑定代码 |

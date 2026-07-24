@@ -7,10 +7,15 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use flate2::Compression;
+use flate2::write::GzEncoder;
+
 pub(crate) struct Reply {
     status: u16,
     reason: &'static str,
-    body: String,
+    body: Vec<u8>,
+    content_length: Option<usize>,
+    content_encoding: Option<&'static str>,
 }
 
 impl Reply {
@@ -33,24 +38,55 @@ impl Reply {
                 "object": "chat.completion",
                 "usage": null
             })
-            .to_string(),
+            .to_string()
+            .into_bytes(),
+            content_length: None,
+            content_encoding: None,
         }
     }
 
     pub(crate) fn error(status: u16, body: impl Into<String>) -> Self {
-        let reason = match status {
-            400 => "Bad Request",
-            401 => "Unauthorized",
-            403 => "Forbidden",
-            429 => "Too Many Requests",
-            500 => "Internal Server Error",
-            _ => "Error",
-        };
         Self {
             status,
-            reason,
-            body: body.into(),
+            reason: reason(status),
+            body: body.into().into_bytes(),
+            content_length: None,
+            content_encoding: None,
         }
+    }
+
+    pub(crate) fn declared_length(status: u16, content_length: usize) -> Self {
+        Self {
+            status,
+            reason: reason(status),
+            body: b"{}".to_vec(),
+            content_length: Some(content_length),
+            content_encoding: None,
+        }
+    }
+
+    pub(crate) fn gzip(status: u16, body: &[u8]) -> Self {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(body).unwrap();
+        Self {
+            status,
+            reason: reason(status),
+            body: encoder.finish().unwrap(),
+            content_length: None,
+            content_encoding: Some("gzip"),
+        }
+    }
+}
+
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        _ => "Error",
     }
 }
 
@@ -131,6 +167,32 @@ pub(crate) fn server_with(replies: Vec<Reply>) -> Server {
     }
 }
 
+pub(crate) fn server_after_all_requests(replies: Vec<Reply>) -> Server {
+    assert!(!replies.is_empty());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_sender, requests) = channel();
+    let (stop, stop_receiver) = channel();
+    let count = Arc::new(AtomicUsize::new(0));
+    let server_count = Arc::clone(&count);
+    let thread = std::thread::spawn(move || {
+        serve_after_all_requests(
+            listener,
+            replies.into(),
+            request_sender,
+            server_count,
+            stop_receiver,
+        );
+    });
+    Server {
+        base_url: format!("http://{address}"),
+        requests,
+        count,
+        stop,
+        thread: Some(thread),
+    }
+}
+
 fn serve(
     listener: TcpListener,
     mut replies: VecDeque<Reply>,
@@ -166,15 +228,61 @@ fn serve(
     }
 }
 
+fn serve_after_all_requests(
+    listener: TcpListener,
+    replies: VecDeque<Reply>,
+    requests: Sender<String>,
+    count: Arc<AtomicUsize>,
+    stop: Receiver<()>,
+) {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut pending = Vec::with_capacity(replies.len());
+    for reply in replies {
+        loop {
+            if stop.try_recv().is_ok() || Instant::now() >= deadline {
+                return;
+            }
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(_) => return,
+            };
+            let _ = stream.set_nonblocking(false);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            let Ok(request) = read_request(&mut stream) else {
+                continue;
+            };
+            count.fetch_add(1, Ordering::SeqCst);
+            let _ = requests.send(request);
+            pending.push((stream, reply));
+            break;
+        }
+    }
+
+    for (mut stream, reply) in pending {
+        if write_reply(&mut stream, &reply).is_err() {
+            return;
+        }
+    }
+}
+
 fn write_reply(stream: &mut std::net::TcpStream, reply: &Reply) -> std::io::Result<()> {
+    let content_length = reply.content_length.unwrap_or(reply.body.len());
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        reply.status,
-        reply.reason,
-        reply.body.len(),
-        reply.body
-    )
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        reply.status, reply.reason, content_length
+    )?;
+    if let Some(encoding) = reply.content_encoding {
+        write!(stream, "Content-Encoding: {encoding}\r\n")?;
+    }
+    write!(stream, "Connection: close\r\n\r\n")?;
+    stream.write_all(&reply.body)
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {

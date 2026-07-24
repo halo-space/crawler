@@ -609,7 +609,7 @@ Healing stores no historical fingerprints, does not rewrite or persist a repaire
 - The unified Executor attaches the shared Client to each Response immediately before parsing. Code handlers and Rules both call `response.ai(expr).await`; Response clones share the same Client, which is crate-private, non-serializable, and omitted from Response Debug output.
 - `Client::from_env` resolves the API key during Worker assembly. Provider settings and credentials never enter Rules, Trace Snapshot, Request, Payload, Scheduler, or Item data. `base_url` must be an absolute HTTP(S) base endpoint without user information, a query, or a fragment. Client Debug may identify that validated endpoint and model, but never the key; provider failures omit request URLs and raw response content.
 - Local Rules assembly rejects an AI extractor without a configured Client. A remotely restored Rules Trace fails explicitly when it reaches AI on a Worker without a Client; this is not converted into a Scheduler capability or fallback.
-- Every call requests `response_format=json_object` and appends the same mandatory object-only output instruction. Runtime parsing rejects arrays, scalars, Markdown, and prose. Response content above 1 MiB is rejected before decoding; a provider attempt times out after 60 seconds and does not add a retry layer outside `error_parse`.
+- Every call requests `response_format=json_object` and appends the same mandatory object-only output instruction. Runtime parsing rejects arrays, scalars, Markdown, and prose. The Response body buffer is limited to 1 MiB before character-set decoding; the complete UTF-8 prompt, including `expr`, the fixed constraint, and decoded content, independently must fit within 1 MiB. The provider HTTP body is streamed through a 4 MiB bound after HTTP content decoding and before `async-openai` can buffer it. A provider attempt times out after 60 seconds and does not add a retry layer outside `error_parse`.
 - The Client clears `async-openai` organization/project defaults, validates the Authorization header during construction, suppresses dependency logging of raw error bodies, and maps provider failures to bounded classifications so response content cannot enter Scheduler error storage.
 - AI availability is not part of capability-aware claiming. Every Worker that can claim Requests from the same task pool whose Rules can reach AI must use an equivalent provider endpoint and model; credentials remain Worker-local.
 - AI does not generate CSS, and CSS Healing never delegates candidates to AI.
@@ -771,6 +771,7 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/selector/css/healing/reference.rs` | CSS AST to scoring reference model |
 | `spider/src/selector/css/healing/score.rs` | DOM candidate traversal, relationships, and scoring |
 | `spider/src/selector/ai.rs` | Validate and own the reusable Worker-local Client, then perform one JSON extraction |
+| `spider/src/selector/ai/transport.rs` | Execute one provider request and bound its HTTP-decoded body before dependency buffering |
 | `macros/src/spider/model.rs` | Parse the user Spider model and methods |
 | `macros/src/spider/check.rs` | Validate macro input constraints |
 | `macros/src/spider/bind.rs` | Generate node registration and handler bindings |

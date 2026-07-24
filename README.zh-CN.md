@@ -131,8 +131,10 @@ let mut engine = engine::Engine::new()
 Snapshot。`base_url` 必须是绝对 HTTP(S) 端点，不能内嵌凭据，也不能包含 query 或 fragment。
 凡是能从同一个任务池领取 AI 工作的 Worker，都必须配置等价的 provider endpoint 和 model。
 AI 不生成 CSS，也不会被 CSS Healing 自动调用。请求会同时设置
-`response_format=json_object`；数组、标量、Markdown 和说明文字在返回后仍会被拒绝。AI 输入
-上限为 1 MiB，每次 provider 调用超时为 60 秒；重试继续只使用已有 `error_parse` 策略。
+`response_format=json_object`；数组、标量、Markdown 和说明文字在返回后仍会被拒绝。Response
+正文缓冲区在字符集解码前限制为 1 MiB；包含 `expr`、固定约束和解码后正文的完整 UTF-8 prompt
+另行限制为 1 MiB。provider HTTP body 在 HTTP 内容解码后、`async-openai` 完整缓冲前限制为
+4 MiB。每次 provider 调用超时为 60 秒；重试继续只使用已有 `error_parse` 策略。
 
 ## 规则模式
 

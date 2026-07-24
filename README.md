@@ -129,8 +129,11 @@ credentials enter Rules or Trace snapshots. `base_url` must be an absolute HTTP(
 embedded credentials, a query, or a fragment. Every Worker that can claim AI work from the same task
 pool must use an equivalent provider endpoint and model. AI does not generate CSS and is not invoked
 by CSS healing. The request also sets `response_format=json_object`; arrays, scalars, Markdown, and
-prose are rejected after the response is received. AI input is limited to 1 MiB and each provider
-attempt has a 60-second timeout; retries remain controlled by the existing `error_parse` policy.
+prose are rejected after the response is received. The Response body buffer is limited to 1 MiB
+before character-set decoding. The complete UTF-8 prompt, including `expr`, the fixed constraint,
+and decoded content, is independently limited to 1 MiB. The provider HTTP body is limited to 4 MiB
+after HTTP content decoding and before `async-openai` buffers it. Each provider attempt has a
+60-second timeout; retries remain controlled by the existing `error_parse` policy.
 
 ## Rules Mode
 

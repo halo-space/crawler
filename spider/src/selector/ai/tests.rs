@@ -85,8 +85,8 @@ fn validates_client_configuration_and_hides_the_key() {
 }
 
 #[tokio::test]
-async fn response_clones_reuse_the_client_and_request_json_objects() {
-    let server = test_support::server_with(vec![
+async fn response_clones_concurrently_reuse_the_client_and_request_json_objects() {
+    let server = test_support::server_after_all_requests(vec![
         test_support::Reply::completion(Some(r#"{"title":"Rust"}"#)),
         test_support::Reply::completion(Some(r#"{"title":"Crawler"}"#)),
     ]);
@@ -97,17 +97,20 @@ async fn response_clones_reuse_the_client_and_request_json_objects() {
     assert!(Arc::ptr_eq(response.ai.as_ref().unwrap(), &client));
     assert!(Arc::ptr_eq(cloned.ai.as_ref().unwrap(), &client));
 
-    assert_eq!(
-        response.ai(r#"按 {"title":"xx"} 提取标题"#).await.unwrap()["title"],
-        Value::from("Rust")
-    );
-    assert_eq!(
-        cloned
-            .ai(r#"按 {"title":"xx"} 再次提取标题"#)
-            .await
-            .unwrap()["title"],
-        Value::from("Crawler")
-    );
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            response.ai(r#"按 {"title":"xx"} 提取标题"#),
+            cloned.ai(r#"按 {"title":"xx"} 再次提取标题"#),
+        )
+    })
+    .await
+    .expect("AI client serialized concurrent provider requests");
+    let mut titles = [
+        first.unwrap()["title"].as_str().unwrap().to_string(),
+        second.unwrap()["title"].as_str().unwrap().to_string(),
+    ];
+    titles.sort();
+    assert_eq!(titles, ["Crawler", "Rust"]);
 
     for request in [
         server.request(Duration::from_secs(1)).unwrap(),
@@ -248,7 +251,53 @@ async fn provider_errors_are_bounded_and_do_not_enter_application_tracing() {
 }
 
 #[tokio::test]
-async fn rejects_empty_oversized_and_non_object_results() {
+async fn rejects_an_oversized_provider_response_before_dependency_buffering() {
+    let server = test_support::server_with(vec![test_support::Reply::declared_length(
+        200,
+        transport::MAX_BODY_BYTES + 1,
+    )]);
+    let client = Arc::new(Client::new(server.base_url(), "secret", "model").unwrap());
+    let mut response = response("body");
+    response.attach_ai(Some(client));
+
+    assert_eq!(
+        response.ai("extract JSON object").await.unwrap_err(),
+        selector::Error::Ai(format!(
+            "AI provider decoded response body exceeds the {}-byte limit",
+            transport::MAX_BODY_BYTES
+        ))
+    );
+    assert_eq!(server.request_count(), 1);
+}
+
+#[tokio::test]
+async fn bounds_compressed_success_and_declared_error_provider_bodies() {
+    let oversized = vec![b'x'; transport::MAX_BODY_BYTES + 1];
+    let server = test_support::server_with(vec![
+        test_support::Reply::gzip(200, &oversized),
+        test_support::Reply::declared_length(500, transport::MAX_BODY_BYTES + 1),
+    ]);
+    let client = Arc::new(Client::new(server.base_url(), "secret", "model").unwrap());
+    let mut response = response("body");
+    response.attach_ai(Some(client));
+    let expected = selector::Error::Ai(format!(
+        "AI provider decoded response body exceeds the {}-byte limit",
+        transport::MAX_BODY_BYTES
+    ));
+
+    assert_eq!(
+        response.ai("extract JSON object").await.unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        response.ai("extract JSON object").await.unwrap_err(),
+        expected
+    );
+    assert_eq!(server.request_count(), 2);
+}
+
+#[tokio::test]
+async fn rejects_empty_and_oversized_inputs_without_a_provider_request() {
     let server = test_support::server_with(vec![test_support::Reply::completion(Some("{}"))]);
     let client = Arc::new(Client::new(server.base_url(), "secret", "model").unwrap());
     let mut empty = response("body");
@@ -263,18 +312,40 @@ async fn rejects_empty_oversized_and_non_object_results() {
     );
     assert_eq!(server.request_count(), 0);
 
-    let mut oversized = response(vec![b'x'; MAX_CONTENT_BYTES + 1]);
-    oversized.attach_ai(Some(client));
-    assert!(
-        oversized
-            .ai("extract JSON object")
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("input limit")
+    let mut oversized = response(vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1]);
+    oversized.attach_ai(Some(Arc::clone(&client)));
+    assert_eq!(
+        oversized.ai("extract JSON object").await.unwrap_err(),
+        response_body_too_large()
     );
     assert_eq!(server.request_count(), 0);
 
+    let mut oversized_expr = response("");
+    oversized_expr.attach_ai(Some(Arc::clone(&client)));
+    assert_eq!(
+        oversized_expr
+            .ai(&"x".repeat(MAX_PROMPT_BYTES))
+            .await
+            .unwrap_err(),
+        prompt_too_large()
+    );
+    assert_eq!(server.request_count(), 0);
+
+    let mut expanded = response(vec![0x80; MAX_PROMPT_BYTES / 2]);
+    expanded
+        .headers
+        .try_set("content-type", "text/html; charset=windows-1252")
+        .unwrap();
+    expanded.attach_ai(Some(client));
+    assert_eq!(
+        expanded.ai("extract JSON object").await.unwrap_err(),
+        prompt_too_large()
+    );
+    assert_eq!(server.request_count(), 0);
+}
+
+#[tokio::test]
+async fn rejects_non_object_results() {
     let server = test_support::server_with(
         ["[]", r#""text""#, "null", "1", "true"]
             .into_iter()
