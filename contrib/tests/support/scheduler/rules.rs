@@ -9,7 +9,7 @@ use spider::{
 
 /// A Rules trace is observable only when the Scheduler restores its Trace Snapshot onto a claim.
 /// Without that attachment, Engine treats the Request as code mode and never evaluates the edge.
-pub(super) async fn claimed_requests_preserve_rules_trace<S>(scheduler: S)
+pub(super) async fn claimed_requests_preserve_trace<S>(scheduler: S)
 where
     S: Scheduler + scheduler::Init + 'static,
 {
@@ -35,8 +35,8 @@ graph:
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_rules(config)
-        .with_spider(RulesSpiderFactory)
-        .with_downloader(RulesDownload {
+        .with_spider(LocalSpiderFactory)
+        .with_downloader(Download {
             fetched: fetched.clone(),
         })
         .build()
@@ -51,7 +51,7 @@ graph:
     }
 }
 
-pub(super) async fn existing_rules_trace_runs_without_local_seed<S>(scheduler: S)
+pub(super) async fn existing_trace_runs_without_local_seed<S>(scheduler: S)
 where
     S: Scheduler + scheduler::Init + 'static,
 {
@@ -92,7 +92,7 @@ graph:
             started: started.clone(),
             indexed: indexed.clone(),
         })
-        .with_downloader(RulesDownload {
+        .with_downloader(Download {
             fetched: fetched.clone(),
         })
         .build()
@@ -109,21 +109,21 @@ graph:
     }
 }
 
-struct RulesSpider {
+struct LocalSpider {
     tx: Tx,
 }
 
-struct RulesSpiderFactory;
+struct LocalSpiderFactory;
 
-impl SpiderFactory for RulesSpiderFactory {
-    type Spider = RulesSpider;
+impl SpiderFactory for LocalSpiderFactory {
+    type Spider = LocalSpider;
 
     fn build(self, tx: Tx) -> Self::Spider {
-        RulesSpider { tx }
+        LocalSpider { tx }
     }
 }
 
-impl Spider for RulesSpider {
+impl Spider for LocalSpider {
     type Item = spider::item::Map;
 
     fn name(&self) -> &str {
@@ -139,7 +139,7 @@ impl Spider for RulesSpider {
     }
 }
 
-struct RulesDownload {
+struct Download {
     fetched: Arc<AtomicUsize>,
 }
 
@@ -278,7 +278,7 @@ impl Spider for RemoteSpider {
     }
 }
 
-impl downloader::Download for RulesDownload {
+impl downloader::Download for Download {
     async fn open(&self) -> Result<(), downloader::Error> {
         Ok(())
     }

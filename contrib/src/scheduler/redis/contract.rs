@@ -123,7 +123,7 @@ impl scheduler::Scheduler for Redis {
     }
 
     async fn push_items(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
-        self.write_items(payload).await
+        self.submit(payload).await
     }
 
     async fn trace(&self, trace_id: &str) -> Result<Option<trace::Snapshot>, scheduler::Error> {

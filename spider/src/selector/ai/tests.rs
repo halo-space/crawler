@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
-use crate::ai::{OpenAI, test_support};
+use crate::ai::{OpenAI, server};
 
 fn response(body: impl Into<bytes::Bytes>) -> net::Response {
     net::Response::new(
@@ -14,9 +14,9 @@ fn response(body: impl Into<bytes::Bytes>) -> net::Response {
 
 #[tokio::test]
 async fn response_clones_concurrently_reuse_openai_and_request_json_objects() {
-    let server = test_support::server_after_all_requests(vec![
-        test_support::Reply::completion(Some(r#"{"title":"Rust"}"#)),
-        test_support::Reply::completion(Some(r#"{"title":"Crawler"}"#)),
+    let server = server::start_after_requests(vec![
+        server::Reply::completion(Some(r#"{"title":"Rust"}"#)),
+        server::Reply::completion(Some(r#"{"title":"Crawler"}"#)),
     ]);
     let openai = Arc::new(OpenAI::new(server.base_url(), "secret", "test-model").unwrap());
     let mut response = response("<h1>Rust</h1>");
@@ -62,7 +62,7 @@ async fn response_clones_concurrently_reuse_openai_and_request_json_objects() {
 
 #[tokio::test]
 async fn rejects_empty_and_oversized_inputs_without_a_provider_request() {
-    let server = test_support::server_with(vec![test_support::Reply::completion(Some("{}"))]);
+    let server = server::start_with(vec![server::Reply::completion(Some("{}"))]);
     let openai = Arc::new(OpenAI::new(server.base_url(), "secret", "model").unwrap());
     let mut empty = response("body");
     empty.attach_ai(Some(Arc::clone(&openai)));
@@ -110,10 +110,10 @@ async fn rejects_empty_and_oversized_inputs_without_a_provider_request() {
 
 #[tokio::test]
 async fn rejects_non_object_results() {
-    let server = test_support::server_with(
+    let server = server::start_with(
         ["[]", r#""text""#, "null", "1", "true"]
             .into_iter()
-            .map(|content| test_support::Reply::completion(Some(content)))
+            .map(|content| server::Reply::completion(Some(content)))
             .collect(),
     );
     let openai = Arc::new(OpenAI::new(server.base_url(), "secret", "model").unwrap());
@@ -130,7 +130,7 @@ async fn rejects_non_object_results() {
 
 #[tokio::test]
 async fn rejects_missing_and_invalid_json_content() {
-    let (base_url, _) = test_support::server(None);
+    let (base_url, _) = server::start(None);
     let openai = Arc::new(OpenAI::new(base_url, "secret", "test-model").unwrap());
     let mut missing = response("body");
     missing.attach_ai(Some(openai));
@@ -144,7 +144,7 @@ async fn rejects_missing_and_invalid_json_content() {
     );
 
     for content in ["not-json", "```json\n{}\n```", "result: {}", "{} {}"] {
-        let (base_url, _) = test_support::server(Some(content));
+        let (base_url, _) = server::start(Some(content));
         let openai = Arc::new(OpenAI::new(base_url, "secret", "test-model").unwrap());
         let mut invalid = response("body");
         invalid.attach_ai(Some(openai));

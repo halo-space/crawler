@@ -1,10 +1,57 @@
+use serde::Serialize;
 use spider::{payload, scheduler, stats};
 
 use super::Redis;
 use super::error::redis as redis_error;
 use super::key;
-use super::model::{self, Execution, Stat};
 use super::validate;
+
+fn state(value: spider::net::State) -> &'static str {
+    match value {
+        spider::net::State::Pending => "pending",
+        spider::net::State::Processing => "processing",
+        spider::net::State::Done => "done",
+        spider::net::State::Failed => "failed",
+    }
+}
+
+#[derive(Serialize)]
+struct Execution {
+    id: String,
+    task_id: String,
+    trace_id: String,
+    node: String,
+    worker_id: String,
+    version: String,
+    state: String,
+    error: Option<String>,
+    stats: Vec<Stat>,
+}
+
+#[derive(Serialize)]
+struct Stat {
+    name: String,
+    total: String,
+    done: String,
+    filter: String,
+    dedup: String,
+    validate: String,
+    download: String,
+}
+
+impl Stat {
+    fn new(name: String, value: stats::Counter) -> Self {
+        Self {
+            name,
+            total: value.total.to_string(),
+            done: value.done.to_string(),
+            filter: value.filter.to_string(),
+            dedup: value.dedup.to_string(),
+            validate: value.validate.to_string(),
+            download: value.download.to_string(),
+        }
+    }
+}
 
 impl Execution {
     fn new(payload: &payload::Payload) -> Result<Self, scheduler::Error> {
@@ -34,7 +81,7 @@ impl Execution {
             node: payload.node.clone(),
             worker_id: payload.worker_id.clone(),
             version: payload.version.to_string(),
-            state: model::state(payload.state).to_string(),
+            state: state(payload.state).to_string(),
             error: payload.error.clone(),
             stats,
         })

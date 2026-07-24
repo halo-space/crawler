@@ -1,13 +1,15 @@
 use std::time::Duration;
 
+use contrib::scheduler::redis::Redis;
+
 const DEFAULT_URL: &str = "redis://127.0.0.1:6379";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub(super) struct Fixture {
+pub(super) struct Handle {
     url: String,
 }
 
-impl Fixture {
+impl Handle {
     pub(super) async fn connect() -> Option<Self> {
         let url = std::env::var("CRAWLER_REDIS_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
         let client = redis::Client::open(url.as_str())
@@ -53,7 +55,7 @@ impl Fixture {
             .expect("a previously reachable Redis URL must remain valid")
             .get_multiplexed_async_connection()
             .await
-            .expect("failed to reconnect to Redis for Scheduler fixture inspection")
+            .expect("failed to reconnect to Redis for integration-test inspection")
     }
 
     pub(super) async fn clear(&self, namespace: &str) {
@@ -70,7 +72,7 @@ impl Fixture {
                 .arg(100)
                 .query_async::<(u64, Vec<String>)>(&mut connection)
                 .await
-                .expect("failed to scan Redis Scheduler fixture keys");
+                .expect("failed to scan Redis integration-test keys");
             all_keys.extend(keys);
             cursor = next;
             if cursor == 0 {
@@ -82,17 +84,31 @@ impl Fixture {
                 .arg(keys)
                 .query_async::<usize>(&mut connection)
                 .await
-                .expect("failed to remove Redis Scheduler fixture keys");
+                .expect("failed to remove Redis integration-test keys");
         }
+    }
+
+    pub(super) fn redis(&self, namespace: &str) -> Redis {
+        Redis::new(self.url())
+            .unwrap()
+            .with_namespace(namespace)
+            .unwrap()
     }
 }
 
-fn unavailable(url: &str, error: redis::RedisError) -> Option<Fixture> {
+pub(super) fn namespace(label: &str) -> String {
+    format!(
+        "crawler-test-redis-{label}-{}",
+        uuid::Uuid::now_v7().simple()
+    )
+}
+
+fn unavailable(url: &str, error: redis::RedisError) -> Option<Handle> {
     eprintln!("skipping Redis Scheduler integration test: Redis at {url} is unavailable: {error}");
     None
 }
 
-fn unavailable_timeout(url: &str, operation: &str) -> Option<Fixture> {
+fn unavailable_timeout(url: &str, operation: &str) -> Option<Handle> {
     eprintln!(
         "skipping Redis Scheduler integration test: Redis at {url} did not {operation} within {CONNECT_TIMEOUT:?}"
     );

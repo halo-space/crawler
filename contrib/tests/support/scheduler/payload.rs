@@ -11,20 +11,20 @@ pub(crate) fn owned_request(id: &str, url: &str, task_id: &str, trace_id: &str) 
     request
 }
 
-pub(crate) fn processing_payload(request: &net::Request) -> payload::Payload {
+pub(crate) fn processing(request: &net::Request) -> payload::Payload {
     let mut payload = payload::Payload::for_request(request, request.leased_by.clone());
     payload.state = net::State::Processing;
     payload
 }
 
-pub(crate) fn success_payload(request: &net::Request) -> payload::Payload {
+pub(crate) fn success(request: &net::Request) -> payload::Payload {
     let mut payload = payload::Payload::for_request(request, request.leased_by.clone());
     payload.start_time = Some(1);
     payload.end_time = Some(2);
     payload
 }
 
-pub(super) fn failure_payload(request: &net::Request, error: &str) -> payload::Payload {
+pub(super) fn failure(request: &net::Request, error: &str) -> payload::Payload {
     let mut payload =
         payload::Payload::for_request(request, request.leased_by.clone()).failed(error);
     payload.start_time = Some(1);

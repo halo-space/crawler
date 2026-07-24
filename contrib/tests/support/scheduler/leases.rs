@@ -4,11 +4,11 @@ use spider::{Scheduler, payload};
 
 use super::{
     fixture::{HTTP, Timing, WORKER_A, WORKER_B, close, open},
-    payload::{processing_payload, request, success_payload},
+    payload::{processing, request, success},
     settlement::succeed,
 };
 
-pub(super) async fn lease_contract<S>(scheduler: S, timing: Timing)
+pub(super) async fn contract<S>(scheduler: S, timing: Timing)
 where
     S: Scheduler,
 {
@@ -40,7 +40,7 @@ where
         .unwrap();
 
     tokio::time::sleep(timing.after_refresh(timeout)).await;
-    let processing = processing_payload(&first);
+    let processing = processing(&first);
     scheduler.ack(&processing).await.unwrap();
     scheduler.ack(&processing).await.unwrap();
     tokio::time::sleep(timing.after_refresh(timeout)).await;
@@ -74,7 +74,7 @@ where
         .unwrap()
         .pop()
         .unwrap();
-    let processing = processing_payload(&first);
+    let processing = processing(&first);
     scheduler.ack(&processing).await.unwrap();
 
     tokio::time::sleep(timing.after_refresh(timeout)).await;
@@ -101,7 +101,7 @@ where
     assert_eq!(recovered.failed_workers, [WORKER_A]);
     assert!(
         scheduler
-            .success(&success_payload(&first))
+            .success(&success(&first))
             .await
             .unwrap_err()
             .is_ownership_loss()

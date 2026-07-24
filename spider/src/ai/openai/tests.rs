@@ -7,7 +7,7 @@ use std::time::Duration;
 use tracing::instrument::WithSubscriber;
 
 use super::*;
-use crate::ai::{self, test_support, transport};
+use crate::ai::{self, server, transport};
 
 #[derive(Clone)]
 struct Events {
@@ -103,9 +103,7 @@ async fn ambient_provider_environment_child() {
     if std::env::var_os("CRAWLER_AI_AMBIENT_ENVIRONMENT_CHILD").is_none() {
         return;
     }
-    let server = test_support::server_with(vec![test_support::Reply::completion(Some(
-        r#"{"ok":true}"#,
-    ))]);
+    let server = server::start_with(vec![server::Reply::completion(Some(r#"{"ok":true}"#))]);
     let events = Arc::new(Mutex::new(Vec::new()));
     async {
         let openai = OpenAI::new(server.base_url(), "construction-secret", "model").unwrap();
@@ -127,11 +125,11 @@ async fn ambient_provider_environment_child() {
 #[tokio::test]
 async fn provider_errors_are_bounded_and_do_not_enter_application_tracing() {
     let api_key = "provider-log-secret";
-    let malformed = test_support::server_with(vec![test_support::Reply::error(
+    let malformed = server::start_with(vec![server::Reply::error(
         400,
         format!("malformed {api_key}"),
     )]);
-    let unavailable = test_support::server_with(vec![test_support::Reply::error(
+    let unavailable = server::start_with(vec![server::Reply::error(
         500,
         format!("server echoed {api_key}"),
     )]);
@@ -171,7 +169,7 @@ async fn provider_errors_are_bounded_and_do_not_enter_application_tracing() {
 
 #[tokio::test]
 async fn rejects_an_oversized_provider_response_before_dependency_buffering() {
-    let server = test_support::server_with(vec![test_support::Reply::declared_length(
+    let server = server::start_with(vec![server::Reply::declared_length(
         200,
         transport::MAX_BODY_BYTES + 1,
     )]);
@@ -190,9 +188,9 @@ async fn rejects_an_oversized_provider_response_before_dependency_buffering() {
 #[tokio::test]
 async fn bounds_compressed_success_and_declared_error_provider_bodies() {
     let oversized = vec![b'x'; transport::MAX_BODY_BYTES + 1];
-    let server = test_support::server_with(vec![
-        test_support::Reply::gzip(200, &oversized),
-        test_support::Reply::declared_length(500, transport::MAX_BODY_BYTES + 1),
+    let server = server::start_with(vec![
+        server::Reply::gzip(200, &oversized),
+        server::Reply::declared_length(500, transport::MAX_BODY_BYTES + 1),
     ]);
     let openai = OpenAI::new(server.base_url(), "secret", "model").unwrap();
     let expected = ai::Error::message(format!(

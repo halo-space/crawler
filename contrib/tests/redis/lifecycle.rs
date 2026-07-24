@@ -1,22 +1,18 @@
 use spider::scheduler::Init;
 use spider::{Scheduler, payload, trace};
 
-use super::common::{
-    HTTP, WORKER_A, WORKER_B, namespace, owned_request, processing_payload, request, request_key,
-    scheduler, succeed,
-};
-use crate::redis_fixture::Fixture;
+use super::{key, request, server, settlement, worker};
 
 #[tokio::test]
 async fn close_preserves_data_for_a_new_scheduler_instance() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("restart");
-    let first = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("restart");
+    let first = server.redis(&namespace);
     first.open().await.unwrap();
 
-    let initial = owned_request(
+    let initial = request::for_trace(
         "restart-request",
         "https://example.com/restart",
         "restart-task",
@@ -38,7 +34,7 @@ async fn close_preserves_data_for_a_new_scheduler_instance() {
         "a closed local handle is a deterministic lifecycle error: {closed_error}"
     );
 
-    let second = scheduler(&fixture, &namespace);
+    let second = server.redis(&namespace);
     second.open().await.unwrap();
     assert_eq!(
         second
@@ -50,38 +46,43 @@ async fn close_preserves_data_for_a_new_scheduler_instance() {
         "restart-task"
     );
     let claimed = second
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
     assert_eq!(claimed.id, "restart-request");
-    succeed(&second, &claimed).await;
+    settlement::succeed(&second, &claimed).await;
     second.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn namespaces_isolate_identical_request_ids() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let left_namespace = namespace("left");
-    let right_namespace = namespace("right");
-    let left = scheduler(&fixture, &left_namespace);
-    let right = scheduler(&fixture, &right_namespace);
+    let left_namespace = server::namespace("left");
+    let right_namespace = server::namespace("right");
+    let left = server.redis(&left_namespace);
+    let right = server.redis(&right_namespace);
     left.open().await.unwrap();
     right.open().await.unwrap();
 
-    left.push(
-        payload::Payload::new()
-            .requests(vec![request("shared-id", "https://left.example.com/value")]),
-    )
+    left.push(payload::Payload::new().requests(vec![request::new(
+        "shared-id",
+        "https://left.example.com/value",
+    )]))
     .await
     .unwrap();
-    assert!(!right.has_pending_requests(WORKER_B, HTTP).await.unwrap());
+    assert!(
+        !right
+            .has_pending_requests(worker::B, worker::HTTP)
+            .await
+            .unwrap()
+    );
     right
-        .push(payload::Payload::new().requests(vec![request(
+        .push(payload::Payload::new().requests(vec![request::new(
             "shared-id",
             "https://right.example.com/value",
         )]))
@@ -89,74 +90,78 @@ async fn namespaces_isolate_identical_request_ids() {
         .unwrap();
 
     let left_request = left
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
     let right_request = right
-        .next_requests(1, WORKER_B, HTTP)
+        .next_requests(1, worker::B, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
     assert_eq!(left_request.url, "https://left.example.com/value");
     assert_eq!(right_request.url, "https://right.example.com/value");
-    succeed(&left, &left_request).await;
-    succeed(&right, &right_request).await;
+    settlement::succeed(&left, &left_request).await;
+    settlement::succeed(&right, &right_request).await;
 
     left.close().await.unwrap();
     right.close().await.unwrap();
-    fixture.clear(&left_namespace).await;
-    fixture.clear(&right_namespace).await;
+    server.clear(&left_namespace).await;
+    server.clear(&right_namespace).await;
 }
 
 #[tokio::test]
 async fn terminal_settlement_clears_lease_and_queue_fields() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("terminal-fields");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("terminal-fields");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
     scheduler
-        .push(payload::Payload::new().requests(vec![request(
+        .push(payload::Payload::new().requests(vec![request::new(
             "terminal-success",
             "https://example.com/terminal-success",
         )]))
         .await
         .unwrap();
     let succeeded = scheduler
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
-    succeed(&scheduler, &succeeded).await;
+    settlement::succeed(&scheduler, &succeeded).await;
 
-    let mut failed_request = request("terminal-failure", "https://example.com/terminal-failure");
+    let mut failed_request =
+        request::new("terminal-failure", "https://example.com/terminal-failure");
     failed_request.max_retry_count = 1;
     scheduler
         .push(payload::Payload::new().requests(vec![failed_request]))
         .await
         .unwrap();
     let failed = scheduler
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
-    scheduler.ack(&processing_payload(&failed)).await.unwrap();
+    scheduler
+        .ack(&settlement::processing(&failed))
+        .await
+        .unwrap();
     let mut failure =
         payload::Payload::for_request(&failed, failed.leased_by.clone()).failed("failed");
     failure.start_time = Some(1);
     failure.end_time = Some(2);
     scheduler.failure(&failure).await.unwrap();
 
-    let mut connection = fixture.connection().await;
+    let mut connection = server.connection().await;
     for (id, state) in [("terminal-success", "done"), ("terminal-failure", "failed")] {
-        let key = request_key(&namespace, id);
+        let key = key::request(&namespace, id);
         for (field, expected) in [
             ("state", state),
             ("leased_by", ""),
@@ -176,5 +181,5 @@ async fn terminal_settlement_clears_lease_and_queue_fields() {
     }
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }

@@ -756,6 +756,8 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/middleware/registry.rs` | Register and resolve Middleware implementations and Specs only |
 | `spider/src/downloader/http.rs` | Execute HTTP requests, redirects, headers, cookies, and response conversion |
 | `spider/src/downloader/http/pool.rs` | Key, reuse, expire, and close proxy/TLS-specific HTTP clients |
+| `spider/src/net/request/contract.rs` | Public Request, mode, state, proxy, and TLS contract |
+| `spider/src/payload/contract.rs` | Scheduler operation Payload and its structural validation |
 | `spider/src/scheduler/contract.rs` | Public Scheduler contract |
 | `spider/src/scheduler/init.rs` | Run-seed initialization contract |
 | `spider/src/scheduler/memory.rs` | Public Memory implementation and submodule composition |
@@ -775,14 +777,14 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/ai/transport.rs` | Execute one provider request and bound its HTTP-decoded body before dependency buffering |
 | `spider/src/error/ai.rs` | AI provider construction and call errors |
 | `spider/src/selector/ai.rs` | Build prompts from Responses and enforce the JSON-object extraction contract |
-| `macros/src/spider/model.rs` | Parse the user Spider model and methods |
+| `macros/src/spider/expand.rs` | Expand the user Spider struct into its factory |
 | `macros/src/spider/check.rs` | Validate macro input constraints |
 | `macros/src/spider/bind.rs` | Generate node registration and handler bindings |
-| `contrib/src/scheduler/redis/scheduler.rs` | Redis public type, lifecycle, and Scheduler/Init contract wiring |
+| `contrib/src/scheduler/redis/contract.rs` | Redis public type, lifecycle, and Scheduler/Init contract wiring |
 | `contrib/src/scheduler/redis/request.rs` | Redis Trace/Request storage, claim, restore, and lease recovery |
 | `contrib/src/scheduler/redis/settle.rs` | Redis acknowledgement, release, refresh, success, and failure transitions |
 | `contrib/src/scheduler/redis/item.rs` | Redis Stream Item submission and Trace metadata projection |
-| `contrib/src/scheduler/redis/{key,model,script,validate,error}.rs` | Key isolation, stored records, Lua loading, boundary validation, and error mapping |
+| `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | Key isolation, Lua loading, boundary validation, and error mapping |
 | `contrib/src/scheduler/{api,mysql}.rs` | Future external Scheduler boundaries |
 
 Names rely on module context. For example, `request::State`, `memory::State`, and `registry::Bind` do not repeat their module names. Files likewise avoid mixing unrelated parsing, storage, and control-plane responsibilities.

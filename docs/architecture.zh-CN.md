@@ -710,6 +710,8 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/middleware/registry.rs` | 只注册并解析 Middleware 实现和 Spec |
 | `spider/src/downloader/http.rs` | 执行 HTTP 请求、redirect、headers、cookies 与 Response 转换 |
 | `spider/src/downloader/http/pool.rs` | 按 proxy/TLS 键管理 Client 复用、过期与关闭 |
+| `spider/src/net/request/contract.rs` | Request、mode、state、proxy 与 TLS 公共合同 |
+| `spider/src/payload/contract.rs` | Scheduler 操作 Payload 及其结构校验 |
 | `spider/src/scheduler/contract.rs` | Scheduler 公共合同 |
 | `spider/src/scheduler/init.rs` | 运行种子初始化合同 |
 | `spider/src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |
@@ -729,14 +731,14 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/ai/transport.rs` | 执行单次 provider 请求，并在依赖缓冲前限制 HTTP 解码后的正文 |
 | `spider/src/error/ai.rs` | AI provider 构造与调用错误 |
 | `spider/src/selector/ai.rs` | 从 Response 构造 prompt，并执行 JSON 对象提取合同 |
-| `macros/src/spider/model.rs` | 解析用户 Spider 结构和方法模型 |
+| `macros/src/spider/expand.rs` | 将用户 Spider 结构展开为工厂实现 |
 | `macros/src/spider/check.rs` | 宏输入约束校验 |
 | `macros/src/spider/bind.rs` | 生成 node 注册与 handler 绑定代码 |
-| `contrib/src/scheduler/redis/scheduler.rs` | Redis 对外类型、生命周期及 Scheduler/Init 合同连接 |
+| `contrib/src/scheduler/redis/contract.rs` | Redis 对外类型、生命周期及 Scheduler/Init 合同连接 |
 | `contrib/src/scheduler/redis/request.rs` | Redis Trace/Request 存储、领取、恢复和租约回收 |
 | `contrib/src/scheduler/redis/settle.rs` | Redis ack、release、续租、success 与 failure 转换 |
 | `contrib/src/scheduler/redis/item.rs` | Redis Stream Item 提交与 Trace 元数据投影 |
-| `contrib/src/scheduler/redis/{key,model,script,validate,error}.rs` | key 隔离、存储记录、Lua 加载、边界校验和错误映射 |
+| `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | key 隔离、Lua 加载、边界校验和错误映射 |
 | `contrib/src/scheduler/{api,mysql}.rs` | 后续外部 Scheduler 边界 |
 
 命名依赖模块上下文表达含义。例如 `request::State`、`memory::State`、`registry::Bind` 不重复附加模块名前缀；文件也不混入无关的解析、存储或控制面职责。

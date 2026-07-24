@@ -121,7 +121,7 @@ impl Drop for Server {
     }
 }
 
-pub fn server(content: Option<&str>) -> (String, Receiver<String>) {
+pub(crate) fn start(content: Option<&str>) -> (String, Receiver<String>) {
     let reply = Reply::completion(content);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -141,7 +141,7 @@ pub fn server(content: Option<&str>) -> (String, Receiver<String>) {
     (format!("http://{address}"), receiver)
 }
 
-pub(crate) fn server_with(replies: Vec<Reply>) -> Server {
+pub(crate) fn start_with(replies: Vec<Reply>) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (request_sender, requests) = channel();
@@ -167,7 +167,7 @@ pub(crate) fn server_with(replies: Vec<Reply>) -> Server {
     }
 }
 
-pub(crate) fn server_after_all_requests(replies: Vec<Reply>) -> Server {
+pub(crate) fn start_after_requests(replies: Vec<Reply>) -> Server {
     assert!(!replies.is_empty());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -176,7 +176,7 @@ pub(crate) fn server_after_all_requests(replies: Vec<Reply>) -> Server {
     let count = Arc::new(AtomicUsize::new(0));
     let server_count = Arc::clone(&count);
     let thread = std::thread::spawn(move || {
-        serve_after_all_requests(
+        serve_after_requests(
             listener,
             replies.into(),
             request_sender,
@@ -228,7 +228,7 @@ fn serve(
     }
 }
 
-fn serve_after_all_requests(
+fn serve_after_requests(
     listener: TcpListener,
     replies: VecDeque<Reply>,
     requests: Sender<String>,

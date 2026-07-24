@@ -7,11 +7,11 @@ use quote::quote;
 
 mod bind;
 mod check;
-mod model;
+mod expand;
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     match parse_macro_input!(item as Item) {
-        Item::Struct(item) if attr.is_empty() => model::expand(item).into(),
+        Item::Struct(item) if attr.is_empty() => expand::structure(item).into(),
         Item::Struct(_) => quote! {
             compile_error!("#[spider] arguments belong on the impl block");
         }

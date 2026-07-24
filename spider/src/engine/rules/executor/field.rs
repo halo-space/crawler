@@ -116,7 +116,7 @@ mod tests {
     }
 
     fn response_with_ai(body: &str, output: &str) -> net::Response {
-        let (base_url, _) = crate::ai::test_support::server(Some(output));
+        let (base_url, _) = crate::ai::server::start(Some(output));
         let openai = crate::ai::OpenAI::new(base_url, "secret", "test-model").unwrap();
         let mut response = response(body);
         response.attach_ai(Some(std::sync::Arc::new(openai)));

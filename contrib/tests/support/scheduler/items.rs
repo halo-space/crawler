@@ -6,7 +6,7 @@ use super::{
     settlement::succeed,
 };
 
-pub(super) async fn item_submission_is_isolated<S>(scheduler: S)
+pub(super) async fn submission_is_isolated<S>(scheduler: S)
 where
     S: Scheduler,
 {
@@ -17,10 +17,10 @@ where
         .await
         .unwrap();
 
-    let mut items = payload::Payload::new().items(vec![item("first")]);
-    items.task_id = "task-items".to_string();
-    scheduler.push_items(&items).await.unwrap();
-    scheduler.push_items(&items).await.unwrap();
+    let mut payload = payload::Payload::new().items(vec![item("first")]);
+    payload.task_id = "task-items".to_string();
+    scheduler.push_items(&payload).await.unwrap();
+    scheduler.push_items(&payload).await.unwrap();
     assert!(
         scheduler
             .has_pending_requests(WORKER_A, HTTP)

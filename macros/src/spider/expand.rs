@@ -1,7 +1,7 @@
 use quote::quote;
 use syn::{Fields, FieldsNamed, ItemStruct, parse_quote};
 
-pub(super) fn expand(mut item: ItemStruct) -> proc_macro2::TokenStream {
+pub(super) fn structure(mut item: ItemStruct) -> proc_macro2::TokenStream {
     let ident = item.ident.clone();
     let factory = syn::Ident::new(&format!("__{ident}Factory"), proc_macro2::Span::call_site());
     let generics = item.generics.clone();

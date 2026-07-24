@@ -3,15 +3,15 @@ use spider::{Scheduler, net, payload, trace};
 
 use super::{
     fixture::{HTTP, WORKER_A, WORKER_B, close, open},
-    payload::{failure_payload, owned_request, processing_payload, request, success_payload},
+    payload::{failure, owned_request, processing, request, success},
 };
 
 pub(super) async fn succeed<S>(scheduler: &S, request: &net::Request)
 where
     S: Scheduler,
 {
-    scheduler.ack(&processing_payload(request)).await.unwrap();
-    scheduler.success(&success_payload(request)).await.unwrap();
+    scheduler.ack(&processing(request)).await.unwrap();
+    scheduler.success(&success(request)).await.unwrap();
 }
 
 pub(super) async fn execution_identity_is_enforced<S>(scheduler: S)
@@ -48,14 +48,14 @@ where
         let error = scheduler.ack(&payload).await.unwrap_err();
         assert!(!error.is_transient());
     }
-    let mut wrong_worker = processing_payload(&first);
+    let mut wrong_worker = processing(&first);
     wrong_worker.worker_id = WORKER_B.to_string();
     assert!(matches!(
         scheduler.ack(&wrong_worker).await.unwrap_err(),
         Error::LeaseMismatch(_)
     ));
 
-    let first_active = processing_payload(&first);
+    let first_active = processing(&first);
     scheduler.ack(&first_active).await.unwrap();
     scheduler.ack(&first_active).await.unwrap();
     for payload in processing_mismatches(&first) {
@@ -78,7 +78,7 @@ where
     assert_eq!(second.version, first.version + 1);
     assert_eq!(second.retry_count, first.retry_count);
 
-    let second_active = processing_payload(&second);
+    let second_active = processing(&second);
     assert!(matches!(
         scheduler.refresh_lease(&second_active).await.unwrap_err(),
         Error::NotAcknowledged(_)
@@ -88,10 +88,10 @@ where
         assert!(scheduler.success(&payload).await.is_err());
     }
 
-    let success = success_payload(&second);
-    scheduler.success(&success).await.unwrap();
-    scheduler.success(&success).await.unwrap();
-    let stale = success_payload(&first);
+    let completed = success(&second);
+    scheduler.success(&completed).await.unwrap();
+    scheduler.success(&completed).await.unwrap();
+    let stale = success(&first);
     assert!(
         scheduler
             .success(&stale)
@@ -126,11 +126,11 @@ where
         .unwrap()
         .pop()
         .unwrap();
-    scheduler.ack(&processing_payload(&first)).await.unwrap();
+    scheduler.ack(&processing(&first)).await.unwrap();
     for payload in failure_mismatches(&first) {
         assert!(scheduler.failure(&payload).await.is_err());
     }
-    let first_failure = failure_payload(&first, "first failure");
+    let first_failure = failure(&first, "first failure");
     scheduler.failure(&first_failure).await.unwrap();
     scheduler.failure(&first_failure).await.unwrap();
 
@@ -144,8 +144,8 @@ where
     assert_eq!(second.version, first.version + 1);
     assert_eq!(second.retry_count, 1);
     assert_eq!(second.failed_workers, [WORKER_A]);
-    scheduler.ack(&processing_payload(&second)).await.unwrap();
-    let second_failure = failure_payload(&second, "second failure");
+    scheduler.ack(&processing(&second)).await.unwrap();
+    let second_failure = failure(&second, "second failure");
     scheduler.failure(&second_failure).await.unwrap();
     scheduler.failure(&second_failure).await.unwrap();
 
@@ -182,10 +182,7 @@ where
         .pop()
         .unwrap();
 
-    scheduler
-        .release(&processing_payload(&first))
-        .await
-        .unwrap();
+    scheduler.release(&processing(&first)).await.unwrap();
 
     let returned = scheduler
         .next_requests(1, WORKER_B, HTTP)
@@ -202,53 +199,53 @@ where
 }
 
 fn processing_mismatches(request: &net::Request) -> Vec<payload::Payload> {
-    let mut id = processing_payload(request);
+    let mut id = processing(request);
     id.id = "other-request".to_string();
-    let mut task_id = processing_payload(request);
+    let mut task_id = processing(request);
     task_id.task_id = "other-task".to_string();
-    let mut trace_id = processing_payload(request);
+    let mut trace_id = processing(request);
     trace_id.trace_id = "other-trace".to_string();
-    let mut node = processing_payload(request);
+    let mut node = processing(request);
     node.node = "other-node".to_string();
-    let mut worker_id = processing_payload(request);
+    let mut worker_id = processing(request);
     worker_id.worker_id = "other-worker".to_string();
-    let mut version = processing_payload(request);
+    let mut version = processing(request);
     version.version += 1;
-    let mut state = processing_payload(request);
+    let mut state = processing(request);
     state.state = net::State::Done;
     vec![id, task_id, trace_id, node, worker_id, version, state]
 }
 
 fn success_mismatches(request: &net::Request) -> Vec<payload::Payload> {
-    let mut id = success_payload(request);
+    let mut id = success(request);
     id.id = "other-request".to_string();
-    let mut task_id = success_payload(request);
+    let mut task_id = success(request);
     task_id.task_id = "other-task".to_string();
-    let mut trace_id = success_payload(request);
+    let mut trace_id = success(request);
     trace_id.trace_id = "other-trace".to_string();
-    let mut node = success_payload(request);
+    let mut node = success(request);
     node.node = "other-node".to_string();
-    let mut worker_id = success_payload(request);
+    let mut worker_id = success(request);
     worker_id.worker_id = "other-worker".to_string();
-    let mut version = success_payload(request);
+    let mut version = success(request);
     version.version += 1;
-    let state = failure_payload(request, "unexpected failure state");
+    let state = failure(request, "unexpected failure state");
     vec![id, task_id, trace_id, node, worker_id, version, state]
 }
 
 fn failure_mismatches(request: &net::Request) -> Vec<payload::Payload> {
-    let mut id = failure_payload(request, "failure");
+    let mut id = failure(request, "failure");
     id.id = "other-request".to_string();
-    let mut task_id = failure_payload(request, "failure");
+    let mut task_id = failure(request, "failure");
     task_id.task_id = "other-task".to_string();
-    let mut trace_id = failure_payload(request, "failure");
+    let mut trace_id = failure(request, "failure");
     trace_id.trace_id = "other-trace".to_string();
-    let mut node = failure_payload(request, "failure");
+    let mut node = failure(request, "failure");
     node.node = "other-node".to_string();
-    let mut worker_id = failure_payload(request, "failure");
+    let mut worker_id = failure(request, "failure");
     worker_id.worker_id = "other-worker".to_string();
-    let mut version = failure_payload(request, "failure");
+    let mut version = failure(request, "failure");
     version.version += 1;
-    let state = success_payload(request);
+    let state = success(request);
     vec![id, task_id, trace_id, node, worker_id, version, state]
 }

@@ -1,3 +1,3 @@
-mod model;
+mod contract;
 
-pub use model::{Payload, State};
+pub use contract::{Payload, State};

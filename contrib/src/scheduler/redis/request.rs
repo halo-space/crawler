@@ -1,14 +1,72 @@
 use std::sync::Arc;
 
 use redis::AsyncCommands as _;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spider::{net, payload, scheduler, trace};
 
 use super::Redis;
 use super::error::{message, redis as redis_error};
 use super::key;
-use super::model::{self, Claimed, Queued};
 use super::validate;
+
+const HTTP: &str = "http";
+const BROWSER: &str = "browser";
+
+fn mode(value: &net::Mode) -> &'static str {
+    match value {
+        net::Mode::Http => HTTP,
+        net::Mode::Browser => BROWSER,
+    }
+}
+
+fn parse_mode(value: &str) -> Result<net::Mode, scheduler::Error> {
+    match value {
+        HTTP => Ok(net::Mode::Http),
+        BROWSER => Ok(net::Mode::Browser),
+        value => Err(scheduler::Error::Message(format!(
+            "stored Request has invalid mode: {value}"
+        ))),
+    }
+}
+
+#[derive(Serialize)]
+struct Queued {
+    token: String,
+    id: String,
+    task_id: String,
+    trace_id: String,
+    node: String,
+    mode: String,
+    priority: i32,
+    next_time: String,
+    version: String,
+    retry_count: i32,
+    max_retry_count: i32,
+    snapshot: String,
+    digest: String,
+}
+
+#[derive(Deserialize)]
+struct Claimed {
+    id: String,
+    task_id: String,
+    trace_id: String,
+    node: String,
+    mode: String,
+    priority: i32,
+    next_time: String,
+    version: String,
+    retry_count: i32,
+    max_retry_count: i32,
+    leased_by: String,
+    lease_time: String,
+    snapshot: String,
+    digest: String,
+    trace: Option<String>,
+    #[serde(default)]
+    failed_workers: Vec<String>,
+}
 
 struct Recovery {
     token: String,
@@ -19,7 +77,7 @@ struct Recovery {
 }
 
 impl Redis {
-    pub(super) fn stored(request: net::Request) -> Result<Queued, scheduler::Error> {
+    fn stored(request: net::Request) -> Result<Queued, scheduler::Error> {
         validate::request(&request)?;
         let snapshot =
             net::request::Snapshot::try_from(request).map_err(scheduler::Error::Message)?;
@@ -33,7 +91,7 @@ impl Redis {
             task_id: snapshot.task_id.clone(),
             trace_id: snapshot.trace_id.clone(),
             node: snapshot.node.clone(),
-            mode: model::mode(&snapshot.mode).to_string(),
+            mode: mode(&snapshot.mode).to_string(),
             priority: snapshot.priority,
             next_time: snapshot.next_time.to_string(),
             version: snapshot.version.to_string(),
@@ -111,7 +169,7 @@ impl Redis {
         modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, scheduler::Error> {
         validate::worker(worker_id, modes)?;
-        let modes = modes.iter().map(model::mode).collect::<Vec<_>>();
+        let modes = modes.iter().map(mode).collect::<Vec<_>>();
         let modes = Self::encode(&modes)?;
         let mut connection = self.connection().await?;
         let encoded: Vec<String> = self
@@ -234,7 +292,7 @@ impl Redis {
         modes: &[net::Mode],
     ) -> Result<bool, scheduler::Error> {
         validate::worker(worker_id, modes)?;
-        let modes = modes.iter().map(model::mode).collect::<Vec<_>>();
+        let modes = modes.iter().map(mode).collect::<Vec<_>>();
         let modes = Self::encode(&modes)?;
         let mut connection = self.connection().await?;
         let pending: i64 = self
@@ -315,7 +373,7 @@ impl Redis {
                 message: error.to_string(),
             })?;
         validate::snapshot_digest(&snapshot, &claimed.digest, &claimed.id)?;
-        let mode = model::parse_mode(&claimed.mode)?;
+        let mode = parse_mode(&claimed.mode)?;
         for (field, matches) in [
             ("id", snapshot.id == claimed.id),
             ("task_id", snapshot.task_id == claimed.task_id),
@@ -423,7 +481,7 @@ fn snapshot_retry_limit(claimed: &Claimed) -> Option<i32> {
         && snapshot.task_id == claimed.task_id
         && snapshot.trace_id == claimed.trace_id
         && snapshot.node == claimed.node
-        && model::mode(&snapshot.mode) == claimed.mode
+        && mode(&snapshot.mode) == claimed.mode
         && snapshot.priority == claimed.priority
         && snapshot.max_retry_count > 0;
     matches.then_some(snapshot.max_retry_count)

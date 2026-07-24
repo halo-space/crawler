@@ -2,26 +2,22 @@ use std::time::Duration;
 
 use spider::{Scheduler, net, payload};
 
-use super::common::{
-    HTTP, WORKER_A, WORKER_B, namespace, processing_key, processing_payload, request, request_key,
-    scheduler, succeed, success_payload, token,
-};
-use crate::redis_fixture::Fixture;
+use super::{key, request, server, settlement, worker};
 
 const BROWSER: &[net::Mode] = &[net::Mode::Browser];
 const BOTH: &[net::Mode] = &[net::Mode::Http, net::Mode::Browser];
 
 #[tokio::test]
-async fn push_rejects_a_wrong_type_processing_index_before_writing() {
-    let Some(fixture) = Fixture::connect().await else {
+async fn push_rejects_a_wrong_type_index_before_writing() {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("processing-push-type");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("processing-push-type");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
-    let browser = processing_key(&namespace, "browser");
-    let mut connection = fixture.connection().await;
+    let browser = key::processing(&namespace, "browser");
+    let mut connection = server.connection().await;
     redis::cmd("SET")
         .arg(&browser)
         .arg("wrong-type")
@@ -31,35 +27,35 @@ async fn push_rejects_a_wrong_type_processing_index_before_writing() {
 
     assert!(
         scheduler
-            .push(
-                payload::Payload::new()
-                    .requests(vec![request("push-type", "https://example.com/push-type",)])
-            )
+            .push(payload::Payload::new().requests(vec![request::new(
+                "push-type",
+                "https://example.com/push-type",
+            )]))
             .await
             .is_err()
     );
     let exists = redis::cmd("EXISTS")
-        .arg(request_key(&namespace, "push-type"))
+        .arg(key::request(&namespace, "push-type"))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
     assert_eq!(exists, 0);
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
-async fn processing_indices_are_mode_scoped_and_removed_on_settlement() {
-    let Some(fixture) = Fixture::connect().await else {
+async fn indices_are_mode_scoped_and_removed_on_settlement() {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("processing-modes");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("processing-modes");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
-    let http = request("processing-http", "https://example.com/http");
-    let mut browser = request("processing-browser", "https://example.com/browser");
+    let http = request::new("processing-http", "https://example.com/http");
+    let mut browser = request::new("processing-browser", "https://example.com/browser");
     browser.mode = net::Mode::Browser;
     browser.max_retry_count = 1;
     scheduler
@@ -68,21 +64,21 @@ async fn processing_indices_are_mode_scoped_and_removed_on_settlement() {
         .unwrap();
 
     let http = scheduler
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
     let browser = scheduler
-        .next_requests(1, WORKER_B, BROWSER)
+        .next_requests(1, worker::B, BROWSER)
         .await
         .unwrap()
         .pop()
         .unwrap();
 
-    let http_index = processing_key(&namespace, "http");
-    let browser_index = processing_key(&namespace, "browser");
-    let mut connection = fixture.connection().await;
+    let http_index = key::processing(&namespace, "http");
+    let browser_index = key::processing(&namespace, "browser");
+    let mut connection = server.connection().await;
     assert!(
         score(&mut connection, &http_index, &http.id)
             .await
@@ -105,18 +101,18 @@ async fn processing_indices_are_mode_scoped_and_removed_on_settlement() {
     );
     assert!(
         scheduler
-            .has_pending_requests(WORKER_A, HTTP)
+            .has_pending_requests(worker::A, worker::HTTP)
             .await
             .unwrap()
     );
     assert!(
         scheduler
-            .has_pending_requests(WORKER_B, BROWSER)
+            .has_pending_requests(worker::B, BROWSER)
             .await
             .unwrap()
     );
 
-    succeed(&scheduler, &http).await;
+    settlement::succeed(&scheduler, &http).await;
     assert!(
         score(&mut connection, &http_index, &http.id)
             .await
@@ -124,18 +120,21 @@ async fn processing_indices_are_mode_scoped_and_removed_on_settlement() {
     );
     assert!(
         !scheduler
-            .has_pending_requests(WORKER_A, HTTP)
+            .has_pending_requests(worker::A, worker::HTTP)
             .await
             .unwrap()
     );
     assert!(
         scheduler
-            .has_pending_requests(WORKER_B, BROWSER)
+            .has_pending_requests(worker::B, BROWSER)
             .await
             .unwrap()
     );
 
-    scheduler.ack(&processing_payload(&browser)).await.unwrap();
+    scheduler
+        .ack(&settlement::processing(&browser))
+        .await
+        .unwrap();
     let mut failure =
         payload::Payload::for_request(&browser, browser.leased_by.clone()).failed("failed");
     failure.start_time = Some(1);
@@ -148,44 +147,44 @@ async fn processing_indices_are_mode_scoped_and_removed_on_settlement() {
     );
     assert!(
         !scheduler
-            .has_pending_requests(WORKER_B, BROWSER)
+            .has_pending_requests(worker::B, BROWSER)
             .await
             .unwrap()
     );
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn refresh_restores_the_index_and_updates_its_lease_score() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("processing-refresh");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("processing-refresh");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
     scheduler
-        .push(payload::Payload::new().requests(vec![request(
+        .push(payload::Payload::new().requests(vec![request::new(
             "refresh-index",
             "https://example.com/refresh-index",
         )]))
         .await
         .unwrap();
     let request = scheduler
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
-    let active = processing_payload(&request);
+    let active = settlement::processing(&request);
     scheduler.ack(&active).await.unwrap();
 
-    let index = processing_key(&namespace, "http");
-    let other_index = processing_key(&namespace, "browser");
-    let key = request_key(&namespace, &request.id);
-    let mut connection = fixture.connection().await;
+    let index = key::processing(&namespace, "http");
+    let other_index = key::processing(&namespace, "browser");
+    let key = key::request(&namespace, &request.id);
+    let mut connection = server.connection().await;
     let initial = score(&mut connection, &index, &request.id).await.unwrap();
     let stored = redis::cmd("HGET")
         .arg(&key)
@@ -197,20 +196,20 @@ async fn refresh_restores_the_index_and_updates_its_lease_score() {
 
     redis::cmd("ZREM")
         .arg(&index)
-        .arg(token(&request.id))
+        .arg(key::token(&request.id))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
     redis::cmd("ZADD")
         .arg(&other_index)
         .arg(initial)
-        .arg(token(&request.id))
+        .arg(key::token(&request.id))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
     assert!(
         !scheduler
-            .has_pending_requests(WORKER_B, HTTP)
+            .has_pending_requests(worker::B, worker::HTTP)
             .await
             .unwrap()
     );
@@ -233,7 +232,7 @@ async fn refresh_restores_the_index_and_updates_its_lease_score() {
     );
     assert!(
         scheduler
-            .has_pending_requests(WORKER_B, HTTP)
+            .has_pending_requests(worker::B, worker::HTTP)
             .await
             .unwrap()
     );
@@ -241,11 +240,14 @@ async fn refresh_restores_the_index_and_updates_its_lease_score() {
     redis::cmd("ZADD")
         .arg(&other_index)
         .arg(refreshed)
-        .arg(token(&request.id))
+        .arg(key::token(&request.id))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
-    scheduler.success(&success_payload(&request)).await.unwrap();
+    scheduler
+        .success(&settlement::success(&request))
+        .await
+        .unwrap();
     assert!(score(&mut connection, &index, &request.id).await.is_none());
     assert!(
         score(&mut connection, &other_index, &request.id)
@@ -253,19 +255,19 @@ async fn refresh_restores_the_index_and_updates_its_lease_score() {
             .is_none()
     );
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn expired_processing_score_recovers_the_request() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("processing-expiry");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("processing-expiry");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
-    let mut original = request(
+    let mut original = request::new(
         "expired-processing",
         "https://example.com/expired-processing",
     );
@@ -275,17 +277,20 @@ async fn expired_processing_score_recovers_the_request() {
         .await
         .unwrap();
     let claimed = scheduler
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
-    scheduler.ack(&processing_payload(&claimed)).await.unwrap();
+    scheduler
+        .ack(&settlement::processing(&claimed))
+        .await
+        .unwrap();
 
-    let index = processing_key(&namespace, "http");
-    let mut connection = fixture.connection().await;
+    let index = key::processing(&namespace, "http");
+    let mut connection = server.connection().await;
     redis::cmd("HSET")
-        .arg(request_key(&namespace, &claimed.id))
+        .arg(key::request(&namespace, &claimed.id))
         .arg("lease_time")
         .arg(0)
         .query_async::<usize>(&mut connection)
@@ -294,13 +299,13 @@ async fn expired_processing_score_recovers_the_request() {
     redis::cmd("ZADD")
         .arg(&index)
         .arg(0)
-        .arg(token(&claimed.id))
+        .arg(key::token(&claimed.id))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
 
     let recovered = scheduler
-        .next_requests(1, WORKER_B, HTTP)
+        .next_requests(1, worker::B, worker::HTTP)
         .await
         .unwrap()
         .pop()
@@ -308,9 +313,9 @@ async fn expired_processing_score_recovers_the_request() {
     assert_eq!(recovered.id, claimed.id);
     assert_eq!(recovered.version, claimed.version + 1);
     assert_eq!(recovered.retry_count, claimed.retry_count + 1);
-    assert_eq!(recovered.failed_workers, [WORKER_A]);
+    assert_eq!(recovered.failed_workers, [worker::A]);
     let stored = redis::cmd("HGET")
-        .arg(request_key(&namespace, &recovered.id))
+        .arg(key::request(&namespace, &recovered.id))
         .arg("lease_time")
         .query_async::<i64>(&mut connection)
         .await
@@ -320,39 +325,39 @@ async fn expired_processing_score_recovers_the_request() {
         Some(stored)
     );
 
-    succeed(&scheduler, &recovered).await;
+    settlement::succeed(&scheduler, &recovered).await;
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn claim_removes_orphans_and_repairs_a_request_in_the_wrong_mode_index() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("processing-repair");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("processing-repair");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
-    let http_index = processing_key(&namespace, "http");
-    let browser_index = processing_key(&namespace, "browser");
-    let mut connection = fixture.connection().await;
+    let http_index = key::processing(&namespace, "http");
+    let browser_index = key::processing(&namespace, "browser");
+    let mut connection = server.connection().await;
     redis::cmd("ZADD")
         .arg(&http_index)
         .arg(4_000_000_000_000_i64)
-        .arg(token("missing-request"))
+        .arg(key::token("missing-request"))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
     assert!(
         scheduler
-            .has_pending_requests(WORKER_A, HTTP)
+            .has_pending_requests(worker::A, worker::HTTP)
             .await
             .unwrap()
     );
     assert!(
         scheduler
-            .next_requests(1, WORKER_A, HTTP)
+            .next_requests(1, worker::A, worker::HTTP)
             .await
             .unwrap()
             .is_empty()
@@ -364,26 +369,26 @@ async fn claim_removes_orphans_and_repairs_a_request_in_the_wrong_mode_index() {
     );
     assert!(
         !scheduler
-            .has_pending_requests(WORKER_A, HTTP)
+            .has_pending_requests(worker::A, worker::HTTP)
             .await
             .unwrap()
     );
 
     scheduler
-        .push(payload::Payload::new().requests(vec![request(
+        .push(payload::Payload::new().requests(vec![request::new(
             "wrong-mode-index",
             "https://example.com/wrong-mode-index",
         )]))
         .await
         .unwrap();
     let claimed = scheduler
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
     let lease_time = redis::cmd("HGET")
-        .arg(request_key(&namespace, &claimed.id))
+        .arg(key::request(&namespace, &claimed.id))
         .arg("lease_time")
         .query_async::<i64>(&mut connection)
         .await
@@ -391,21 +396,21 @@ async fn claim_removes_orphans_and_repairs_a_request_in_the_wrong_mode_index() {
     redis::cmd("ZADD")
         .arg(&http_index)
         .arg(lease_time + 2)
-        .arg(token(&claimed.id))
+        .arg(key::token(&claimed.id))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
     redis::cmd("ZADD")
         .arg(&browser_index)
         .arg(lease_time + 1)
-        .arg(token(&claimed.id))
+        .arg(key::token(&claimed.id))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
 
     assert!(
         scheduler
-            .next_requests(1, WORKER_B, HTTP)
+            .next_requests(1, worker::B, worker::HTTP)
             .await
             .unwrap()
             .is_empty()
@@ -421,40 +426,40 @@ async fn claim_removes_orphans_and_repairs_a_request_in_the_wrong_mode_index() {
     );
     assert!(
         scheduler
-            .has_pending_requests(WORKER_B, HTTP)
+            .has_pending_requests(worker::B, worker::HTTP)
             .await
             .unwrap()
     );
     assert!(
         !scheduler
-            .has_pending_requests(WORKER_B, BROWSER)
+            .has_pending_requests(worker::B, BROWSER)
             .await
             .unwrap()
     );
 
-    succeed(&scheduler, &claimed).await;
+    settlement::succeed(&scheduler, &claimed).await;
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn expired_recovery_limit_is_shared_across_modes() {
     const PER_MODE: usize = 129;
 
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("processing-recovery-limit");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("processing-recovery-limit");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
     let mut requests = Vec::with_capacity(PER_MODE * 2);
     for index in 0..PER_MODE {
-        requests.push(request(
+        requests.push(request::new(
             &format!("recovery-http-{index}"),
             "https://example.com/recovery/http",
         ));
-        let mut browser = request(
+        let mut browser = request::new(
             &format!("recovery-browser-{index}"),
             "https://example.com/recovery/browser",
         );
@@ -466,22 +471,22 @@ async fn expired_recovery_limit_is_shared_across_modes() {
         .await
         .unwrap();
     let claimed = scheduler
-        .next_requests(PER_MODE * 2, WORKER_A, BOTH)
+        .next_requests(PER_MODE * 2, worker::A, BOTH)
         .await
         .unwrap();
     assert_eq!(claimed.len(), PER_MODE * 2);
 
-    let mut connection = fixture.connection().await;
+    let mut connection = server.connection().await;
     for request in &claimed {
         redis::cmd("HSET")
-            .arg(request_key(&namespace, &request.id))
+            .arg(key::request(&namespace, &request.id))
             .arg("lease_time")
             .arg(0)
             .query_async::<usize>(&mut connection)
             .await
             .unwrap();
         redis::cmd("ZADD")
-            .arg(processing_key(
+            .arg(key::processing(
                 &namespace,
                 match request.mode {
                     net::Mode::Http => "http",
@@ -489,19 +494,19 @@ async fn expired_recovery_limit_is_shared_across_modes() {
                 },
             ))
             .arg(0)
-            .arg(token(&request.id))
+            .arg(key::token(&request.id))
             .query_async::<usize>(&mut connection)
             .await
             .unwrap();
     }
 
-    let recovered = scheduler.next_requests(1, WORKER_B, BOTH).await.unwrap();
+    let recovered = scheduler.next_requests(1, worker::B, BOTH).await.unwrap();
     assert_eq!(recovered.len(), 1);
     let mut counts = Vec::new();
     for mode in ["http", "browser"] {
         counts.push(
             redis::cmd("ZCARD")
-                .arg(processing_key(&namespace, mode))
+                .arg(key::processing(&namespace, mode))
                 .query_async::<usize>(&mut connection)
                 .await
                 .unwrap(),
@@ -511,38 +516,38 @@ async fn expired_recovery_limit_is_shared_across_modes() {
     assert_eq!(counts, [65, 66]);
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn opposite_mode_type_errors_do_not_partially_refresh_or_settle() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("processing-opposite-type");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("processing-opposite-type");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
     scheduler
-        .push(payload::Payload::new().requests(vec![request(
+        .push(payload::Payload::new().requests(vec![request::new(
             "opposite-type",
             "https://example.com/opposite-type",
         )]))
         .await
         .unwrap();
     let request = scheduler
-        .next_requests(1, WORKER_A, HTTP)
+        .next_requests(1, worker::A, worker::HTTP)
         .await
         .unwrap()
         .pop()
         .unwrap();
-    let active = processing_payload(&request);
+    let active = settlement::processing(&request);
     scheduler.ack(&active).await.unwrap();
 
-    let key = request_key(&namespace, &request.id);
-    let http = processing_key(&namespace, "http");
-    let browser = processing_key(&namespace, "browser");
-    let mut connection = fixture.connection().await;
+    let key = key::request(&namespace, &request.id);
+    let http = key::processing(&namespace, "http");
+    let browser = key::processing(&namespace, "browser");
+    let mut connection = server.connection().await;
     let lease_time = redis::cmd("HGET")
         .arg(&key)
         .arg("lease_time")
@@ -573,7 +578,12 @@ async fn opposite_mode_type_errors_do_not_partially_refresh_or_settle() {
         lease_score
     );
 
-    assert!(scheduler.success(&success_payload(&request)).await.is_err());
+    assert!(
+        scheduler
+            .success(&settlement::success(&request))
+            .await
+            .is_err()
+    );
     assert_eq!(
         redis::cmd("HGET")
             .arg(&key)
@@ -593,10 +603,13 @@ async fn opposite_mode_type_errors_do_not_partially_refresh_or_settle() {
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
-    scheduler.success(&success_payload(&request)).await.unwrap();
+    scheduler
+        .success(&settlement::success(&request))
+        .await
+        .unwrap();
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 async fn score(
@@ -606,7 +619,7 @@ async fn score(
 ) -> Option<i64> {
     redis::cmd("ZSCORE")
         .arg(key)
-        .arg(token(request_id))
+        .arg(key::token(request_id))
         .query_async::<Option<f64>>(connection)
         .await
         .unwrap()

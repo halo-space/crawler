@@ -4,7 +4,7 @@ use spider::{Scheduler, payload};
 
 use super::{
     fixture::{HTTP, WORKER_A, close, open, race},
-    payload::{failure_payload, processing_payload, request},
+    payload::{failure, processing, request},
     settlement::succeed,
 };
 
@@ -92,9 +92,9 @@ where
         .unwrap()
         .pop()
         .unwrap();
-    scheduler.ack(&processing_payload(&claimed)).await.unwrap();
+    scheduler.ack(&processing(&claimed)).await.unwrap();
     scheduler
-        .failure(&failure_payload(&claimed, "terminal replay"))
+        .failure(&failure(&claimed, "terminal replay"))
         .await
         .unwrap();
     scheduler

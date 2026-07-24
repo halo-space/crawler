@@ -1,9 +1,6 @@
 use spider::{Scheduler, payload};
 
-use super::common::{
-    HTTP, WORKER_A, WORKER_B, completion_key, namespace, request, request_key, scheduler, succeed,
-};
-use crate::redis_fixture::Fixture;
+use super::{key, request, server, settlement, worker};
 
 async fn replace_snapshot_url(
     connection: &mut redis::aio::MultiplexedConnection,
@@ -11,7 +8,7 @@ async fn replace_snapshot_url(
     id: &str,
     url: &str,
 ) {
-    let key = request_key(namespace, id);
+    let key = key::request(namespace, id);
     let original: String = redis::cmd("HGET")
         .arg(&key)
         .arg("snapshot")
@@ -50,24 +47,24 @@ async fn replace_snapshot_url(
 
 #[tokio::test]
 async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("snapshot-integrity-terminal");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("snapshot-integrity-terminal");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
-    let mut tampered = request("tampered-terminal", "https://example.com/original");
+    let mut tampered = request::new("tampered-terminal", "https://example.com/original");
     tampered.priority = 20;
     tampered.max_retry_count = 1;
-    let mut valid = request("valid-same-batch", "https://example.com/valid");
+    let mut valid = request::new("valid-same-batch", "https://example.com/valid");
     valid.priority = 10;
     scheduler
         .push(payload::Payload::new().requests(vec![tampered, valid]))
         .await
         .unwrap();
 
-    let mut connection = fixture.connection().await;
+    let mut connection = server.connection().await;
     replace_snapshot_url(
         &mut connection,
         &namespace,
@@ -76,12 +73,15 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
     )
     .await;
 
-    let claimed = scheduler.next_requests(2, WORKER_A, HTTP).await.unwrap();
+    let claimed = scheduler
+        .next_requests(2, worker::A, worker::HTTP)
+        .await
+        .unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, "valid-same-batch");
-    succeed(&scheduler, &claimed[0]).await;
+    settlement::succeed(&scheduler, &claimed[0]).await;
 
-    let tampered_key = request_key(&namespace, "tampered-terminal");
+    let tampered_key = key::request(&namespace, "tampered-terminal");
     let state: String = redis::cmd("HGET")
         .arg(&tampered_key)
         .arg("state")
@@ -97,7 +97,7 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
         .unwrap();
     assert_eq!(retry_count, "1");
     let error: String = redis::cmd("HGET")
-        .arg(completion_key(&namespace, "tampered-terminal", 1))
+        .arg(key::completion(&namespace, "tampered-terminal", 1))
         .arg("error")
         .query_async(&mut connection)
         .await
@@ -105,32 +105,32 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
     assert!(error.contains("digest does not match its content"));
     assert!(
         !scheduler
-            .has_pending_requests(WORKER_A, HTTP)
+            .has_pending_requests(worker::A, worker::HTTP)
             .await
             .unwrap()
     );
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("snapshot-integrity-retry");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("snapshot-integrity-retry");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
-    let mut tampered = request("tampered-retry", "https://example.com/original");
+    let mut tampered = request::new("tampered-retry", "https://example.com/original");
     tampered.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![tampered]))
         .await
         .unwrap();
 
-    let mut connection = fixture.connection().await;
+    let mut connection = server.connection().await;
     replace_snapshot_url(
         &mut connection,
         &namespace,
@@ -141,12 +141,12 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
 
     assert!(
         scheduler
-            .next_requests(1, WORKER_A, HTTP)
+            .next_requests(1, worker::A, worker::HTTP)
             .await
             .unwrap()
             .is_empty()
     );
-    let key = request_key(&namespace, "tampered-retry");
+    let key = key::request(&namespace, "tampered-retry");
     let state: String = redis::cmd("HGET")
         .arg(&key)
         .arg("state")
@@ -163,14 +163,14 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
     assert_eq!(retry_count, "1");
     assert!(
         scheduler
-            .has_pending_requests(WORKER_B, HTTP)
+            .has_pending_requests(worker::B, worker::HTTP)
             .await
             .unwrap()
     );
 
     assert!(
         scheduler
-            .next_requests(1, WORKER_B, HTTP)
+            .next_requests(1, worker::B, worker::HTTP)
             .await
             .unwrap()
             .is_empty()
@@ -191,34 +191,34 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
     assert_eq!(terminal_retry, "2");
     assert!(
         !scheduler
-            .has_pending_requests(WORKER_A, HTTP)
+            .has_pending_requests(worker::A, worker::HTTP)
             .await
             .unwrap()
     );
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn mutable_hash_cannot_override_the_snapshot_retry_limit() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("snapshot-retry-limit");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("snapshot-retry-limit");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
-    let mut request = request("retry-limit", "https://example.com/retry-limit");
+    let mut request = request::new("retry-limit", "https://example.com/retry-limit");
     request.max_retry_count = 1;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
 
-    let mut connection = fixture.connection().await;
+    let mut connection = server.connection().await;
     redis::cmd("HSET")
-        .arg(request_key(&namespace, "retry-limit"))
+        .arg(key::request(&namespace, "retry-limit"))
         .arg("max_retry_count")
         .arg(i32::MAX)
         .query_async::<usize>(&mut connection)
@@ -227,12 +227,12 @@ async fn mutable_hash_cannot_override_the_snapshot_retry_limit() {
 
     assert!(
         scheduler
-            .next_requests(1, WORKER_A, HTTP)
+            .next_requests(1, worker::A, worker::HTTP)
             .await
             .unwrap()
             .is_empty()
     );
-    let key = request_key(&namespace, "retry-limit");
+    let key = key::request(&namespace, "retry-limit");
     let state: String = redis::cmd("HGET")
         .arg(&key)
         .arg("state")
@@ -248,7 +248,7 @@ async fn mutable_hash_cannot_override_the_snapshot_retry_limit() {
         .unwrap();
     assert_eq!(max_retry_count, 1);
     let error: String = redis::cmd("HGET")
-        .arg(completion_key(&namespace, "retry-limit", 1))
+        .arg(key::completion(&namespace, "retry-limit", 1))
         .arg("error")
         .query_async(&mut connection)
         .await
@@ -256,22 +256,22 @@ async fn mutable_hash_cannot_override_the_snapshot_retry_limit() {
     assert!(error.contains("max_retry_count"));
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }
 
 #[tokio::test]
 async fn another_request_snapshot_cannot_override_the_retry_limit() {
-    let Some(fixture) = Fixture::connect().await else {
+    let Some(server) = server::Handle::connect().await else {
         return;
     };
-    let namespace = namespace("cross-request-retry-limit");
-    let scheduler = scheduler(&fixture, &namespace);
+    let namespace = server::namespace("cross-request-retry-limit");
+    let scheduler = server.redis(&namespace);
     scheduler.open().await.unwrap();
 
-    let mut target = request("retry-target", "https://example.com/retry-target");
+    let mut target = request::new("retry-target", "https://example.com/retry-target");
     target.priority = 20;
     target.max_retry_count = 1;
-    let mut source = request("retry-source", "https://example.com/retry-source");
+    let mut source = request::new("retry-source", "https://example.com/retry-source");
     source.priority = 10;
     source.max_retry_count = 3;
     scheduler
@@ -279,8 +279,8 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
         .await
         .unwrap();
 
-    let mut connection = fixture.connection().await;
-    let source_key = request_key(&namespace, "retry-source");
+    let mut connection = server.connection().await;
+    let source_key = key::request(&namespace, "retry-source");
     let (snapshot, digest): (String, String) = redis::cmd("HMGET")
         .arg(&source_key)
         .arg("snapshot")
@@ -288,7 +288,7 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    let target_key = request_key(&namespace, "retry-target");
+    let target_key = key::request(&namespace, "retry-target");
     redis::cmd("HSET")
         .arg(&target_key)
         .arg("snapshot")
@@ -301,7 +301,7 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
 
     assert!(
         scheduler
-            .next_requests(1, WORKER_A, HTTP)
+            .next_requests(1, worker::A, worker::HTTP)
             .await
             .unwrap()
             .is_empty()
@@ -317,5 +317,5 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
     assert_eq!(max_retry_count, 1);
 
     scheduler.close().await.unwrap();
-    fixture.clear(&namespace).await;
+    server.clear(&namespace).await;
 }

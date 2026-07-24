@@ -7,4 +7,4 @@ pub use crate::error::ai::Error;
 pub use openai::OpenAI;
 
 #[cfg(test)]
-pub(crate) mod test_support;
+pub(crate) mod server;

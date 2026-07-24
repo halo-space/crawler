@@ -1,14 +1,30 @@
+use serde::Serialize;
 use spider::{payload, scheduler};
 
 use super::Redis;
 use super::error::{message, redis as redis_error};
-use super::model::{Item, Items};
+
+#[derive(Serialize)]
+struct Output {
+    id: String,
+    task_id: String,
+    trace_id: String,
+    version: i64,
+    worker_id: String,
+    node: String,
+    config_version: Option<String>,
+    timezone: Option<String>,
+    records: Vec<Record>,
+}
+
+#[derive(Serialize)]
+struct Record {
+    id: String,
+    data: serde_json::Value,
+}
 
 impl Redis {
-    pub(super) async fn write_items(
-        &self,
-        payload: &payload::Payload,
-    ) -> Result<(), scheduler::Error> {
+    pub(super) async fn submit(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
         payload
             .validate_items()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
@@ -21,15 +37,15 @@ impl Redis {
             .iter()
             .map(|item| {
                 serde_json::to_value(item.as_ref())
-                    .map(|data| Item {
+                    .map(|data| Record {
                         id: item.id().to_string(),
                         data,
                     })
                     .map_err(message)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let (config_version, timezone) = self.item_metadata(&payload.trace_id).await?;
-        let record = Items {
+        let (config_version, timezone) = self.metadata(&payload.trace_id).await?;
+        let output = Output {
             id: payload.id.clone(),
             task_id: payload.task_id.clone(),
             trace_id: payload.trace_id.clone(),
@@ -40,7 +56,7 @@ impl Redis {
             timezone,
             records,
         };
-        let encoded = Self::encode(&record)?;
+        let encoded = Self::encode(&output)?;
         let mut connection = self.connection().await?;
         let _: String = self
             .scripts
@@ -54,7 +70,7 @@ impl Redis {
         Ok(())
     }
 
-    async fn item_metadata(
+    async fn metadata(
         &self,
         trace_id: &str,
     ) -> Result<(Option<String>, Option<String>), scheduler::Error> {

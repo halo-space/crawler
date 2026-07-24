@@ -24,15 +24,15 @@ where
     initialization::initialization_is_atomic(create()).await;
     replay::request_replay_is_atomic(create()).await;
     initialization::trace_ownership_is_atomic(create()).await;
-    rules::claimed_requests_preserve_rules_trace(create()).await;
-    rules::existing_rules_trace_runs_without_local_seed(create()).await;
+    rules::claimed_requests_preserve_trace(create()).await;
+    rules::existing_trace_runs_without_local_seed(create()).await;
     claims::claims_are_capability_scoped(create()).await;
     claims::concurrent_capability_claims_are_atomic(create()).await;
     claims::delayed_requests_wait_for_next_time(create(), timing).await;
     settlement::execution_identity_is_enforced(create()).await;
     settlement::release_before_ack_preserves_queue_retry(create()).await;
     settlement::failure_owns_queue_retry(create()).await;
-    items::item_submission_is_isolated(create()).await;
+    items::submission_is_isolated(create()).await;
 }
 
 /// Runs the lease-specific scenarios for a fixture that explicitly exposes a lease policy.
@@ -40,5 +40,5 @@ pub async fn lease<S>(scheduler: S, timing: Timing)
 where
     S: spider::Scheduler,
 {
-    leases::lease_contract(scheduler, timing).await;
+    leases::contract(scheduler, timing).await;
 }
