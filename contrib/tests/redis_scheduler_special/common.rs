@@ -56,6 +56,10 @@ pub(super) fn request_key(namespace: &str, id: &str) -> String {
     format!("{namespace}:request:{}", token(id))
 }
 
+pub(super) fn processing_key(namespace: &str, mode: &str) -> String {
+    format!("{namespace}:processing:{mode}")
+}
+
 pub(super) fn completion_key(namespace: &str, id: &str, version: i64) -> String {
     format!("{}:completion:{version}", request_key(namespace, id))
 }

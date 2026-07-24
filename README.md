@@ -57,17 +57,25 @@ engine.start().await?;
 ```
 
 All Redis keys are isolated by the selected namespace; normal `close()` releases client resources
-without deleting queued work. Redis stores Trace Snapshots, Request state, capability-scoped leases,
-settlements, statistics, and Items. Each accepted non-empty Item `Payload` becomes one Redis Stream
-entry and remains at-least-once; it does not perform business Item deduplication.
+without deleting queued work. Redis stores Trace Snapshots, Request state, mode-scoped processing
+leases, settlements, statistics, and Items. Each `processing:<mode>` ZSET is the only active Request
+index and uses `lease_time` as its score; the Request Hash remains the authoritative state. Each
+accepted non-empty Item `Payload` becomes one Redis Stream entry and remains at-least-once; it does
+not perform business Item deduplication.
 
-Redis bounds recurring claim maintenance: one `next_requests` call recovers at most 128 expired
-leases, inspects at most 128 lease records, and promotes and inspects at most 128 delayed Requests
+Redis bounds recurring claim maintenance: one `next_requests` call recovers at most 64 expired
+leases per mode, inspects at most 128 processing records across both modes, and promotes and
+inspects at most 128 delayed Requests
 for each requested mode. Missing per-Request records found while recovering, promoting, inspecting,
-or selecting work have their dangling indexes removed; records with malformed lease or queue metadata
-are removed from active indexes and moved to terminal failure with a completion record. Neither blocks
-later valid Requests. A corrupt shared index type instead fails the claim explicitly before state
-mutation.
+or selecting work have their dangling indexes removed. A valid processing Hash repairs a stale score
+or misplaced mode projection without consuming a retry; an invalid Hash or queue record is removed
+from active indexes and moved to terminal failure with a completion record. Neither blocks later valid
+Requests. Before returning a claim, the Worker recalculates the immutable Request Snapshot digest;
+a mismatch follows the same recovery path and is never executed. A verified Snapshot retry limit
+cannot be overridden by the mutable Hash, and a failed recovery cannot withhold valid Requests from
+the same claim. A corrupt shared index type instead
+fails the claim explicitly before state mutation. The current key layout does not migrate an older
+Redis namespace; deployment starts with a new namespace.
 
 This release supports one Redis 7+ standalone primary only. It does not support Redis Cluster: the
 multi-key Lua transitions rely on single-instance atomicity, so Cluster will be a separate Scheduler
@@ -244,13 +252,14 @@ The Scheduler contract receives the Engine-owned Worker ID and supported downloa
 `next_requests` and pending-work checks; filtering must be atomic with claim. A real Browser Downloader and mixed
 HTTP/browser end-to-end execution remain v5 work. Redis is the available v4 persistent Scheduler;
 API and MySQL Schedulers, the Master control plane, Item replay, and runtime tracing remain separate
-v4 work and do not depend on Browser implementation. Redis is covered by the shared Scheduler
-conformance suite.
+v4 work and do not depend on Browser implementation. Moving AI provider configuration from each
+extractor into one Engine-injected Worker client is also planned as an independent v4 change. Redis
+is covered by the shared Scheduler conformance suite.
 Engine defaults to `worker-1` and HTTP mode. `with_worker_id(...)` and `with_modes(...)` replace
 those frozen startup values; an empty Worker ID or mode set is rejected before execution.
 
-Media normalization does not download files. Item attachment downloading is not implemented and has
-no assigned release; a separate future OpenSpec must define it.
+Media normalization does not download files. Item attachment downloading is planned as an
+independent v5 change alongside, but not dependent on, the Browser Downloader.
 
 Backend and API integrations can validate a complete rules document with `Config::validate()` or
 validate one middleware declaration with `middleware::check(&spec)` before saving it.

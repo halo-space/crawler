@@ -1,8 +1,7 @@
 local key = KEYS[1]
 local completion = KEYS[2]
 local stats_key = KEYS[3]
-local leases = KEYS[4]
-local meta = KEYS[5]
+local meta = KEYS[4]
 local prefix = ARGV[1]
 local token = ARGV[2]
 local payload = cjson.decode(ARGV[3])
@@ -151,9 +150,10 @@ if retry < max_retry_count then
     if not priority then return 'CORRUPT_REQUEST_PRIORITY' end
 end
 if #payload.stats > 0 and not has_type(stats_key, 'hash') then return 'CORRUPT_STATS' end
-if not has_type(leases, 'zset') then return 'CORRUPT_LEASES' end
 local processing = prefix .. 'processing:' .. mode
-if not has_type(processing, 'set') then return 'CORRUPT_PROCESSING' end
+local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser' or 'http')
+if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
+if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
 local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
 if not has_type(failed_workers, 'list') then return 'CORRUPT_FAILED_WORKERS' end
 if retry < max_retry_count then
@@ -183,8 +183,8 @@ end
 if redis.call('LPOS', failed_workers, payload.worker_id) == false then
     redis.call('RPUSH', failed_workers, payload.worker_id)
 end
-redis.call('SREM', processing, token)
-redis.call('ZREM', leases, token)
+redis.call('ZREM', processing, token)
+redis.call('ZREM', other_processing, token)
 redis.call('HSET', completion,
     'task_id', payload.task_id, 'trace_id', payload.trace_id, 'node', payload.node,
     'worker_id', payload.worker_id, 'state', payload.state, 'error', payload.error)

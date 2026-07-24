@@ -64,13 +64,20 @@ engine.start().await?;
 ```
 
 所有 Redis key 都按 namespace 隔离；正常 `close()` 只释放客户端资源，不会删除排队数据。Redis 保存
-Trace Snapshot、Request 状态、按能力领取的租约、结算、统计和 Item。每个已接受的非空 Item `Payload`
-都写成一条 Redis Stream entry，保持 at-least-once 语义，不做业务 Item 去重。
+Trace Snapshot、Request 状态、按 mode 分域的 processing 租约、结算、统计和 Item。每个
+`processing:<mode>` ZSET 是唯一的活动 Request 索引，score 使用 `lease_time`；Request Hash 仍是状态
+事实来源。每个已接受的非空 Item `Payload` 都写成一条 Redis Stream entry，保持 at-least-once 语义，
+不做业务 Item 去重。
 
-Redis 会限制每次领取的重复维护工作：一次 `next_requests` 最多回收并巡检 128 条租约；对传入的每个
+Redis 会限制每次领取的重复维护工作：一次 `next_requests` 每个 mode 最多回收 64 条过期租约，并在两个 mode 合计巡检
+128 条 processing 记录；对传入的每个
 mode，最多提升并巡检 128 条延迟 Request。在回收、延迟提升、巡检或选择任务时发现单条 Request 记录缺失，
-会清理对应的悬挂索引；租约或队列元数据损坏则会移出活动索引，写入完成记录并转为失败终态。两者都不会
-阻塞后续正常 Request。共享索引的 Redis 类型损坏则会在状态写入前明确使本次领取失败。
+会清理对应的悬挂索引；合法 processing Hash 的 score 或 mode 投影不一致会原地修复，不消费重试次数；
+Request Hash 或队列记录本身非法时才会移出活动索引，写入完成记录并转为失败终态。这些记录都不会阻塞
+后续正常 Request。领取返回前，Worker 会重新计算不可变 Request Snapshot 的摘要；摘要不一致会进入同一
+恢复路径，不会执行该 Request。已通过摘要验证的 Snapshot 重试上限不能被可变 Hash 覆盖；单条恢复失败也
+不能扣留同批合法 Request。共享索引的 Redis 类型损坏则会在状态写入前明确使本次领取失败。当前 key
+布局不迁移旧 Redis namespace，部署时使用新的 namespace。
 
 本版本只支持 Redis 7+ 单实例 primary，不支持 Redis Cluster。多 key Lua 状态转换依赖单实例原子性，
 Cluster 将作为独立 Scheduler 设计。需要可恢复持久化时，必须启用 AOF（`appendonly yes`）并配置
@@ -254,12 +261,13 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker ID 和支持的下载模式，能力筛选
 必须和领取原子完成。真实 Browser Downloader 与 HTTP/browser 混合端到端执行属于 v5；可选的
 API、MySQL Scheduler、Master 控制面、Item 回放和运行期链路追踪仍属于后续 v4 工作，且不依赖
-Browser 实现。Redis 已通过共享 Scheduler 一致性测试。
+Browser 实现。把 AI provider 配置从每个 extractor 上移为 Engine 注入的单个 Worker Client，也作为
+独立的 v4 变更规划。Redis 已通过共享 Scheduler 一致性测试。
 Engine 默认使用 `worker-1` 和 HTTP 模式；`with_worker_id(...)` 与 `with_modes(...)` 可替换这些启动时冻结的值，
 空 Worker ID 或空 mode 集合会在执行前被拒绝。
 
-媒体对象规范化不会下载文件。Item 附件下载尚未实现，也没有分配版本，后续必须由独立 OpenSpec
-确定合同。
+媒体对象规范化不会下载文件。Item 附件下载规划为独立的 v5 变更；它与 Browser Downloader 并列，
+但不依赖 Browser 实现。
 
 后端或 API 在保存配置前，可以通过 `Config::validate()` 校验完整规则，也可以通过
 `middleware::check(&spec)` 单独校验一条中间件配置。

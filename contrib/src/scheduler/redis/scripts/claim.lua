@@ -7,9 +7,11 @@ local modes = cjson.decode(ARGV[5])
 local MAX_I64 = '9223372036854775807'
 local MAX_SEQUENCE = '99999999999999999999999999999999'
 local MAX_RECOVERY = 128
+local MAX_RECOVERY_PER_MODE = math.floor(MAX_RECOVERY / 2)
 local MAX_PROMOTION = 128
 local MAX_INSPECTION = 128
 local MAX_SELECTION = 128
+local MAX_PROCESSING_INSPECTION = math.floor(MAX_INSPECTION / 2)
 
 local time = redis.call('TIME')
 local now = time[1] * 1000 + math.floor(time[2] / 1000)
@@ -27,14 +29,13 @@ end
 
 local function indexes_are_valid()
     if not accepts_type(KEYS[1], 'hash')
-        or not accepts_type(KEYS[2], 'zset')
-        or not accepts_type(KEYS[3], 'hash') then
+        or not accepts_type(KEYS[2], 'hash') then
         return false
     end
     for _, mode in ipairs({'http', 'browser'}) do
         if not accepts_type(prefix .. 'queue:' .. mode .. ':ready', 'zset')
             or not accepts_type(prefix .. 'queue:' .. mode .. ':delayed', 'zset')
-            or not accepts_type(prefix .. 'processing:' .. mode, 'set') then
+            or not accepts_type(prefix .. 'processing:' .. mode, 'zset') then
             return false
         end
     end
@@ -128,12 +129,13 @@ local function parse_retry(value)
 end
 
 local function remove_active(token, mode)
-    redis.call('ZREM', KEYS[2], token)
     if parse_mode(mode) then
-        redis.call('SREM', prefix .. 'processing:' .. mode, token)
+        redis.call('ZREM', prefix .. 'processing:' .. mode, token)
+        local other = mode == 'http' and 'browser' or 'http'
+        redis.call('ZREM', prefix .. 'processing:' .. other, token)
     else
-        redis.call('SREM', prefix .. 'processing:http', token)
-        redis.call('SREM', prefix .. 'processing:browser', token)
+        redis.call('ZREM', prefix .. 'processing:http', token)
+        redis.call('ZREM', prefix .. 'processing:browser', token)
     end
 end
 
@@ -247,53 +249,102 @@ local function enqueue(key, mode, priority, next_time, token)
     end
 end
 
-local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', expired_before,
-    'LIMIT', 0, MAX_RECOVERY)
 local actions = {}
 local requeues = 0
+local expired_tokens = {}
 
-for _, token in ipairs(expired) do
-    local key = request_key(token)
-    local action = {token = token, key = key}
-    if storage_type(key) ~= 'hash' then
-        action.kind = 'missing'
-    else
-        local state = redis.call('HGET', key, 'state')
-        action.mode = redis.call('HGET', key, 'mode')
-        if state ~= 'processing' then
-            if state == 'pending' or state == 'done' or state == 'failed' then
-                action.kind = 'stale'
-            else
-                action.kind = 'corrupt'
-            end
-        else
-            action.version = redis.call('HGET', key, 'version')
-            action.mode = parse_mode(action.mode)
-            action.priority = parse_priority(redis.call('HGET', key, 'priority'))
-            action.retry_count = parse_retry(redis.call('HGET', key, 'retry_count'))
-            action.max_retry_count = parse_retry(redis.call('HGET', key, 'max_retry_count'))
-            action.worker = redis.call('HGET', key, 'leased_by') or ''
-            action.acknowledged = redis.call('HGET', key, 'ack_version') == action.version
+local function lease_millis(value)
+    if type(value) ~= 'string' or not string.match(value, '^%d+$') then return nil end
+    value = string.gsub(value, '^0+', '')
+    if value == '' then value = '0' end
+    if string.len(value) > 16 or (string.len(value) == 16 and value > '9007199254740991') then
+        return nil
+    end
+    return tonumber(value)
+end
 
-            if type(action.version) ~= 'string' or not string.match(action.version, '^%d+$')
-                or not action.mode
-                or not action.priority
-                or not action.retry_count
-                or not action.max_retry_count
-                or action.max_retry_count <= 0
-                or action.retry_count >= action.max_retry_count then
-                action.kind = 'corrupt'
-            elseif action.acknowledged then
-                action.retry = action.retry_count + 1
-                action.kind = action.retry < action.max_retry_count and 'requeue' or 'terminal'
+local function collect_expired(mode)
+    local processing = prefix .. 'processing:' .. mode
+    local expired = redis.call('ZRANGEBYSCORE', processing, '-inf', expired_before,
+        'LIMIT', 0, MAX_RECOVERY_PER_MODE)
+
+    for _, token in ipairs(expired) do
+        if not expired_tokens[token] then
+            expired_tokens[token] = true
+            local key = request_key(token)
+            local action = {
+                token = token,
+                key = key,
+                index_mode = mode,
+                lease_score = tonumber(redis.call('ZSCORE', processing, token))
+            }
+            if storage_type(key) ~= 'hash' then
+                action.kind = 'missing'
             else
-                action.retry = action.retry_count
-                action.kind = 'requeue'
+                local state = redis.call('HGET', key, 'state')
+                action.mode = redis.call('HGET', key, 'mode')
+                if state ~= 'processing' then
+                    if state == 'pending' or state == 'done' or state == 'failed' then
+                        action.kind = 'stale'
+                    else
+                        action.kind = 'corrupt'
+                    end
+                else
+                    action.version = redis.call('HGET', key, 'version')
+                    action.mode = parse_mode(action.mode)
+                    action.priority = parse_priority(redis.call('HGET', key, 'priority'))
+                    action.retry_count = parse_retry(redis.call('HGET', key, 'retry_count'))
+                    action.max_retry_count = parse_retry(redis.call('HGET', key, 'max_retry_count'))
+                    action.worker = redis.call('HGET', key, 'leased_by') or ''
+                    action.lease_time = lease_millis(redis.call('HGET', key, 'lease_time'))
+                    action.acknowledged = redis.call('HGET', key, 'ack_version') == action.version
+
+                    if type(action.version) ~= 'string' or not string.match(action.version, '^%d+$')
+                        or not action.mode
+                        or not action.priority
+                        or not action.retry_count
+                        or not action.max_retry_count
+                        or action.max_retry_count <= 0
+                        or action.retry_count >= action.max_retry_count
+                        or not action.lease_time
+                        or not action.lease_score then
+                        action.kind = 'corrupt'
+                    elseif action.mode ~= mode or action.lease_score ~= action.lease_time then
+                        -- The Hash is authoritative. Repair an incorrectly indexed
+                        -- active Request before considering lease expiry.
+                        action.kind = 'repair'
+                    elseif action.acknowledged then
+                        action.retry = action.retry_count + 1
+                        action.kind = action.retry < action.max_retry_count and 'requeue' or 'terminal'
+                    else
+                        action.retry = action.retry_count
+                        action.kind = 'requeue'
+                    end
+                end
             end
-            if action.kind == 'requeue' then requeues = requeues + 1 end
+            table.insert(actions, action)
         end
     end
-    table.insert(actions, action)
+end
+
+for _, mode in ipairs({'http', 'browser'}) do
+    collect_expired(mode)
+end
+
+-- Each mode contributes at most half of the bounded recovery batch, so equal
+-- lease timestamps cannot starve either capability.
+table.sort(actions, function(left, right)
+    local left_score = left.lease_score or math.huge
+    local right_score = right.lease_score or math.huge
+    if left_score ~= right_score then return left_score < right_score end
+    if left.index_mode ~= right.index_mode then return left.index_mode < right.index_mode end
+    return left.token < right.token
+end)
+while #actions > MAX_RECOVERY do
+    table.remove(actions)
+end
+for _, action in ipairs(actions) do
+    if action.kind == 'requeue' then requeues = requeues + 1 end
 end
 
 local planned, final_sequence = plan_sequences(requeues)
@@ -308,6 +359,9 @@ for _, action in ipairs(actions) do
         remove_active(action.token, action.mode)
     elseif action.kind == 'corrupt' then
         quarantine(action.key, action.token, 'stored Request has invalid lease state')
+    elseif action.kind == 'repair' then
+        remove_active(action.token, nil)
+        redis.call('ZADD', prefix .. 'processing:' .. action.mode, action.lease_time, action.token)
     else
         remove_active(action.token, action.mode)
         if action.acknowledged then
@@ -354,20 +408,10 @@ local function inspection_end(key, field, offset, count)
     end
 end
 
-local function lease_millis(value)
-    if type(value) ~= 'string' or not string.match(value, '^%d+$') then return nil end
-    value = string.gsub(value, '^0+', '')
-    if value == '' then value = '0' end
-    if string.len(value) > 16 or (string.len(value) == 16 and value > '9007199254740991') then
-        return nil
-    end
-    return tonumber(value)
-end
-
-local function inspect_lease(token, score)
+local function inspect_processing(index_mode, token, score)
     local key = request_key(token)
     if storage_type(key) ~= 'hash' then
-        remove_active(token, nil)
+        redis.call('ZREM', prefix .. 'processing:' .. index_mode, token)
         return
     end
 
@@ -392,26 +436,35 @@ local function inspect_lease(token, score)
         or not version_valid
         or not lease_time
         or not lease_score
-        or lease_score ~= lease_time then
+    then
         quarantine(key, token, 'stored Request lease does not match its fields')
+    elseif mode ~= index_mode or lease_score ~= lease_time then
+        -- The Request Hash is authoritative. Repair a stale or misplaced
+        -- processing index without changing retry state.
+        remove_active(token, nil)
+        redis.call('ZADD', prefix .. 'processing:' .. mode, lease_time, token)
     end
 end
 
-local function inspect_leases()
-    local field = 'lease_scan'
-    local offset = inspection_start(KEYS[2], field)
+local function inspect_processing_index(mode)
+    local processing = prefix .. 'processing:' .. mode
+    local field = 'processing_scan:' .. mode
+    local offset = inspection_start(processing, field)
     if not offset then return end
 
-    local values = redis.call('ZRANGE', KEYS[2], offset, offset + MAX_INSPECTION - 1,
+    local values = redis.call('ZRANGE', processing,
+        offset, offset + MAX_PROCESSING_INSPECTION - 1,
         'WITHSCORES')
     local count = #values / 2
     for index = 1, #values, 2 do
-        inspect_lease(values[index], values[index + 1])
+        inspect_processing(mode, values[index], values[index + 1])
     end
-    inspection_end(KEYS[2], field, offset, count)
+    inspection_end(processing, field, offset, count)
 end
 
-inspect_leases()
+for _, mode in ipairs({'http', 'browser'}) do
+    inspect_processing_index(mode)
+end
 
 local function delayed_request(mode, member)
     local due_time, sequence, token = string.match(member, '^(%d+)|(%d+)|([^|]+)$')
@@ -565,8 +618,10 @@ while #claimed < limit do
                         'state', 'processing', 'version', next, 'leased_by', worker_id,
                         'lease_time', now_text, 'ack_version', '', 'queue_kind', '',
                         'queue_member', '', 'updated_time', now_text)
-                    redis.call('SADD', prefix .. 'processing:' .. stored_mode, token)
-                    redis.call('ZADD', KEYS[2], now, token)
+                    -- A Request must have one active mode projection even if an
+                    -- earlier damaged index placed the token in the other mode.
+                    remove_active(token, nil)
+                    redis.call('ZADD', prefix .. 'processing:' .. stored_mode, now, token)
 
                     local failed_workers_key = request_key(token) .. ':failed_workers'
                     local failed_workers_type = storage_type(failed_workers_key)
@@ -579,7 +634,7 @@ while #claimed < limit do
                     local trace_id = redis.call('HGET', key, 'trace_id') or ''
                     local trace = cjson.null
                     if trace_id ~= '' then
-                        local stored = redis.call('HGET', KEYS[3], trace_id)
+                        local stored = redis.call('HGET', KEYS[2], trace_id)
                         if stored then trace = stored end
                     end
                     table.insert(claimed, cjson.encode({
@@ -597,6 +652,7 @@ while #claimed < limit do
                         leased_by = worker_id,
                         lease_time = now_text,
                         snapshot = redis.call('HGET', key, 'snapshot') or '',
+                        digest = redis.call('HGET', key, 'digest') or '',
                         trace = trace,
                         failed_workers = failed_workers
                     }))

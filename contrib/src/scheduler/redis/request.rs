@@ -10,6 +10,14 @@ use super::key;
 use super::model::{self, Claimed, Queued};
 use super::validate;
 
+struct Recovery {
+    token: String,
+    version: String,
+    id: String,
+    message: String,
+    max_retry_count: Option<i32>,
+}
+
 impl Redis {
     pub(super) fn stored(request: net::Request) -> Result<Queued, scheduler::Error> {
         validate::request(&request)?;
@@ -111,7 +119,6 @@ impl Redis {
             .claim
             .prepare_invoke()
             .key(self.keys.meta())
-            .key(self.keys.leases())
             .key(self.keys.traces())
             .arg(self.keys.prefix())
             .arg(limit)
@@ -124,15 +131,33 @@ impl Redis {
         drop(connection);
 
         let mut requests = Vec::with_capacity(encoded.len());
+        let mut recoveries = Vec::new();
+        let mut recovery_error = None;
         for encoded in encoded {
-            let value = serde_json::from_str::<Value>(&encoded).map_err(|error| {
-                scheduler::Error::InvalidRequest {
-                    id: "unknown".to_string(),
-                    message: format!("claimed Redis Request cannot be decoded: {error}"),
+            let value = match serde_json::from_str::<Value>(&encoded) {
+                Ok(value) => value,
+                Err(error) => {
+                    recovery_error.get_or_insert_with(|| scheduler::Error::InvalidRequest {
+                        id: "unknown".to_string(),
+                        message: format!("claimed Redis Request cannot be decoded: {error}"),
+                    });
+                    continue;
                 }
-            })?;
-            let token = claim_field(&value, "token")?;
-            let version = claim_field(&value, "version")?;
+            };
+            let token = match claim_field(&value, "token") {
+                Ok(token) => token,
+                Err(error) => {
+                    recovery_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            let version = match claim_field(&value, "version") {
+                Ok(version) => version,
+                Err(error) => {
+                    recovery_error.get_or_insert(error);
+                    continue;
+                }
+            };
             let id = value
                 .get("id")
                 .and_then(Value::as_str)
@@ -142,29 +167,63 @@ impl Redis {
             match serde_json::from_value::<Claimed>(value) {
                 Ok(claimed) if key::token(&claimed.id) == token => match Self::restore(&claimed) {
                     Ok(request) => requests.push(request),
-                    Err(error) => {
-                        self.recover(&token, worker_id, &version, &id, &error.to_string())
-                            .await?
-                    }
+                    Err(error) => recoveries.push(Recovery {
+                        token,
+                        version,
+                        id,
+                        message: error.to_string(),
+                        max_retry_count: snapshot_retry_limit(&claimed),
+                    }),
                 },
-                Ok(_) => {
-                    let error = scheduler::Error::InvalidRequest {
-                        id: id.clone(),
+                Ok(_) => recoveries.push(Recovery {
+                    token,
+                    version,
+                    id: id.clone(),
+                    message: scheduler::Error::InvalidRequest {
+                        id,
                         message: "claimed Redis Request id does not match its queue token"
                             .to_string(),
-                    };
-                    self.recover(&token, worker_id, &version, &id, &error.to_string())
-                        .await?;
-                }
-                Err(error) => {
-                    let error = scheduler::Error::InvalidRequest {
-                        id: id.clone(),
+                    }
+                    .to_string(),
+                    max_retry_count: None,
+                }),
+                Err(error) => recoveries.push(Recovery {
+                    token,
+                    version,
+                    id: id.clone(),
+                    message: scheduler::Error::InvalidRequest {
+                        id,
                         message: format!("claimed Redis Request cannot be decoded: {error}"),
-                    };
-                    self.recover(&token, worker_id, &version, &id, &error.to_string())
-                        .await?;
-                }
+                    }
+                    .to_string(),
+                    max_retry_count: None,
+                }),
             }
+        }
+
+        for recovery in recoveries {
+            if let Err(error) = self
+                .recover(
+                    &recovery.token,
+                    worker_id,
+                    &recovery.version,
+                    &recovery.id,
+                    &recovery.message,
+                    recovery.max_retry_count,
+                )
+                .await
+            {
+                recovery_error.get_or_insert(error);
+            }
+        }
+
+        // Valid Requests from the same atomic claim remain executable even when
+        // a damaged peer cannot be recovered. Its lease remains visible for the
+        // normal timeout path.
+        if requests.is_empty()
+            && let Some(error) = recovery_error
+        {
+            return Err(error);
         }
         Ok(requests)
     }
@@ -255,6 +314,7 @@ impl Redis {
                 id: claimed.id.clone(),
                 message: error.to_string(),
             })?;
+        validate::snapshot_digest(&snapshot, &claimed.digest, &claimed.id)?;
         let mode = model::parse_mode(&claimed.mode)?;
         for (field, matches) in [
             ("id", snapshot.id == claimed.id),
@@ -263,6 +323,10 @@ impl Redis {
             ("node", snapshot.node == claimed.node),
             ("mode", snapshot.mode == mode),
             ("priority", snapshot.priority == claimed.priority),
+            (
+                "max_retry_count",
+                snapshot.max_retry_count == claimed.max_retry_count,
+            ),
         ] {
             if !matches {
                 return Err(scheduler::Error::InvalidRequest {
@@ -325,6 +389,7 @@ impl Redis {
         version: &str,
         id: &str,
         reason: &str,
+        max_retry_count: Option<i32>,
     ) -> Result<(), scheduler::Error> {
         let mut connection = self.connection().await?;
         let result: String = self
@@ -332,18 +397,36 @@ impl Redis {
             .recover
             .prepare_invoke()
             .key(self.keys.request_token(token))
-            .key(self.keys.leases())
             .key(self.keys.meta())
             .arg(self.keys.prefix())
             .arg(token)
             .arg(worker_id)
             .arg(version)
             .arg(reason)
+            .arg(
+                max_retry_count
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            )
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
         Self::result(result, id)
     }
+}
+
+fn snapshot_retry_limit(claimed: &Claimed) -> Option<i32> {
+    let snapshot = serde_json::from_str::<net::request::Snapshot>(&claimed.snapshot).ok()?;
+    let actual = snapshot.digest().ok()?;
+    let matches = validate::hex(&actual) == claimed.digest
+        && snapshot.id == claimed.id
+        && snapshot.task_id == claimed.task_id
+        && snapshot.trace_id == claimed.trace_id
+        && snapshot.node == claimed.node
+        && model::mode(&snapshot.mode) == claimed.mode
+        && snapshot.priority == claimed.priority
+        && snapshot.max_retry_count > 0;
+    matches.then_some(snapshot.max_retry_count)
 }
 
 fn claim_field(value: &Value, field: &str) -> Result<String, scheduler::Error> {

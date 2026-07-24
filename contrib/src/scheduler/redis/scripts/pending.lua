@@ -8,7 +8,7 @@ for _, mode in ipairs(modes) do
     if redis.call('ZCARD', prefix .. 'queue:' .. mode .. ':delayed') > 0 then
         return 1
     end
-    if redis.call('SCARD', prefix .. 'processing:' .. mode) > 0 then
+    if redis.call('ZCARD', prefix .. 'processing:' .. mode) > 0 then
         return 1
     end
 end

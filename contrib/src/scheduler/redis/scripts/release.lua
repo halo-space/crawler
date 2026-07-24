@@ -18,7 +18,7 @@ local function parse_priority(value)
 end
 
 local function next_sequence()
-    local value = redis.call('HGET', KEYS[3], 'enqueue_sequence') or '0'
+    local value = redis.call('HGET', KEYS[2], 'enqueue_sequence') or '0'
     if not string.match(value, '^%d+$') then return nil end
     value = string.gsub(value, '^0+', '')
     if value == '' then value = '0' end
@@ -65,9 +65,11 @@ local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
 local priority = parse_priority(redis.call('HGET', key, 'priority'))
 if not priority then return 'CORRUPT_REQUEST_PRIORITY' end
-if not has_type(KEYS[2], 'zset') then return 'CORRUPT_LEASES' end
-if not has_type(KEYS[3], 'hash') then return 'CORRUPT_META' end
-if not has_type(prefix .. 'processing:' .. mode, 'set') then return 'CORRUPT_PROCESSING' end
+local processing = prefix .. 'processing:' .. mode
+local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser' or 'http')
+if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
+if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
+if not has_type(KEYS[2], 'hash') then return 'CORRUPT_META' end
 if not has_type(prefix .. 'queue:' .. mode .. ':ready', 'zset') then
     return 'CORRUPT_READY_QUEUE'
 end
@@ -75,9 +77,9 @@ local sequence = next_sequence()
 if not sequence then return 'SEQUENCE_OVERFLOW' end
 local member = pad(sequence, 32) .. '|' .. token
 
-redis.call('HSET', KEYS[3], 'enqueue_sequence', sequence)
-redis.call('SREM', prefix .. 'processing:' .. mode, token)
-redis.call('ZREM', KEYS[2], token)
+redis.call('HSET', KEYS[2], 'enqueue_sequence', sequence)
+redis.call('ZREM', processing, token)
+redis.call('ZREM', other_processing, token)
 redis.call('ZADD', prefix .. 'queue:' .. mode .. ':ready', -priority, member)
 redis.call('HSET', key,
     'state', 'pending', 'next_time', '0', 'leased_by', '', 'lease_time', '0',

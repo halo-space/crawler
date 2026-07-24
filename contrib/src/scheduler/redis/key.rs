@@ -48,10 +48,6 @@ impl Keys {
         self.key("trace_tasks")
     }
 
-    pub(super) fn leases(&self) -> String {
-        self.key("leases")
-    }
-
     pub(super) fn request(&self, id: &str) -> String {
         self.request_token(&token(id))
     }

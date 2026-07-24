@@ -1,7 +1,8 @@
 local key = KEYS[1]
-local payload = cjson.decode(ARGV[1])
-local lease_timeout = tonumber(ARGV[2])
-local token = ARGV[3]
+local prefix = ARGV[1]
+local payload = cjson.decode(ARGV[2])
+local lease_timeout = tonumber(ARGV[3])
+local token = ARGV[4]
 
 local function has_type(key, expected)
     local actual = redis.call('TYPE', key).ok
@@ -25,8 +26,14 @@ end
 if redis.call('HGET', key, 'ack_version') ~= payload.version then
     return 'NOT_ACKNOWLEDGED'
 end
-if not has_type(KEYS[2], 'zset') then return 'CORRUPT_LEASES' end
+local mode = redis.call('HGET', key, 'mode')
+if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
+local processing = prefix .. 'processing:' .. mode
+local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser' or 'http')
+if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
+if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
 
+redis.call('ZREM', other_processing, token)
 redis.call('HSET', key, 'lease_time', now, 'updated_time', now)
-redis.call('ZADD', KEYS[2], now, token)
+redis.call('ZADD', processing, now, token)
 return 'OK'

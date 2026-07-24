@@ -78,7 +78,6 @@ impl Redis {
             .release
             .prepare_invoke()
             .key(self.keys.request(&payload.id))
-            .key(self.keys.leases())
             .key(self.keys.meta())
             .arg(self.keys.prefix())
             .arg(encoded)
@@ -101,7 +100,7 @@ impl Redis {
             .refresh
             .prepare_invoke()
             .key(self.keys.request(&payload.id))
-            .key(self.keys.leases())
+            .arg(self.keys.prefix())
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
             .arg(key::token(&payload.id))
@@ -124,7 +123,6 @@ impl Redis {
             .key(self.keys.request(&payload.id))
             .key(self.keys.completion(&payload.id, payload.version))
             .key(self.keys.stats(&payload.trace_id))
-            .key(self.keys.leases())
             .arg(self.keys.prefix())
             .arg(key::token(&payload.id))
             .arg(encoded)
@@ -148,7 +146,6 @@ impl Redis {
             .key(self.keys.request(&payload.id))
             .key(self.keys.completion(&payload.id, payload.version))
             .key(self.keys.stats(&payload.trace_id))
-            .key(self.keys.leases())
             .key(self.keys.meta())
             .arg(self.keys.prefix())
             .arg(key::token(&payload.id))

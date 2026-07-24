@@ -29,8 +29,9 @@
 | CSS Healing | 已实现 | 普通 CSS 失败后执行确定性全文档候选评分；需要显式开启 |
 | Regex 与 JSON | 已实现 | Regex 选择器，以及代码模式的 `Response::json<T>()` |
 | AI Selector | 已实现 | 独立的 OpenAI-compatible JSON 提取，不属于 CSS Healing fallback |
+| AI 运行时配置 | 规划中 | v4 在 Engine/Worker 装配时注入一个可复用 AI Client；provider 密钥不进入 Rules 或 Trace Snapshot |
 | Middleware | 已实现 | 生命周期 Registry，以及 validate、dedup、rate limit、retry 内置能力 |
-| Item 输出 | 已实现 | Schema 校验、媒体规范化、JSONL 输出和提交失败快照；附件下载尚未实现 |
+| Item 输出 | 已实现 | Schema 校验、媒体规范化、JSONL 输出和提交失败快照；附件下载计划在 v5 实现 |
 | Worker 能力领取 | 已实现 | Memory 只在当前 Worker 配置的 Request mode 范围内领取并判断待处理工作 |
 | Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；按 namespace 隔离，完整实现 Scheduler/Init 合同、Lua 原子转换与 Redis Stream Item 输出 |
 | API/MySQL Scheduler | 规划中 | 独立的 v4 `contrib` 实现；必须完整实现相同 Scheduler 合同 |
@@ -314,12 +315,23 @@ namespace 就能继续已有数据。Redis 的 `initializes_run()` 返回 `false
 全有或全无：存在冲突 Snapshot 时拒绝整批，一致重放为 no-op。临时连接或可用性错误保持为
 `Scheduler::Unavailable`，不能改判为执行权丢失。
 
-为限制积压时的重复维护工作，一次 `next_requests` 最多回收并巡检 128 条租约，并对传入的每个 mode 最多
+活动执行权只有一组按 mode 分域的投影：`processing:<mode>` 是 ZSET，member 为不透明 Request token，
+score 为 `lease_time`。它同时支持按能力判断 pending 与过期扫描，不再维护独立的全局 lease 索引。
+Request Hash 是事实来源；合法 processing Hash 的 score 或错误 mode 投影会在不改变重试状态的情况下修复，
+Hash 本身非法时才隔离。改变活动执行权的状态转换会先清理两个已知 mode 的旧投影，再发布唯一的当前成员。
+
+为限制积压时的重复维护工作，一次 `next_requests` 从每个 mode 最多回收 64 条过期租约，并在两个 mode 合计
+巡检 128 条 processing 记录；按 mode 分配回收额度，避免批量领取产生相同 Redis 时间戳时一侧积压饿死
+另一侧。对传入的每个 mode 最多
 提升并巡检 128 条延迟 Request；其余到期记录保留在索引中，交给后续领取处理，不会丢弃。回收、延迟
-提升、巡检或 ready 队列选择发现记录缺失时，会移除悬挂的索引项；
-发现租约或队列元数据损坏（包括队列归属不匹配）时，会移除其活动索引、记录终态失败及完成记录，然后
-继续选择后续正常 Request。这不会吞掉共享索引损坏：共享索引的 Redis 类型非法时，领取会在任何状态
-写入前失败。ready 队列清理同样最多丢弃 128 条非法条目，之后交给下一次领取继续处理。
+提升、巡检或 ready 队列选择发现记录缺失时，会移除悬挂的索引项；合法 Hash 对应的 processing 投影不一致
+会原地修复；Request 或队列状态本身损坏时，才会移除其活动索引、记录终态失败及完成记录，然后继续选择
+后续正常 Request。这不会吞掉共享索引损坏：共享索引的 Redis 类型非法时，领取会在任何状态写入前失败。
+ready 队列清理同样最多丢弃 128 条非法条目，之后交给下一次领取继续处理。Claim 会把持久化摘要与不可变
+Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算规范摘要，不一致时走 token 级恢复且不会
+返回为可执行任务。摘要有效时，其中不可变的重试上限控制恢复并修正可变 Hash 中的不一致值。单条损坏记录
+恢复失败不能扣留同一次原子领取中的合法 Request；损坏记录继续保持 processing，交给正常租约超时恢复。
+当前内部 key 布局不迁移旧 Redis namespace。
 
 `push_items` 会先序列化完整集合，再为每组已接受的非空 Item Payload 追加一条 Redis Stream entry。entry
 保存 Payload 身份、框架 Item ID、业务 Item JSON 和可用的 Trace 元数据。提交采用 at-least-once 语义：
@@ -724,8 +736,8 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 ### 版本边界
 
 - v3：按 Worker 能力范围原子领取 Request；确定性响应字符集解码，以及基于 fixture 的更完整页面回归。这些合同均已实现。
-- v4：后端无关的 Scheduler 共享一致性套件与 Redis 7 单实例 Scheduler 已实现。API、MySQL Scheduler、Master control-plane、可审计 Item 快照回放和 `fasttrace` 运行期链路追踪仍是独立工作。这些实现依赖核心 Scheduler 合同，不依赖 Browser 交付。
-- v5：真实 Browser Downloader，以及 HTTP/browser 混合端到端 Engine 验收；按能力领取的语义仍属于 v3 合同。
+- v4：后端无关的 Scheduler 共享一致性套件与 Redis 7 单实例 Scheduler 已实现。API、MySQL Scheduler、Master control-plane、可审计 Item 快照回放、`fasttrace` 运行期链路追踪和 Engine 级 AI Client 注入仍是独立工作。这些实现依赖核心 Scheduler 合同，不依赖 Browser 交付。
+- v5：真实 Browser Downloader、HTTP/browser 混合端到端 Engine 验收，以及独立的 Item 附件下载。附件下载和 Browser 下载是互不依赖的两个交付项；按能力领取的语义仍属于 v3 合同。
 
 这些能力必须沿用当前核心合同：
 
@@ -743,7 +755,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 - 不在 Engine 末尾批量提交整个 Trace 的 Items；
 - 不让 Item ID 承担业务去重；
 - Redis 单实例 Scheduler 不支持 Redis Cluster；Cluster 需要独立的 Scheduler 设计；
-- 不下载 Item 附件；该能力尚未实现，也没有分配版本；
+- 不下载 Item 附件；该能力尚未实现，已分配到独立的 v5 变更；
 - 不让核心 `spider` crate 依赖 `contrib` 或控制面实现。
 
 ## 14. 架构不变量

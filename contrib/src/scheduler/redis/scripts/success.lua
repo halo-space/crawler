@@ -1,7 +1,6 @@
 local key = KEYS[1]
 local completion = KEYS[2]
 local stats_key = KEYS[3]
-local leases = KEYS[4]
 local prefix = ARGV[1]
 local token = ARGV[2]
 local payload = cjson.decode(ARGV[3])
@@ -107,9 +106,10 @@ if redis.call('HGET', key, 'ack_version') ~= payload.version then return 'NOT_AC
 local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
 if #payload.stats > 0 and not has_type(stats_key, 'hash') then return 'CORRUPT_STATS' end
-if not has_type(leases, 'zset') then return 'CORRUPT_LEASES' end
 local processing = prefix .. 'processing:' .. mode
-if not has_type(processing, 'set') then return 'CORRUPT_PROCESSING' end
+local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser' or 'http')
+if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
+if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
 
 local stats, stats_error = merged_stats()
 if not stats then return stats_error end
@@ -122,8 +122,8 @@ if #stats > 0 then
     end
     redis.call('HSET', unpack(command))
 end
-redis.call('SREM', processing, token)
-redis.call('ZREM', leases, token)
+redis.call('ZREM', processing, token)
+redis.call('ZREM', other_processing, token)
 redis.call('HSET', key,
     'state', 'done', 'leased_by', '', 'lease_time', '0', 'ack_version', '',
     'queue_kind', '', 'queue_member', '', 'updated_time', now)

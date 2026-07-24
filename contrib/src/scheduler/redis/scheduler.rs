@@ -7,8 +7,8 @@ use super::script::Scripts;
 
 /// A Redis 7 standalone Scheduler.
 ///
-/// The Scheduler owns no Worker-local files. Its queue, leases, Trace Snapshots, completions,
-/// statistics, and Item output are scoped by its namespace in Redis.
+/// The Scheduler owns no Worker-local files. Its queues, mode-scoped processing ownership, Trace
+/// Snapshots, completions, statistics, and Item output are scoped by its namespace in Redis.
 pub struct Redis {
     pub(super) client: redis::Client,
     pub(super) connection: Mutex<Option<redis::aio::ConnectionManager>>,

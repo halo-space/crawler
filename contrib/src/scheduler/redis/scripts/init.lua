@@ -47,6 +47,11 @@ end
 if not has_type(KEYS[1], 'hash') then return 'CORRUPT_META' end
 if not has_type(KEYS[2], 'hash') then return 'CORRUPT_TRACES' end
 if not has_type(KEYS[3], 'hash') then return 'CORRUPT_TRACE_TASKS' end
+for _, mode in ipairs({'http', 'browser'}) do
+    if not has_type(prefix .. 'processing:' .. mode, 'zset') then
+        return 'CORRUPT_PROCESSING'
+    end
+end
 
 if redis.call('HEXISTS', KEYS[2], trace_id) == 1 then
     return 'TRACE_EXISTS:' .. trace_id

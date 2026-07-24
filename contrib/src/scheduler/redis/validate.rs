@@ -81,6 +81,26 @@ pub(super) fn counter(value: &stats::Counter) -> bool {
         && value.download >= 0
 }
 
+pub(super) fn snapshot_digest(
+    snapshot: &net::request::Snapshot,
+    expected: &str,
+    id: &str,
+) -> Result<(), scheduler::Error> {
+    let actual = snapshot
+        .digest()
+        .map_err(|error| scheduler::Error::InvalidRequest {
+            id: id.to_string(),
+            message: format!("stored Request Snapshot digest cannot be calculated: {error}"),
+        })?;
+    if hex(&actual) != expected {
+        return Err(scheduler::Error::InvalidRequest {
+            id: id.to_string(),
+            message: "stored Request Snapshot digest does not match its content".to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn hex(bytes: &[u8]) -> String {
     const TABLE: &[u8; 16] = b"0123456789abcdef";
     let mut value = String::with_capacity(bytes.len() * 2);

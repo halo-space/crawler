@@ -115,6 +115,10 @@ impl TryFrom<net::Request> for Snapshot {
 }
 
 impl Snapshot {
+    /// Calculates the canonical identity digest of this initial queued Snapshot.
+    ///
+    /// Scheduler implementations must call this before overlaying mutable claim, retry, or lease
+    /// fields from their runtime state.
     pub fn digest(&self) -> Result<[u8; 32], super::digest::Error> {
         super::digest::calculate(self)
     }

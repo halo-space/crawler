@@ -3,6 +3,7 @@ local token = ARGV[2]
 local worker_id = ARGV[3]
 local version = ARGV[4]
 local reason = ARGV[5]
+local snapshot_max_retry = ARGV[6]
 local key = KEYS[1]
 
 local MAX_SEQUENCE = '99999999999999999999999999999999'
@@ -20,7 +21,7 @@ local function parse_i32(value, minimum, maximum)
 end
 
 local function next_sequence()
-    local value = redis.call('HGET', KEYS[3], 'enqueue_sequence') or '0'
+    local value = redis.call('HGET', KEYS[2], 'enqueue_sequence') or '0'
     if not string.match(value, '^%d+$') then return nil end
     value = string.gsub(value, '^0+', '')
     if value == '' then value = '0' end
@@ -53,7 +54,13 @@ local now = time[1] * 1000 + math.floor(time[2] / 1000)
 local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
 local retry_count = parse_i32(redis.call('HGET', key, 'retry_count'), 0, 2147483647)
-local max_retry = parse_i32(redis.call('HGET', key, 'max_retry_count'), 1, 2147483647)
+local stored_max_retry = parse_i32(redis.call('HGET', key, 'max_retry_count'), 1, 2147483647)
+local trusted_max_retry = nil
+if snapshot_max_retry ~= '' then
+    trusted_max_retry = parse_i32(snapshot_max_retry, 1, 2147483647)
+    if not trusted_max_retry then return 'CORRUPT_REQUEST_RETRY' end
+end
+local max_retry = trusted_max_retry or stored_max_retry
 if not retry_count or not max_retry or retry_count >= max_retry then
     return 'CORRUPT_REQUEST_RETRY'
 end
@@ -65,12 +72,14 @@ if retry < max_retry then
 end
 local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
 local completion = prefix .. 'request:' .. token .. ':completion:' .. version
-if not has_type(KEYS[2], 'zset') then return 'CORRUPT_LEASES' end
-if not has_type(prefix .. 'processing:' .. mode, 'set') then return 'CORRUPT_PROCESSING' end
+local processing = prefix .. 'processing:' .. mode
+local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser' or 'http')
+if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
+if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
 local reset_failed_workers = not has_type(failed_workers, 'list')
 local reset_completion = not has_type(completion, 'hash')
 if retry < max_retry then
-    if not has_type(KEYS[3], 'hash') then return 'CORRUPT_META' end
+    if not has_type(KEYS[2], 'hash') then return 'CORRUPT_META' end
     if not has_type(prefix .. 'queue:' .. mode .. ':ready', 'zset') then
         return 'CORRUPT_READY_QUEUE'
     end
@@ -94,8 +103,8 @@ redis.call('HSET', completion,
     'worker_id', worker_id,
     'state', 'failed',
     'error', reason)
-redis.call('SREM', prefix .. 'processing:' .. mode, token)
-redis.call('ZREM', KEYS[2], token)
+redis.call('ZREM', processing, token)
+redis.call('ZREM', other_processing, token)
 
 if retry < max_retry then
     local function pad(value, width)
@@ -103,15 +112,15 @@ if retry < max_retry then
         return string.rep('0', width - string.len(value)) .. value
     end
     local member = pad(sequence, 32) .. '|' .. token
-    redis.call('HSET', KEYS[3], 'enqueue_sequence', sequence)
+    redis.call('HSET', KEYS[2], 'enqueue_sequence', sequence)
     redis.call('ZADD', prefix .. 'queue:' .. mode .. ':ready', -priority, member)
     redis.call('HSET', key,
-        'state', 'pending', 'retry_count', retry, 'next_time', '0',
+        'state', 'pending', 'retry_count', retry, 'max_retry_count', max_retry, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', 'ready', 'queue_member', member, 'updated_time', now)
 else
     redis.call('HSET', key,
-        'state', 'failed', 'retry_count', retry, 'next_time', '0',
+        'state', 'failed', 'retry_count', retry, 'max_retry_count', max_retry, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', '', 'queue_member', '', 'updated_time', now)
 end

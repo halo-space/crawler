@@ -29,8 +29,9 @@ The workspace contains four crates:
 | CSS Healing | Implemented | Deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
 | Regex and JSON | Implemented | Regex selection and code-mode `Response::json<T>()` |
 | AI Selector | Implemented | Explicit OpenAI-compatible JSON extraction, independent of CSS Healing |
+| AI runtime configuration | Planned | v4 will inject one reusable AI client at Engine/Worker assembly; provider secrets will not enter Rules or Trace snapshots |
 | Middleware | Implemented | Lifecycle Registry plus built-in validate, dedup, rate limit, and retry capabilities |
-| Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots; attachment download is not implemented |
+| Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots; attachment download is planned for v5 |
 | Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
 | Redis Scheduler | Implemented | Redis 7+ standalone only; namespaced complete Scheduler/Init contract, Lua-atomic transitions, and Redis Stream Item output |
 | API/MySQL Schedulers | Planned | Separate v4 `contrib` implementations; each must implement the complete Scheduler contract |
@@ -322,15 +323,32 @@ remain all-or-nothing: a conflicting Request Snapshot rejects the whole collecti
 replay is a no-op. Transient connection and availability failures remain `Scheduler::Unavailable`,
 rather than being reclassified as ownership loss.
 
+Active ownership has one mode-scoped projection: `processing:<mode>` is a ZSET whose member is the
+opaque Request token and whose score is `lease_time`. It supports both capability-scoped pending
+checks and expiration scans; there is no separate global lease index. The Request Hash is the source
+of truth. A valid processing Hash repairs a stale score or wrong-mode projection without changing
+retry state, while an invalid Hash is quarantined. Every transition clears both known mode
+projections before publishing its single current membership when it changes active ownership.
+
 Recurring maintenance is deliberately bounded under backlog: one `next_requests` invocation recovers
-and inspects at most 128 lease records, and promotes and inspects at most 128 delayed Requests for
-each requested mode. Additional due entries remain indexed for later claims rather than being dropped.
+at most 64 expired leases from each mode and inspects at most 128 processing records across both
+modes. The per-mode recovery share prevents equal Redis timestamps in one backlog from starving the
+other mode. It promotes
+and inspects at most 128 delayed Requests for each requested mode. Additional due entries remain
+indexed for later claims rather than being dropped.
 When recovery, promotion, or ready-queue selection finds a missing record, it removes the dangling
-index entry. Malformed lease or queue metadata, including a mismatched queue membership, is quarantined
-by removing its active entries, recording a terminal failure and completion, then continuing with
-later valid Requests. This does not hide shared-index corruption: an invalid Redis type for a shared
-index rejects the claim before it mutates state. Ready-queue cleanup is likewise bounded to 128
-discarded invalid entries before the claim yields to a later invocation.
+index entry. A stale processing projection backed by a valid Hash is repaired; malformed Request or
+queue state is quarantined by removing its active entries, recording a terminal failure and
+completion, then continuing with later valid Requests. This does not hide shared-index corruption:
+an invalid Redis type for a shared index rejects the claim before it mutates state. Ready-queue
+cleanup is likewise bounded to 128 discarded invalid entries before the claim yields to a later
+invocation. Claim returns the persisted digest with the immutable Request Snapshot; Rust recalculates
+the canonical digest before overlaying mutable execution fields. A mismatch follows token-scoped
+recovery and is never returned as executable work. When that digest is valid, its immutable retry
+limit controls recovery and repairs a mismatched mutable Hash value. Recovery failure for one damaged
+record does not withhold valid Requests already claimed in the same atomic operation; the damaged
+record remains processing for normal lease-timeout recovery. The current internal key layout does not migrate
+older Redis namespaces.
 
 `push_items` serializes the full collection before mutation and appends one Redis Stream entry for
 each accepted non-empty Item Payload. The entry preserves the Payload identity, framework Item IDs, business
@@ -764,8 +782,8 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 ### Release Boundaries
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
-- v4: the shared backend-neutral Scheduler conformance suite and the Redis 7 standalone Scheduler are implemented. API and MySQL Schedulers, the Master control plane, auditable Item snapshot replay, and `fasttrace` runtime tracing remain separate work. These implementations depend on the core Scheduler contract, not on Browser delivery.
-- v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance. Capability-aware claim semantics remain the v3 contract.
+- v4: the shared backend-neutral Scheduler conformance suite and the Redis 7 standalone Scheduler are implemented. API and MySQL Schedulers, the Master control plane, auditable Item snapshot replay, `fasttrace` runtime tracing, and Engine-level AI client injection remain separate work. These implementations depend on the core Scheduler contract, not on Browser delivery.
+- v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance, and a separate Item attachment downloader. Attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:
 
@@ -783,7 +801,7 @@ These capabilities must preserve the existing core contracts:
 - batching an entire Trace's Items at Engine shutdown;
 - using Item ID for business deduplication;
 - supporting Redis Cluster through the standalone Redis Scheduler; Cluster needs a separate Scheduler design;
-- downloading Item attachments; that capability is unimplemented and has no assigned release;
+- downloading Item attachments; that capability is unimplemented and assigned to an independent v5 change;
 - making the core `spider` crate depend on `contrib` or a control-plane implementation.
 
 ## 14. Architecture Invariants

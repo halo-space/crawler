@@ -63,6 +63,7 @@ pub(super) struct Claimed {
     pub(super) leased_by: String,
     pub(super) lease_time: String,
     pub(super) snapshot: String,
+    pub(super) digest: String,
     pub(super) trace: Option<String>,
     #[serde(default)]
     pub(super) failed_workers: Vec<String>,

@@ -126,6 +126,61 @@ async fn malformed_records_do_not_discard_valid_claims_from_the_same_call() {
 }
 
 #[tokio::test]
+async fn failed_recovery_does_not_withhold_a_valid_claim() {
+    let Some(fixture) = Fixture::connect().await else {
+        return;
+    };
+    let namespace = namespace("failed-recovery-valid-claim");
+    let scheduler = scheduler(&fixture, &namespace);
+    scheduler.open().await.unwrap();
+
+    let mut damaged = request("failed-recovery", "https://example.com/failed-recovery");
+    damaged.priority = 20;
+    damaged.max_retry_count = 2;
+    let mut valid = request(
+        "valid-after-recovery",
+        "https://example.com/valid-after-recovery",
+    );
+    valid.priority = 10;
+    scheduler
+        .push(payload::Payload::new().requests(vec![damaged, valid]))
+        .await
+        .unwrap();
+
+    let mut connection = fixture.connection().await;
+    redis::cmd("HSET")
+        .arg(request_key(&namespace, "failed-recovery"))
+        .arg("snapshot")
+        .arg("{")
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    redis::cmd("HSET")
+        .arg(format!("{namespace}:meta"))
+        .arg("enqueue_sequence")
+        .arg("99999999999999999999999999999999")
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+
+    let claimed = scheduler.next_requests(2, WORKER_A, HTTP).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, "valid-after-recovery");
+    succeed(&scheduler, &claimed[0]).await;
+
+    let damaged_state: String = redis::cmd("HGET")
+        .arg(request_key(&namespace, "failed-recovery"))
+        .arg("state")
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(damaged_state, "processing");
+
+    scheduler.close().await.unwrap();
+    fixture.clear(&namespace).await;
+}
+
+#[tokio::test]
 async fn push_rejects_a_trace_whose_snapshot_was_removed() {
     let Some(fixture) = Fixture::connect().await else {
         return;
@@ -208,15 +263,15 @@ async fn wrong_type_settlement_indices_do_not_partially_settle() {
         .unwrap(),
     );
 
-    let leases = format!("{namespace}:leases");
+    let processing = super::common::processing_key(&namespace, "http");
     let mut connection = fixture.connection().await;
     redis::cmd("DEL")
-        .arg(&leases)
+        .arg(&processing)
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
     redis::cmd("SET")
-        .arg(&leases)
+        .arg(&processing)
         .arg("wrong-type")
         .query_async::<String>(&mut connection)
         .await
@@ -230,9 +285,15 @@ async fn wrong_type_settlement_indices_do_not_partially_settle() {
         &stats_key(&namespace, ""),
     )
     .await;
+    let kind = redis::cmd("TYPE")
+        .arg(&processing)
+        .query_async::<String>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(kind, "string");
 
     redis::cmd("DEL")
-        .arg(&leases)
+        .arg(&processing)
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
@@ -274,6 +335,13 @@ async fn wrong_type_settlement_indices_do_not_partially_settle() {
 
     assert!(scheduler.failure(&failure).await.is_err());
     assert_settlement_is_unchanged(&mut connection, &namespace, &failed, "").await;
+    let active = redis::cmd("ZSCORE")
+        .arg(&processing)
+        .arg(token(&failed.id))
+        .query_async::<Option<f64>>(&mut connection)
+        .await
+        .unwrap();
+    assert!(active.is_some());
     let failed_workers = format!("{namespace}:request:{}:failed_workers", token(&failed.id));
     let failed_workers_exists = redis::cmd("EXISTS")
         .arg(&failed_workers)
@@ -397,7 +465,7 @@ async fn corrupt_expired_lease_does_not_block_valid_claims() {
         .await
         .unwrap();
     redis::cmd("ZADD")
-        .arg(format!("{namespace}:leases"))
+        .arg(super::common::processing_key(&namespace, "http"))
         .arg(0)
         .arg(token("expired-damaged"))
         .query_async::<usize>(&mut connection)
@@ -613,7 +681,7 @@ async fn corrupt_queue_pointers_cannot_remove_another_request() {
 }
 
 #[tokio::test]
-async fn mismatched_lease_scores_are_quarantined_without_blocking_work() {
+async fn mismatched_processing_scores_are_repaired_without_blocking_work() {
     let Some(fixture) = Fixture::connect().await else {
         return;
     };
@@ -638,17 +706,16 @@ async fn mismatched_lease_scores_are_quarantined_without_blocking_work() {
     assert_eq!(claimed.id, "lease-damaged");
 
     let key = request_key(&namespace, "lease-damaged");
-    let leases = format!("{namespace}:leases");
+    let processing = super::common::processing_key(&namespace, "http");
     let mut connection = fixture.connection().await;
-    redis::cmd("HSET")
+    let lease_time = redis::cmd("HGET")
         .arg(&key)
         .arg("lease_time")
-        .arg("0")
-        .query_async::<usize>(&mut connection)
+        .query_async::<i64>(&mut connection)
         .await
         .unwrap();
     redis::cmd("ZADD")
-        .arg(&leases)
+        .arg(&processing)
         .arg(9_007_199_254_740_000_i64)
         .arg(token("lease-damaged"))
         .query_async::<usize>(&mut connection)
@@ -664,15 +731,21 @@ async fn mismatched_lease_scores_are_quarantined_without_blocking_work() {
     assert_eq!(valid.id, "lease-valid");
     succeed(&scheduler, &valid).await;
 
-    for (field, expected) in [("state", "failed"), ("leased_by", ""), ("lease_time", "0")] {
-        let value = redis::cmd("HGET")
-            .arg(&key)
-            .arg(field)
-            .query_async::<String>(&mut connection)
-            .await
-            .unwrap();
-        assert_eq!(value, expected, "unexpected {field}");
-    }
+    let state = redis::cmd("HGET")
+        .arg(&key)
+        .arg("state")
+        .query_async::<String>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(state, "processing");
+    let score = redis::cmd("ZSCORE")
+        .arg(&processing)
+        .arg(token("lease-damaged"))
+        .query_async::<Option<f64>>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(score.map(|score| score as i64), Some(lease_time));
+    succeed(&scheduler, &claimed).await;
 
     scheduler.close().await.unwrap();
     fixture.clear(&namespace).await;
@@ -724,7 +797,7 @@ async fn malformed_future_delayed_members_do_not_keep_the_scheduler_pending() {
 
 #[tokio::test]
 async fn claim_bounds_expired_lease_recovery() {
-    const RECOVERY_LIMIT: usize = 128;
+    const RECOVERY_LIMIT: usize = 64;
 
     let Some(fixture) = Fixture::connect().await else {
         return;
@@ -747,7 +820,7 @@ async fn claim_bounds_expired_lease_recovery() {
     assert_eq!(claimed.len(), RECOVERY_LIMIT + 1);
 
     let mut connection = fixture.connection().await;
-    let leases = format!("{namespace}:leases");
+    let processing = super::common::processing_key(&namespace, "http");
     for request in &claimed {
         redis::cmd("HSET")
             .arg(request_key(&namespace, &request.id))
@@ -757,7 +830,7 @@ async fn claim_bounds_expired_lease_recovery() {
             .await
             .unwrap();
         redis::cmd("ZADD")
-            .arg(&leases)
+            .arg(&processing)
             .arg(0)
             .arg(token(&request.id))
             .query_async::<usize>(&mut connection)
@@ -768,7 +841,7 @@ async fn claim_bounds_expired_lease_recovery() {
     let next = scheduler.next_requests(1, WORKER_B, HTTP).await.unwrap();
     assert_eq!(next.len(), 1);
     let remaining = redis::cmd("ZCARD")
-        .arg(&leases)
+        .arg(&processing)
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
@@ -800,13 +873,6 @@ async fn assert_settlement_is_unchanged(
         .await
         .unwrap();
     assert_eq!(completion_exists, 0);
-    let processing = redis::cmd("SISMEMBER")
-        .arg(format!("{namespace}:processing:http"))
-        .arg(token(&request.id))
-        .query_async::<bool>(&mut *connection)
-        .await
-        .unwrap();
-    assert!(processing);
     if !stats.is_empty() {
         let stats_exists = redis::cmd("EXISTS")
             .arg(stats)
