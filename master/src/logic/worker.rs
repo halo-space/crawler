@@ -18,7 +18,7 @@ pub(crate) fn policy(context: &Context) -> worker::Policy {
         lease_timeout_ms: policy.lease_timeout_ms,
         lease_interval_ms: policy.lease_interval_ms,
         heartbeat_interval_ms: policy.heartbeat_interval_ms,
-        max_response_bytes: context.config.max_api_bytes() as u64,
+        max_response_bytes: context.config.api().max_size as u64,
     }
 }
 

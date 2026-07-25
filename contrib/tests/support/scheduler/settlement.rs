@@ -91,10 +91,16 @@ where
     let completed = success(&second);
     scheduler.success(&completed).await.unwrap();
     scheduler.success(&completed).await.unwrap();
-    let stale = success(&first);
     assert!(
         scheduler
-            .success(&stale)
+            .success(&success(&first))
+            .await
+            .unwrap_err()
+            .is_ownership_loss()
+    );
+    assert!(
+        scheduler
+            .failure(&failure(&first, "stale failure"))
             .await
             .unwrap_err()
             .is_ownership_loss()
@@ -153,6 +159,90 @@ where
         .push(payload::Payload::new().requests(vec![original]))
         .await
         .unwrap();
+    assert!(
+        !scheduler
+            .has_pending_requests(WORKER_A, HTTP)
+            .await
+            .unwrap()
+    );
+    close(&scheduler).await;
+}
+
+pub(super) async fn failed_worker_is_excluded<S>(scheduler: S)
+where
+    S: Scheduler,
+{
+    open(&scheduler).await;
+    let mut original = request(
+        "failed-worker-is-excluded",
+        "https://example.com/failed-worker-is-excluded",
+    );
+    original.priority = 10;
+    original.max_retry_count = 3;
+    let eligible = request(
+        "eligible-behind-failed-worker",
+        "https://example.com/eligible-behind-failed-worker",
+    );
+    scheduler
+        .push(payload::Payload::new().requests(vec![original, eligible]))
+        .await
+        .unwrap();
+
+    let first = scheduler
+        .next_requests(1, WORKER_A, HTTP)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    scheduler.ack(&processing(&first)).await.unwrap();
+    scheduler
+        .failure(&failure(&first, "worker A failed"))
+        .await
+        .unwrap();
+
+    let eligible = scheduler
+        .next_requests(1, WORKER_A, HTTP)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(eligible.id, "eligible-behind-failed-worker");
+    succeed(&scheduler, &eligible).await;
+    assert!(
+        scheduler
+            .next_requests(1, WORKER_A, HTTP)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !scheduler
+            .has_pending_requests(WORKER_A, HTTP)
+            .await
+            .unwrap()
+    );
+    assert!(
+        scheduler
+            .has_pending_requests(WORKER_B, HTTP)
+            .await
+            .unwrap()
+    );
+
+    let second = scheduler
+        .next_requests(1, WORKER_B, HTTP)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.failed_workers, [WORKER_A]);
+    assert!(
+        scheduler
+            .has_pending_requests(WORKER_A, HTTP)
+            .await
+            .unwrap()
+    );
+    succeed(&scheduler, &second).await;
     assert!(
         !scheduler
             .has_pending_requests(WORKER_A, HTTP)

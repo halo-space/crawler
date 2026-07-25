@@ -335,7 +335,15 @@ Hash 本身非法时才隔离。改变活动执行权的状态转换会先清理
 为限制积压时的重复维护工作，一次 `next_requests` 从每个 mode 最多回收 64 条过期租约，并在两个 mode 合计
 巡检 128 条 processing 记录；按 mode 分配回收额度，避免批量领取产生相同 Redis 时间戳时一侧积压饿死
 另一侧。对传入的每个 mode 最多
-提升并巡检 128 条延迟 Request；其余到期记录保留在索引中，交给后续领取处理，不会丢弃。回收、延迟
+提升并巡检 128 条延迟 Request；其余到期记录保留在索引中，交给后续领取处理，不会丢弃。失败 Worker 的
+领取资格单独保存在 `pending_exclusions:<mode>` ZSET，其中只包含 pending Request 与 Worker 的组合。单次领取
+最多检查 128 个排除成员；本地游标按 mode 保存最新已检查的 ready-event revision 和最后一个排除的 ready
+member。进入 ready 队列（包括重新入队与延迟提升）时，会向按 mode 分域的 `ready_events:<mode>` ZSET
+追加事件。继续扫描游标之后的成员前，只检查该 mode 的后续事件；仅当新 ready member 排在游标之前且当前
+Worker 可以领取时才重置进度，低优先级事件和其他 mode 的写入不会重置游标。已保存的 member 被删除时，
+该 mode 从队首重新开始。任一请求 mode 的更高优先级前缀尚未确认完时，本次领取临时让出，不会改领另一
+mode 的低优先级候选。`has_pending_requests` 直接比较两个队列的数量与当前 Worker 的字典序排除索引，保持
+精确判断且不会在单次 Lua 中无界扫描。回收、延迟
 提升、巡检或 ready 队列选择发现记录缺失时，会移除悬挂的索引项；合法 Hash 对应的 processing 投影不一致
 会原地修复；Request 或队列状态本身损坏时，才会移除其活动索引、记录终态失败及完成记录，然后继续选择
 后续正常 Request。这不会吞掉共享索引损坏：共享索引的 Redis 类型非法时，领取会在任何状态写入前失败。
@@ -343,7 +351,8 @@ ready 队列清理同样最多丢弃 128 条非法条目，之后交给下一次
 Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算规范摘要，不一致时走 token 级恢复且不会
 返回为可执行任务。摘要有效时，其中不可变的重试上限控制恢复并修正可变 Hash 中的不一致值。单条损坏记录
 恢复失败不能扣留同一次原子领取中的合法 Request；损坏记录继续保持 processing，交给正常租约超时恢复。
-当前内部 key 布局不迁移旧 Redis namespace。
+每个 Request Snapshot 的 `max_retry_count` 必须位于 `1..=128`；恢复以不可变 Snapshot 为准，并以此约束
+失败 Worker 历史，可变 Hash 不能扩大该值。当前内部 key 布局不迁移旧 Redis namespace。
 
 `push_items` 会先序列化完整集合，再为每组已接受的非空 Item Payload 追加一条 Redis Stream entry。entry
 保存 Payload 身份、框架 Item ID、业务 Item JSON 和可用的 Trace 元数据。提交采用 at-least-once 语义：
@@ -382,10 +391,13 @@ Worker token 不能发布 Task；control token 也不是 Worker Scheduler 凭据
 属于 Worker 本地或控制面部署配置，不会进入 Rules、Trace Snapshot、Request Snapshot、Payload 或 Item。
 Master 会在任何 JSON 或原始 body extractor 运行前，从 request parts 提取并校验对应凭据与 namespace。
 因此未认证的非法或超大 body 会先返回认证错误，不能进入请求体处理路径。
+Axum 监听本身是明文 HTTP；生产拓扑必须由可信反向代理或负载均衡器在该监听端口之前终止 TLS，Bearer
+凭据不能经过不可信的明文链路。
 
 API Worker 是有限生命周期的外部进程。`Api::open()` 会读取并校验 Master 的租约策略与公布的响应
 上限（默认 64 MiB）。`Api::with_max_response_bytes(...)` 在打开前设置 Worker 的接收容量；Master 通过
-YAML 的 `max_api_bytes` 字段或 `master::Config::with_max_api_bytes(...)` 设置请求/响应上限。若 Master 上限
+YAML 的 `api.max_size` 或 `master::Config::with_api(...)` 设置请求/响应上限。YAML 使用 `64MiB` 这类带
+单位的容量，允许范围为 1 KiB 到 4 GiB 减一字节。若 Master 上限
 大于本地容量，打开会被拒绝，因此 64 MiB 是默认值，不是整套拓扑的固定上限。第一次领取或待处理判断会
 登记传入的 `worker_id` 和支持的 mode；后续只在 mode 改变或心跳已过期时重写记录，Scheduler 关闭后
 停止心跳维护。client 的连接、读取、单次
@@ -397,7 +409,7 @@ Trace cache 同时受 128 条和 64 MiB 限制。
 提交则在同一任务的 Engine 外层重试期间保留未决逻辑操作 key，因为已经提交但响应不确定的 Item
 不能重复写入。明确成功或确定性错误会清除 key；未决 key 从首次创建起恰好五分钟后过期，复用不会滑动
 续期，达到 4096 条上限时拒绝新操作，不淘汰仍存活的操作。Master 要求
-`history_retention >= max(lease_timeout, 5m30s)`，使持久化的 operation 与 completion 重放记录覆盖该
+`history.ttl >= max(lease_timeout, 5m30s)`，使持久化的 operation 与 completion 重放记录覆盖该
 client 窗口。若当前没有 Tokio task 身份，每次 Init/Item 调用都会使用新 key，不进入这份未决操作存储。
 成功 `POST` 的响应若超过 client 上限，结果仍为 `Unavailable`，不会被误判为确定性失败；携带
 operation key 的调用会保留该 key 以供重放。
@@ -427,7 +439,9 @@ Event/审计数据域；只有真正的人工动作能与状态转换在同一�
 按稳定顺序且有批次上限；执行 version 已到 `i64::MAX` 的 Request 会隔离为 failed，不会永远留在
 pending；统计行按稳定 name 顺序加锁。
 Claim 会先校验持久化 Request 及其 Trace 归属，再取得租约时间；Trace 读取按 `trace_id` 缓存，响应大小
-增量计算。同一个响应对每个 `trace_id` 最多内嵌一次 Trace；若 `Request + Trace` 超限但 Request 本身可
+增量计算。每次存储查询最多读取 128 行，单次调用最多隔离 128 条非法候选；后续调用继续清理，合法候选则
+可以跨页读取，直到达到调用方数量或响应容量。所有接受的 Request 最后使用同一个租约起始时间。同一个响应
+对每个 `trace_id` 最多内嵌一次 Trace；若 `Request + Trace` 超限但 Request 本身可
 传输，则省略 Trace，由 Worker 通过 Trace 接口读取并缓存。只有 Request 自身也无法装入响应时才按超大
 坏数据隔离。
 

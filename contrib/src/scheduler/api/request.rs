@@ -74,10 +74,13 @@ fn validate_new_requests(requests: &[net::Request]) -> Result<(), scheduler::Err
                 "new Request next_time must not be negative".to_string(),
             ));
         }
-        if request.retry_count != 0 || request.max_retry_count <= 0 {
-            return Err(scheduler::Error::Message(
-                "new Request requires retry_count 0 and a positive max_retry_count".to_string(),
-            ));
+        if request.retry_count != 0
+            || !(1..=net::request::MAX_RETRY_COUNT).contains(&request.max_retry_count)
+        {
+            return Err(scheduler::Error::Message(format!(
+                "new Request requires retry_count 0 and max_retry_count between 1 and {}",
+                net::request::MAX_RETRY_COUNT
+            )));
         }
         for spec in &request.middlewares {
             spider::middleware::check(spec).map_err(|error| {

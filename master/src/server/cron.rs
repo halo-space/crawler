@@ -21,7 +21,7 @@ pub(super) trait Store: Clone + Send + Sync + 'static {
         &self,
         namespace: &str,
         now: i64,
-        retention: Duration,
+        ttl: Duration,
         limit: usize,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
@@ -41,10 +41,10 @@ impl Store for MySql {
         &self,
         namespace: &str,
         now: i64,
-        retention: Duration,
+        ttl: Duration,
         limit: usize,
     ) -> Result<(), Error> {
-        MySql::cleanup(self, namespace, now, retention, limit)
+        MySql::cleanup(self, namespace, now, ttl, limit)
             .await
             .map(|_| ())
     }
@@ -55,7 +55,7 @@ pub(super) struct Cron<S> {
     namespace: String,
     interval: Duration,
     dispatch_limit: usize,
-    history_retention: Duration,
+    history_ttl: Duration,
     cleanup_limit: usize,
 }
 
@@ -65,7 +65,7 @@ impl<S: Store> Cron<S> {
         namespace: String,
         interval: Duration,
         dispatch_limit: usize,
-        history_retention: Duration,
+        history_ttl: Duration,
         cleanup_limit: usize,
     ) -> Self {
         Self {
@@ -73,7 +73,7 @@ impl<S: Store> Cron<S> {
             namespace,
             interval,
             dispatch_limit,
-            history_retention,
+            history_ttl,
             cleanup_limit,
         }
     }
@@ -107,12 +107,7 @@ impl<S: Store> Cron<S> {
         }
         if let Err(error) = self
             .store
-            .cleanup(
-                &self.namespace,
-                now,
-                self.history_retention,
-                self.cleanup_limit,
-            )
+            .cleanup(&self.namespace, now, self.history_ttl, self.cleanup_limit)
             .await
         {
             tracing::warn!(%error, "history cleanup failed");

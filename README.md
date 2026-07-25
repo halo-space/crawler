@@ -59,10 +59,10 @@ engine.start().await?;
 
 All Redis keys are isolated by the selected namespace; normal `close()` releases client resources
 without deleting queued work. Redis stores Trace Snapshots, Request state, mode-scoped processing
-leases, settlements, statistics, and Items. Each `processing:<mode>` ZSET is the only active Request
-index and uses `lease_time` as its score; the Request Hash remains the authoritative state. Each
-accepted non-empty Item `Payload` becomes one Redis Stream entry and remains at-least-once; it does
-not perform business Item deduplication.
+leases, settlements, statistics, and Items. Each `processing:<mode>` ZSET is the only active
+execution-lease projection and uses `lease_time` as its score; the Request Hash remains the
+authoritative state. Each accepted non-empty Item `Payload` becomes one Redis Stream entry and
+remains at-least-once; it does not perform business Item deduplication.
 
 Redis bounds recurring claim maintenance: one `next_requests` call recovers at most 64 expired
 leases per mode, inspects at most 128 processing records across both modes, and promotes and
@@ -74,9 +74,20 @@ from active indexes and moved to terminal failure with a completion record. Neit
 Requests. Before returning a claim, the Worker recalculates the immutable Request Snapshot digest;
 a mismatch follows the same recovery path and is never executed. A verified Snapshot retry limit
 cannot be overridden by the mutable Hash, and a failed recovery cannot withhold valid Requests from
-the same claim. A corrupt shared index type instead
-fails the claim explicitly before state mutation. The current key layout does not migrate an older
-Redis namespace; deployment starts with a new namespace.
+the same claim. A corrupt shared index type instead fails the claim explicitly before state mutation.
+A Request Snapshot must set `max_retry_count` within `1..=128`; the immutable Snapshot value controls
+recovery and the mutable Hash cannot expand it. The current key layout does not migrate an older Redis
+namespace; deployment starts with a new namespace.
+
+Failed-Worker eligibility is projected into a mode-scoped `pending_exclusions` ZSET. Ready selection
+checks at most 128 excluded members per call and may return a temporary empty claim while it advances
+a per-mode cursor containing the latest inspected ready-event revision and excluded ready member.
+Every transition into a ready queue publishes an event to `ready_events:<mode>`. Before resuming after
+the saved member, claim inspects later events for that mode. Only a new ready Request that sorts before
+the saved member and is eligible for the current Worker resets the scan; lower-priority and cross-mode
+ready writes preserve its progress. Selection never bypasses an unresolved higher-priority prefix or
+mode. Pending checks compare the queued count with the Worker's indexed exclusions, so they do not
+scan an entire backlog inside one Redis Lua invocation.
 
 This release supports one Redis 7+ standalone primary only. It does not support Redis Cluster: the
 multi-key Lua transitions rely on single-instance atomicity, so Cluster will be a separate Scheduler
@@ -174,6 +185,21 @@ URL, namespace, Worker token, control token, and runtime limits in the strict YA
 cargo run -p master -- --config master/etc/master-api.yaml
 ```
 
+Master serves plain HTTP. Production deployments must terminate TLS in a trusted reverse proxy or
+load balancer before traffic reaches this listener; bearer tokens must never cross an untrusted
+network in plaintext.
+
+The checked-in template leaves both tokens empty and will not start until deployment supplies distinct
+credentials. Runtime capacities and retention use explicit human-readable units:
+
+```yaml
+api:
+  max_size: "64MiB"
+history:
+  ttl: "48h"
+  cleanup_limit: 1000
+```
+
 The control plane is split by responsibility: `master/src/handler/` contains Axum extraction and
 route handlers, `master/src/logic/` contains resource operations, `master/src/svc.rs` owns the
 shared service context, and `master/src/types/` contains the unified Worker/control DTOs. Handlers
@@ -182,7 +208,8 @@ do not call MySQL directly. `master/src/config/` loads and validates runtime YAM
 
 Both sides default to a 64 MiB API message limit. Set a Worker's receive capacity with
 `Api::with_max_response_bytes(...)` before opening it, and set Master's request/response limit with
-the YAML `max_api_bytes` field or `master::Config::with_max_api_bytes(...)`. Startup rejects a
+YAML `api.max_size` or `master::Config::with_api(...)`. Master accepts values from 1 KiB through
+4 GiB minus one byte. Startup rejects a
 Master limit larger than the Worker's configured capacity, so 64 MiB is a default rather than a
 fixed system-wide limit. The Worker serializes every outbound JSON message into the same bounded
 capacity before network I/O and reuses those immutable bytes across transport retries. Master checks
@@ -209,10 +236,13 @@ the persisted Rules or code seed and queues it directly, without running a Worke
 `before_scheduler`, Middleware, or Dedup during seed dispatch. A deterministically invalid stored Task
 is quarantined as `failed` with its error exposed through the control API; it does not block later due
 Tasks, and publishing a corrected definition makes it schedulable again. Claim validates candidates
-before assigning their lease timestamp and includes a Trace Snapshot at most once per `trace_id` in a
-response. A Worker fetches and caches an omitted Trace independently, so a transportable Request is
+in 128-row storage pages before assigning one lease timestamp to the accepted result. One call
+quarantines at most 128 invalid candidates and then yields; later claims continue cleanup. Valid-only
+scans may cross pages until the requested count or response capacity is reached. A response includes
+a Trace Snapshot at most
+once per `trace_id`. A Worker fetches and caches an omitted Trace independently, so a transportable Request is
 not rejected merely because its Trace would exceed the combined response limit. Unresolved local Init/Item operation
-keys have a fixed five-minute lifetime from creation. Master requires history retention of at least
+keys have a fixed five-minute lifetime from creation. Master requires `history.ttl` of at least
 `max(lease timeout, 5m30s)` so persistent operation and completion replay records outlive that window.
 The configured retention values then drive bounded cleanup of terminal Request, completion, and
 operation history; Item, Trace, Task, and trace-stat retention remain separate work. A remote Worker

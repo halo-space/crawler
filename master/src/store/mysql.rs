@@ -56,7 +56,7 @@ impl MySql {
             worker_timeout_ms: config.policy().lease_timeout_ms,
             heartbeat_interval_ms: config.policy().heartbeat_interval_ms,
             recovery_limit: config.recovery_limit(),
-            max_response_bytes: config.max_api_bytes(),
+            max_response_bytes: config.api().max_size,
         })
     }
 
@@ -76,7 +76,7 @@ impl MySql {
             worker_timeout_ms: config.policy().lease_timeout_ms,
             heartbeat_interval_ms: config.policy().heartbeat_interval_ms,
             recovery_limit: config.recovery_limit(),
-            max_response_bytes: config.max_api_bytes(),
+            max_response_bytes: config.api().max_size,
         }
     }
 }

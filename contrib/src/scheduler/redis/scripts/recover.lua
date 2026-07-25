@@ -7,6 +7,7 @@ local snapshot_max_retry = ARGV[6]
 local key = KEYS[1]
 
 local MAX_SEQUENCE = '99999999999999999999999999999999'
+local MAX_RETRY_COUNT = 128
 
 local function has_type(key, expected)
     local actual = redis.call('TYPE', key).ok
@@ -18,6 +19,14 @@ local function parse_i32(value, minimum, maximum)
     local parsed = tonumber(value)
     if not parsed or parsed < minimum or parsed > maximum then return nil end
     return parsed
+end
+
+local function worker_token(worker)
+    local encoded = {}
+    for index = 1, string.len(worker) do
+        encoded[index] = string.format('%02x', string.byte(worker, index))
+    end
+    return table.concat(encoded)
 end
 
 local function next_sequence()
@@ -54,10 +63,10 @@ local now = time[1] * 1000 + math.floor(time[2] / 1000)
 local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
 local retry_count = parse_i32(redis.call('HGET', key, 'retry_count'), 0, 2147483647)
-local stored_max_retry = parse_i32(redis.call('HGET', key, 'max_retry_count'), 1, 2147483647)
+local stored_max_retry = parse_i32(redis.call('HGET', key, 'max_retry_count'), 1, MAX_RETRY_COUNT)
 local trusted_max_retry = nil
 if snapshot_max_retry ~= '' then
-    trusted_max_retry = parse_i32(snapshot_max_retry, 1, 2147483647)
+    trusted_max_retry = parse_i32(snapshot_max_retry, 1, MAX_RETRY_COUNT)
     if not trusted_max_retry then return 'CORRUPT_REQUEST_RETRY' end
 end
 local max_retry = trusted_max_retry or stored_max_retry
@@ -74,15 +83,22 @@ local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
 local completion = prefix .. 'request:' .. token .. ':completion:' .. version
 local processing = prefix .. 'processing:' .. mode
 local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser' or 'http')
+local exclusions = prefix .. 'pending_exclusions:' .. mode
+local ready_events = prefix .. 'ready_events:' .. mode
 if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
 if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
 local reset_failed_workers = not has_type(failed_workers, 'list')
+if not reset_failed_workers and redis.call('LLEN', failed_workers) > retry_count then
+    reset_failed_workers = true
+end
 local reset_completion = not has_type(completion, 'hash')
 if retry < max_retry then
     if not has_type(KEYS[2], 'hash') then return 'CORRUPT_META' end
     if not has_type(prefix .. 'queue:' .. mode .. ':ready', 'zset') then
         return 'CORRUPT_READY_QUEUE'
     end
+    if not has_type(exclusions, 'zset') then return 'CORRUPT_PENDING_EXCLUSIONS' end
+    if not has_type(ready_events, 'zset') then return 'CORRUPT_READY_EVENTS' end
 end
 
 local sequence = nil
@@ -111,18 +127,25 @@ if retry < max_retry then
         value = tostring(value)
         return string.rep('0', width - string.len(value)) .. value
     end
-    local member = pad(sequence, 32) .. '|' .. token
+    local revision = pad(sequence, 32)
+    local member = revision .. '|' .. revision .. '|' .. token
+    local event = revision .. '|' .. member
     redis.call('HSET', KEYS[2], 'enqueue_sequence', sequence)
     redis.call('ZADD', prefix .. 'queue:' .. mode .. ':ready', -priority, member)
+    redis.call('ZADD', ready_events, 0, event)
+    for _, worker in ipairs(redis.call('LRANGE', failed_workers, 0, MAX_RETRY_COUNT - 1)) do
+        redis.call('ZADD', exclusions, 0, worker_token(worker) .. '|' .. token)
+    end
     redis.call('HSET', key,
         'state', 'pending', 'retry_count', retry, 'max_retry_count', max_retry, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
-        'queue_kind', 'ready', 'queue_member', member, 'updated_time', now)
+        'queue_kind', 'ready', 'queue_member', member, 'ready_event', event,
+        'updated_time', now)
 else
     redis.call('HSET', key,
         'state', 'failed', 'retry_count', retry, 'max_retry_count', max_retry, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
-        'queue_kind', '', 'queue_member', '', 'updated_time', now)
+        'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)
 end
 
 return 'OK'

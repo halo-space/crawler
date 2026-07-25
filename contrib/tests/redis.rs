@@ -3,6 +3,7 @@ mod redis {
     mod conformance;
     mod contract;
     mod coordination;
+    mod eligibility;
     mod error;
     mod integrity;
     mod items;
@@ -10,6 +11,7 @@ mod redis {
     mod lifecycle;
     mod precision;
     mod processing;
+    mod ready;
     mod request;
     mod server;
     mod settlement;

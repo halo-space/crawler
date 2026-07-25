@@ -54,10 +54,11 @@ pub(super) fn validate(task: &Task) -> Result<(), Error> {
                 return Err(Error::Invalid("seed URL must not be empty".to_string()));
             }
             identifier(&seed.node, "seed node")?;
-            if seed.max_retry_count <= 0 {
-                return Err(Error::Invalid(
-                    "seed max_retry_count must be positive".to_string(),
-                ));
+            if !(1..=spider::net::request::MAX_RETRY_COUNT).contains(&seed.max_retry_count) {
+                return Err(Error::Invalid(format!(
+                    "seed max_retry_count must be between 1 and {}",
+                    spider::net::request::MAX_RETRY_COUNT
+                )));
             }
         }
         for request in materialize(&task.id, "validation", &task.params, &task.seeds)? {
@@ -105,3 +106,53 @@ pub(super) fn materialize(
 
 #[cfg(test)]
 pub(super) use dispatch::next_period;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_seed_enforces_the_retry_limit_boundary() {
+        let mut accepted = task(spider::net::request::MAX_RETRY_COUNT);
+        assert!(validate(&accepted).is_ok());
+
+        accepted.seeds[0].max_retry_count = spider::net::request::MAX_RETRY_COUNT + 1;
+        let error = validate(&accepted).unwrap_err();
+
+        assert!(error.to_string().contains("max_retry_count"));
+    }
+
+    fn task(max_retry_count: i32) -> Task {
+        Task {
+            id: "task-1".to_string(),
+            name: "task-1".to_string(),
+            periodic: false,
+            interval_ms: 0,
+            priority: 0,
+            params: HashMap::new(),
+            dsl: None,
+            seeds: vec![CodeSeed {
+                node: "index".to_string(),
+                url: "https://example.com".to_string(),
+                method: Default::default(),
+                headers: Default::default(),
+                body: Default::default(),
+                cookies: Default::default(),
+                vals: HashMap::new(),
+                kwargs: HashMap::new(),
+                priority: 0,
+                dont_filter: false,
+                mode: Default::default(),
+                timeout: None,
+                max_body_bytes: None,
+                proxy: None,
+                tls: None,
+                middlewares: Vec::new(),
+                max_retry_count,
+            }],
+            persister_id: None,
+            attachment: None,
+            next_time: 0,
+        }
+    }
+}

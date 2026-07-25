@@ -71,9 +71,10 @@ impl MySql {
         validate_namespace(namespace)?;
         let mut tx = self.pool.begin().await?;
         if !body.context.id.is_empty() {
-            let row = load(&mut tx, namespace, &body.context.id).await?;
-            verify_identity(&row, &body.context)?;
-            verify_lease(&row, self.lease_timeout_ms)?;
+            let request = load(&mut tx, namespace, &body.context.id).await?;
+            verify_ownership(&request, &body.context)?;
+            validate_processing(&request)?;
+            verify_lease(&request, self.lease_timeout_ms)?;
         }
         for request in &body.requests {
             if (!body.context.task_id.is_empty() && request.task_id != body.context.task_id)
@@ -292,7 +293,7 @@ pub(super) fn validate_new_snapshot(
     Ok(())
 }
 
-pub(super) fn verify_identity(request: &State, identity: &types::Identity) -> Result<(), Error> {
+pub(super) fn verify_ownership(request: &State, identity: &types::Identity) -> Result<(), Error> {
     if request.id != identity.id {
         return Err(Error::RequestNotFound(identity.id.clone()));
     }
@@ -395,13 +396,15 @@ impl Stored {
 }
 
 fn validate_stored(request: &State) -> Result<(), Error> {
-    if request.id != request.snapshot.id
+    if !matches!(request.state, PENDING | PROCESSING | DONE | FAILED)
+        || request.id != request.snapshot.id
         || request.task_id != request.snapshot.task_id
         || request.trace_id != request.snapshot.trace_id
         || request.node != request.snapshot.node
         || request.mode != mode_name(&request.snapshot.mode)
         || request.priority != request.snapshot.priority
         || request.max_retry_count != request.snapshot.max_retry_count
+        || !(1..=spider::net::request::MAX_RETRY_COUNT).contains(&request.snapshot.max_retry_count)
         || request.snapshot_digest
             != operation::hex(
                 &request
@@ -418,7 +421,7 @@ fn validate_stored(request: &State) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_processing(request: &State) -> Result<(), Error> {
+pub(super) fn validate_processing(request: &State) -> Result<(), Error> {
     if request.state != PROCESSING
         || request.version <= 0
         || request.next_time < 0
@@ -426,6 +429,7 @@ fn validate_processing(request: &State) -> Result<(), Error> {
         || request.leased_by.is_empty()
         || request.retry_count < 0
         || request.max_retry_count <= 0
+        || request.max_retry_count > spider::net::request::MAX_RETRY_COUNT
         || request.retry_count >= request.max_retry_count
     {
         return Err(Error::Invalid(format!(
@@ -457,6 +461,7 @@ fn validate_pending(request: &State) -> Result<(), Error> {
         || request.ack_version.is_some()
         || request.retry_count < 0
         || request.max_retry_count <= 0
+        || request.max_retry_count > spider::net::request::MAX_RETRY_COUNT
         || request.retry_count >= request.max_retry_count
     {
         return Err(Error::Invalid(format!(
@@ -477,4 +482,82 @@ fn validate_pending(request: &State) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn processing_rejects_worker_history_beyond_retry_count() {
+        let valid = processing(1, vec!["worker-a"]);
+        assert!(valid.processing().is_ok());
+
+        let invalid = processing(1, vec!["worker-a", "worker-b"]);
+        let error = invalid.processing().unwrap_err();
+
+        assert!(error.to_string().contains("failed_workers"));
+    }
+
+    #[test]
+    fn stale_execution_is_classified_by_version_before_terminal_state() {
+        let stored = processing(0, Vec::new());
+        let mut request = stored.row().unwrap();
+        request.state = DONE;
+        request.version = 2;
+        request.leased_by.clear();
+        request.lease_time = 0;
+        let identity = types::Identity {
+            id: request.id.clone(),
+            task_id: request.task_id.clone(),
+            trace_id: request.trace_id.clone(),
+            version: 1,
+            worker_id: "worker-previous".to_string(),
+            node: request.node.clone(),
+        };
+
+        assert!(matches!(
+            verify_ownership(&request, &identity),
+            Err(Error::Version(id)) if id == request.id
+        ));
+    }
+
+    #[test]
+    fn unknown_state_is_rejected_as_corrupt_storage() {
+        let stored = processing(0, Vec::new());
+        let mut request = stored.row().unwrap();
+        request.state = i8::MAX;
+
+        assert!(matches!(validate_stored(&request), Err(Error::Invalid(_))));
+    }
+
+    fn processing(retry_count: i32, failed_workers: Vec<&str>) -> Stored {
+        let mut request = spider::net::Request::follow("https://example.com")
+            .unwrap()
+            .with_id("request-1")
+            .node("index");
+        request.max_retry_count = 3;
+        let snapshot = spider::net::request::Snapshot::try_from(request).unwrap();
+        let snapshot_digest = operation::hex(&snapshot.digest().unwrap());
+
+        Stored {
+            id: snapshot.id.clone(),
+            task_id: snapshot.task_id.clone(),
+            trace_id: snapshot.trace_id.clone(),
+            node: snapshot.node.clone(),
+            mode: mode_name(&snapshot.mode).to_string(),
+            state: PROCESSING,
+            version: 1,
+            priority: snapshot.priority,
+            snapshot: serde_json::to_value(&snapshot).unwrap(),
+            snapshot_digest,
+            next_time: 0,
+            leased_by: "worker-current".to_string(),
+            lease_time: 1,
+            retry_count,
+            max_retry_count: snapshot.max_retry_count,
+            failed_workers: serde_json::json!(failed_workers),
+            ack_version: None,
+        }
+    }
 }

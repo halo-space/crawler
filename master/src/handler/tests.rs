@@ -126,10 +126,10 @@ async fn body_limit_and_json_rejections_use_the_machine_envelope() {
 
 #[tokio::test]
 async fn authentication_precedes_body_extraction_on_worker_and_control_routes() {
-    let config = config().with_max_api_bytes(16).unwrap();
+    let config = config().with_api(crate::Api { max_size: 1024 }).unwrap();
     let store = MySql::disconnected(&config);
     let app = build(config, store);
-    let body = "{\"value\": this malformed body exceeds sixteen bytes}";
+    let body = format!("{{\"value\": this malformed body {} }}", "x".repeat(1024));
 
     for (method, path, token, wrong_token) in [
         (

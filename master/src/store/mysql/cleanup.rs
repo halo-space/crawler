@@ -19,11 +19,11 @@ impl MySql {
         &self,
         namespace: &str,
         now: i64,
-        retention: Duration,
+        ttl: Duration,
         limit: usize,
     ) -> Result<Cleanup, Error> {
         validate_namespace(namespace)?;
-        let before = before(now, retention)?;
+        let before = before(now, ttl)?;
         let limit = u64::try_from(limit)
             .map_err(|_| Error::Invalid("cleanup limit exceeds u64".to_string()))?;
         if limit == 0 {
@@ -41,16 +41,14 @@ impl MySql {
     }
 }
 
-fn before(now: i64, retention: Duration) -> Result<i64, Error> {
-    let retention = i64::try_from(retention.as_millis()).map_err(|_| {
-        Error::Invalid("history retention exceeds the supported timestamp range".to_string())
+fn before(now: i64, ttl: Duration) -> Result<i64, Error> {
+    let ttl = i64::try_from(ttl.as_millis()).map_err(|_| {
+        Error::Invalid("history TTL exceeds the supported timestamp range".to_string())
     })?;
-    if retention <= 0 {
-        return Err(Error::Invalid(
-            "history retention must be positive".to_string(),
-        ));
+    if ttl <= 0 {
+        return Err(Error::Invalid("history TTL must be positive".to_string()));
     }
-    Ok(now.saturating_sub(retention))
+    Ok(now.saturating_sub(ttl))
 }
 
 async fn requests(
@@ -114,17 +112,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retention_uses_a_strict_expiry_boundary() {
+    fn ttl_uses_a_strict_expiry_boundary() {
         assert_eq!(before(10_000, Duration::from_millis(1_000)).unwrap(), 9_000);
     }
 
     #[test]
-    fn retention_rejects_zero() {
+    fn ttl_rejects_zero() {
         assert!(before(10_000, Duration::ZERO).is_err());
     }
 
     #[test]
-    fn retention_saturates_at_the_timestamp_floor() {
+    fn ttl_saturates_at_the_timestamp_floor() {
         assert_eq!(
             before(i64::MIN + 10, Duration::from_millis(20)).unwrap(),
             i64::MIN

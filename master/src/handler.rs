@@ -21,13 +21,13 @@ mod control_tests;
 mod tests;
 
 pub(crate) fn build(config: crate::Config, store: crate::store::MySql) -> Router {
-    let max_api_bytes = config.max_api_bytes();
+    let max_size = config.api().max_size;
     let context = Context::new(config, store);
     Router::new()
         .merge(router())
         .fallback(response::not_found)
         .method_not_allowed_fallback(response::method_not_allowed)
-        .layer(axum::extract::DefaultBodyLimit::max(max_api_bytes))
+        .layer(axum::extract::DefaultBodyLimit::max(max_size))
         .with_state(context)
 }
 

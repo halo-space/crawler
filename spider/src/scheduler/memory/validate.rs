@@ -37,10 +37,13 @@ pub(super) fn request(request: &net::Request) -> Result<(), scheduler::Error> {
             "new Request next_time must not be negative".to_string(),
         ));
     }
-    if request.retry_count != 0 || request.max_retry_count <= 0 {
-        return Err(scheduler::Error::Message(
-            "new Request requires retry_count 0 and a positive max_retry_count".to_string(),
-        ));
+    if request.retry_count != 0
+        || !(1..=net::request::MAX_RETRY_COUNT).contains(&request.max_retry_count)
+    {
+        return Err(scheduler::Error::Message(format!(
+            "new Request requires retry_count 0 and max_retry_count between 1 and {}",
+            net::request::MAX_RETRY_COUNT
+        )));
     }
     for middleware in &request.middlewares {
         crate::middleware::check(middleware).map_err(|error| {

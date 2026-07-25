@@ -128,7 +128,10 @@ async fn fifo_sequence_remains_exact_above_lua_safe_integers() {
             .query_async::<String>(&mut connection)
             .await
             .unwrap();
-        assert_eq!(member, format!("{expected:032}|{}", key::token(id)));
+        assert_eq!(
+            member,
+            format!("{expected:032}|{expected:032}|{}", key::token(id))
+        );
     }
     let claimed = scheduler
         .next_requests(2, worker::A, worker::HTTP)

@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use super::cron::{Cron, Store};
+use super::drain_cron;
 use crate::Error;
 
 #[derive(Clone, Default)]
@@ -29,7 +30,7 @@ impl Store for Fixture {
         &self,
         _namespace: &str,
         _now: i64,
-        _retention: Duration,
+        _ttl: Duration,
         _limit: usize,
     ) -> Result<(), Error> {
         self.cleaned.fetch_add(1, Ordering::SeqCst);
@@ -67,4 +68,33 @@ async fn cron_runs_recovery_dispatch_and_cleanup_then_stops() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn drain_waits_for_a_stopped_cron() {
+    let task = tokio::spawn(async {});
+
+    drain_cron(task, Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn drain_aborts_a_cron_that_does_not_stop() {
+    struct Dropped(Arc<AtomicUsize>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let guard = Dropped(Arc::clone(&dropped));
+    let task = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+
+    drain_cron(task, Duration::from_millis(1)).await.unwrap();
+
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }

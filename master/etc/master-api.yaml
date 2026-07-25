@@ -1,15 +1,17 @@
 bind: "127.0.0.1:8080"
 database_url: "mysql://crawler:password@127.0.0.1:3306/crawler"
 namespace: "crawler"
-worker_token: "replace-worker-token"
-control_token: "replace-control-token"
+worker_token: ""
+control_token: ""
 policy:
   lease_timeout_ms: 30000
   lease_interval_ms: 10000
   heartbeat_interval_ms: 10000
-max_api_bytes: 67108864
+api:
+  max_size: "64MiB"
 cron_interval_ms: 1000
 dispatch_limit: 64
 recovery_limit: 128
-history_retention_ms: 172800000
-cleanup_limit: 1000
+history:
+  ttl: "48h"
+  cleanup_limit: 1000

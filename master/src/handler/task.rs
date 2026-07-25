@@ -36,7 +36,7 @@ async fn list(
     let query = super::extract::query(query)?;
     super::response::bounded(
         logic::task::list(&app, &query).await?,
-        app.config.max_api_bytes(),
+        app.config.api().max_size,
     )
 }
 
@@ -47,5 +47,5 @@ async fn detail(
 ) -> Result<Json<task::Detail>, Error> {
     let id = super::extract::path(path)?;
     let task = super::response::found(logic::task::detail(&app, &id).await?, "Task", id)?;
-    super::response::bounded(task, app.config.max_api_bytes())
+    super::response::bounded(task, app.config.api().max_size)
 }

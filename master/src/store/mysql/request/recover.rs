@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use serde_json::Value;
 use sqlx::types::Json;
 use sqlx::{MySql as SqlxMySql, Transaction};
 
@@ -34,7 +35,7 @@ impl<'a> Failure<'a> {
             state: request.state,
             leased_by: &request.leased_by,
             retry_count: request.retry_count,
-            max_retry_count: request.max_retry_count,
+            max_retry_count: retry_limit(&request.snapshot, request.max_retry_count),
             failed_workers: request.failed_workers(),
         }
     }
@@ -49,7 +50,7 @@ impl<'a> Failure<'a> {
             state: request.state,
             leased_by: &request.leased_by,
             retry_count: request.retry_count,
-            max_retry_count: request.max_retry_count,
+            max_retry_count: request.snapshot.max_retry_count,
             failed_workers: request.failed_workers.clone(),
         }
     }
@@ -225,19 +226,22 @@ async fn fail(
     now: i64,
     error: &str,
 ) -> Result<(), Error> {
-    let mut failed_workers = request.failed_workers;
-    settle::append_worker(&mut failed_workers, request.leased_by);
+    let failed_workers = bounded_workers(request.failed_workers, request.leased_by);
+    let maximum = spider::net::request::MAX_RETRY_COUNT;
     let retry_count = request
         .max_retry_count
+        .clamp(1, maximum)
         .max(request.retry_count)
-        .max(failed_workers.len().min(i32::MAX as usize) as i32)
+        .clamp(1, maximum)
+        .max(failed_workers.len() as i32)
         .max(1);
     let updated = sqlx::query(
-        "UPDATE requests SET state = ?, retry_count = ?, leased_by = ?, lease_time = ?, \
-         ack_version = NULL, next_time = 0, failed_workers = ?, updated_time = ? \
+        "UPDATE requests SET state = ?, retry_count = ?, max_retry_count = ?, leased_by = ?, \
+         lease_time = ?, ack_version = NULL, next_time = 0, failed_workers = ?, updated_time = ? \
          WHERE namespace = ? AND id = ? AND version = ? AND state = ?",
     )
     .bind(FAILED)
+    .bind(retry_count)
     .bind(retry_count)
     .bind(request.leased_by)
     .bind(now)
@@ -291,6 +295,30 @@ async fn fail(
     Ok(())
 }
 
+fn retry_limit(snapshot: &Value, projected: i32) -> i32 {
+    let maximum = spider::net::request::MAX_RETRY_COUNT;
+    snapshot
+        .get("max_retry_count")
+        .and_then(Value::as_i64)
+        .map(|value| value.clamp(1, i64::from(maximum)) as i32)
+        .unwrap_or_else(|| projected.clamp(1, maximum))
+}
+
+fn bounded_workers(values: Vec<String>, current: &str) -> Vec<String> {
+    let limit = spider::net::request::MAX_RETRY_COUNT as usize;
+    let history_limit = limit.saturating_sub(usize::from(!current.is_empty()));
+    let mut seen = HashSet::with_capacity(values.len().min(limit));
+    let mut workers = values
+        .into_iter()
+        .filter(|worker| !worker.is_empty() && seen.insert(worker.clone()))
+        .take(history_limit)
+        .collect::<Vec<_>>();
+    if !current.is_empty() && seen.insert(current.to_string()) {
+        workers.push(current.to_string());
+    }
+    workers
+}
+
 async fn return_pending(
     tx: &mut Transaction<'_, SqlxMySql>,
     namespace: &str,
@@ -315,4 +343,21 @@ async fn return_pending(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn retry_limit_prefers_the_snapshot_and_bounds_corrupt_values() {
+        assert_eq!(retry_limit(&json!({ "max_retry_count": 3 }), 99), 3);
+        assert_eq!(retry_limit(&json!({ "max_retry_count": 0 }), 99), 1);
+        assert_eq!(
+            retry_limit(&json!({ "broken": true }), i32::MAX),
+            spider::net::request::MAX_RETRY_COUNT
+        );
+    }
 }

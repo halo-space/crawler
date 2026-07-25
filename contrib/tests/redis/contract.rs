@@ -34,6 +34,7 @@ async fn all_operations_conform() {
                     move || isolated(&url, &namespaces, lease)
                 },
                 false,
+                Some(isolated(&url, &namespaces, lease)),
                 TIMING,
             )
             .await;

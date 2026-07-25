@@ -11,27 +11,24 @@ pub(super) struct Handle {
 
 impl Handle {
     pub(super) async fn connect() -> Option<Self> {
-        let url = std::env::var("CRAWLER_REDIS_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
+        let (url, required) = match std::env::var("CRAWLER_REDIS_URL") {
+            Ok(url) => (url, true),
+            Err(std::env::VarError::NotPresent) => (DEFAULT_URL.to_string(), false),
+            Err(error) => panic!("invalid CRAWLER_REDIS_URL: {error}"),
+        };
         let client = redis::Client::open(url.as_str())
             .unwrap_or_else(|error| panic!("invalid CRAWLER_REDIS_URL {url:?}: {error}"));
-        let mut connection = match tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            client.get_multiplexed_async_connection(),
-        )
-        .await
-        {
-            Ok(Ok(connection)) => connection,
-            Ok(Err(error)) if error.kind() == redis::ErrorKind::Io => {
-                return unavailable(&url, error);
-            }
-            Ok(Err(error)) => panic!("failed to connect to configured Redis at {url}: {error}"),
-            Err(_) => {
-                eprintln!(
-                    "skipping Redis Scheduler integration test: Redis at {url} did not connect within {CONNECT_TIMEOUT:?}"
-                );
-                return None;
-            }
-        };
+        let mut connection =
+            match tokio::time::timeout(CONNECT_TIMEOUT, client.get_multiplexed_async_connection())
+                .await
+            {
+                Ok(Ok(connection)) => connection,
+                Ok(Err(error)) if error.kind() == redis::ErrorKind::Io => {
+                    return unavailable(&url, error, required);
+                }
+                Ok(Err(error)) => panic!("failed to connect to configured Redis at {url}: {error}"),
+                Err(_) => return unavailable_timeout(&url, "connect", required),
+            };
         let pong = tokio::time::timeout(
             CONNECT_TIMEOUT,
             redis::cmd("PING").query_async::<String>(&mut connection),
@@ -40,9 +37,11 @@ impl Handle {
         match pong {
             Ok(Ok(pong)) if pong == "PONG" => Some(Self { url }),
             Ok(Ok(reply)) => panic!("Redis at {url} returned unexpected PING reply {reply:?}"),
-            Ok(Err(error)) if error.kind() == redis::ErrorKind::Io => unavailable(&url, error),
+            Ok(Err(error)) if error.kind() == redis::ErrorKind::Io => {
+                unavailable(&url, error, required)
+            }
             Ok(Err(error)) => panic!("Redis at {url} rejected PING: {error}"),
-            Err(_) => unavailable_timeout(&url, "answer PING"),
+            Err(_) => unavailable_timeout(&url, "answer PING", required),
         }
     }
 
@@ -103,12 +102,18 @@ pub(super) fn namespace(label: &str) -> String {
     )
 }
 
-fn unavailable(url: &str, error: redis::RedisError) -> Option<Handle> {
+fn unavailable(url: &str, error: redis::RedisError, required: bool) -> Option<Handle> {
+    if required {
+        panic!("configured Redis at {url} is unavailable: {error}");
+    }
     eprintln!("skipping Redis Scheduler integration test: Redis at {url} is unavailable: {error}");
     None
 }
 
-fn unavailable_timeout(url: &str, operation: &str) -> Option<Handle> {
+fn unavailable_timeout(url: &str, operation: &str, required: bool) -> Option<Handle> {
+    if required {
+        panic!("configured Redis at {url} did not {operation} within {CONNECT_TIMEOUT:?}");
+    }
     eprintln!(
         "skipping Redis Scheduler integration test: Redis at {url} did not {operation} within {CONNECT_TIMEOUT:?}"
     );

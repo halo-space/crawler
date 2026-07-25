@@ -24,6 +24,6 @@ fn short_lease() -> Memory {
 
 #[tokio::test]
 async fn conforms_to_the_contract() {
-    conformance::run(new, true, conformance::Timing::memory()).await;
+    conformance::run(new, true, None, conformance::Timing::memory()).await;
     conformance::lease(short_lease(), conformance::Timing::memory()).await;
 }

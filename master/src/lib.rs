@@ -12,6 +12,6 @@ mod types;
 #[cfg(test)]
 mod api_test;
 
-pub use config::{Config, Policy};
+pub use config::{Api, Config, History, Policy};
 pub use error::Error;
 pub use server::Server;

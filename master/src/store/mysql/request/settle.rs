@@ -6,7 +6,9 @@ use super::super::operation;
 use super::super::time::now_millis;
 use super::super::trace;
 use super::super::validate::{identity as validate_identity, namespace as validate_namespace};
-use super::{DONE, FAILED, PENDING, State, load, queue, verify_identity, verify_lease};
+use super::{
+    DONE, FAILED, PENDING, State, load, queue, validate_processing, verify_lease, verify_ownership,
+};
 use crate::{Error, types};
 
 impl MySql {
@@ -57,7 +59,8 @@ impl MySql {
             tx.commit().await?;
             return Ok(());
         }
-        verify_identity(&request, &body.identity)?;
+        verify_ownership(&request, &body.identity)?;
+        validate_processing(&request)?;
         verify_lease(&request, self.lease_timeout_ms)?;
         if request.ack_version != Some(body.identity.version) {
             return Err(Error::NotAcknowledged(body.identity.id.clone()));

@@ -60,6 +60,12 @@ async fn api_scheduler_conforms_through_master() -> TestResult<()> {
             )
         },
         false,
+        Some(fixture(
+            &running.base_url,
+            &running.namespace,
+            running.pool.clone(),
+            lease,
+        )),
         timing,
     )
     .await;

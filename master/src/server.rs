@@ -1,7 +1,9 @@
 use std::future::Future;
+use std::time::Duration;
 
 use axum::Router;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::store::MySql;
 use crate::{Config, Error, handler};
@@ -16,6 +18,8 @@ mod tests;
 mod http_tests;
 
 use cron::Cron;
+
+const CRON_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Server {
     config: Config,
@@ -69,8 +73,8 @@ impl Server {
             self.config.namespace().to_string(),
             self.config.cron_interval(),
             self.config.dispatch_limit(),
-            self.config.history_retention(),
-            self.config.cleanup_limit(),
+            self.config.history().ttl,
+            self.config.history().cleanup_limit,
         );
         let cron_task = tokio::spawn(cron.run(stopped));
         let stop_after_shutdown = stop.clone();
@@ -82,9 +86,27 @@ impl Server {
             .await
             .map_err(|error| Error::Unavailable(error.to_string()));
         let _ = stop.send(true);
-        cron_task
-            .await
-            .map_err(|error| Error::Unavailable(format!("Cron task failed: {error}")))?;
+        drain_cron(cron_task, CRON_DRAIN_TIMEOUT).await?;
         result
+    }
+}
+
+async fn drain_cron(mut task: JoinHandle<()>, timeout: Duration) -> Result<(), Error> {
+    match tokio::time::timeout(timeout, &mut task).await {
+        Ok(result) => {
+            result.map_err(|error| Error::Unavailable(format!("Cron task failed: {error}")))
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = timeout.as_millis(),
+                "Cron task did not stop before the shutdown deadline"
+            );
+            task.abort();
+            match task.await {
+                Ok(()) => Ok(()),
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(Error::Unavailable(format!("Cron task failed: {error}"))),
+            }
+        }
     }
 }

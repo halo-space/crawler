@@ -118,7 +118,7 @@ async fn list(
     let query = super::extract::query(query)?;
     super::response::bounded(
         logic::request::list(&app, &query).await?,
-        app.config.max_api_bytes(),
+        app.config.api().max_size,
     )
 }
 
@@ -131,5 +131,5 @@ async fn detail(
     let request = logic::request::detail(&app, &id)
         .await?
         .ok_or_else(|| Error::RequestNotFound(id))?;
-    super::response::bounded(request, app.config.max_api_bytes())
+    super::response::bounded(request, app.config.api().max_size)
 }

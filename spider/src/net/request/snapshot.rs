@@ -4,6 +4,9 @@ use std::fmt;
 
 use crate::{middleware, net, trace};
 
+/// Maximum queue attempts retained by one Request.
+pub const MAX_RETRY_COUNT: i32 = 128;
+
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -179,9 +182,12 @@ impl Snapshot {
         }
         if self.retry_count < 0
             || self.max_retry_count <= 0
+            || self.max_retry_count > MAX_RETRY_COUNT
             || self.retry_count >= self.max_retry_count
         {
-            return Err("Request Snapshot retry fields are invalid".to_string());
+            return Err(format!(
+                "Request Snapshot retry fields must use at most {MAX_RETRY_COUNT} attempts"
+            ));
         }
         let mut workers = std::collections::HashSet::with_capacity(self.failed_workers.len());
         if self
@@ -381,6 +387,19 @@ graph:
         snapshot.state = net::State::Pending;
         snapshot.failed_workers = vec!["worker-1".to_string(), "worker-1".to_string()];
         assert!(snapshot.restore(None).is_err());
+    }
+
+    #[test]
+    fn snapshot_enforces_the_retry_limit_boundary() {
+        let mut accepted = net::Request::follow("https://example.com/accepted").unwrap();
+        accepted.max_retry_count = MAX_RETRY_COUNT;
+        assert!(Snapshot::try_from(accepted).is_ok());
+
+        let mut rejected = net::Request::follow("https://example.com/rejected").unwrap();
+        rejected.max_retry_count = MAX_RETRY_COUNT + 1;
+        let error = Snapshot::try_from(rejected).unwrap_err();
+
+        assert!(error.contains(&MAX_RETRY_COUNT.to_string()));
     }
 
     #[test]

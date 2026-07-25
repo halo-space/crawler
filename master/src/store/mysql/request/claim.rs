@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use sqlx::AssertSqlSafe;
+use sqlx::mysql::MySqlRow;
+use sqlx::{AssertSqlSafe, MySql as SqlxMySql, Transaction};
 
 use super::super::MySql;
 use super::super::operation;
@@ -9,15 +10,60 @@ use super::super::time::now_millis;
 use super::super::trace;
 use super::super::validate::{namespace as validate_namespace, worker_id as validate_worker_id};
 use super::super::worker::canonical_modes;
-use super::{State, parse_stored, recover};
+use super::{State, Stored, parse_stored, recover};
 use crate::{Error, types};
 
 const EMPTY_RESPONSE_BYTES: usize = b"{\"requests\":[]}".len();
+const SCAN_SIZE: u64 = 128;
+const REJECTION_LIMIT: usize = 128;
 
 struct Candidate {
     request: State,
     version: i64,
     trace: Option<Arc<spider::trace::Snapshot>>,
+}
+
+enum InspectError {
+    Invalid(String),
+    Storage(Error),
+}
+
+async fn inspect(
+    tx: &mut Transaction<'_, SqlxMySql>,
+    namespace: &str,
+    stored: &Stored,
+    traces: &mut HashMap<String, Option<Arc<spider::trace::Snapshot>>>,
+) -> Result<Candidate, InspectError> {
+    let request = match stored.pending() {
+        Ok(request) => request,
+        Err(error) => return Err(InspectError::Invalid(error.to_string())),
+    };
+    let Some(version) = request.version.checked_add(1) else {
+        return Err(InspectError::Invalid("version overflow".to_string()));
+    };
+    let snapshot = if let Some(snapshot) = traces.get(&request.trace_id) {
+        snapshot.clone()
+    } else {
+        match trace::load(tx, namespace, &request.trace_id).await {
+            Ok(snapshot) => {
+                let snapshot = snapshot.map(Arc::new);
+                traces.insert(request.trace_id.clone(), snapshot.clone());
+                snapshot
+            }
+            Err(error) if recover::is_stored_data_error(&error) => {
+                return Err(InspectError::Invalid(error.to_string()));
+            }
+            Err(error) => return Err(InspectError::Storage(error)),
+        }
+    };
+    if let Err(error) = trace::validate_snapshot(&request.snapshot, snapshot.as_deref()) {
+        return Err(InspectError::Invalid(error.to_string()));
+    }
+    Ok(Candidate {
+        request,
+        version,
+        trace: snapshot,
+    })
 }
 
 impl Candidate {
@@ -38,6 +84,44 @@ impl Candidate {
                 None
             },
         }
+    }
+
+    async fn assign(
+        &self,
+        tx: &mut Transaction<'_, SqlxMySql>,
+        namespace: &str,
+        worker_id: &str,
+        observed_at: i64,
+    ) -> Result<(), Error> {
+        let updated = sqlx::query(
+            "UPDATE requests SET state = 1, leased_by = ?, lease_time = ?, version = ?, \
+             ack_version = NULL, updated_time = ? WHERE namespace = ? AND id = ? AND state = 0",
+        )
+        .bind(worker_id)
+        .bind(observed_at)
+        .bind(self.version)
+        .bind(observed_at)
+        .bind(namespace)
+        .bind(&self.request.id)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(Error::Unavailable(format!(
+                "claim lost Request state transition: {}",
+                self.request.id
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Rejections(usize);
+
+impl Rejections {
+    fn record(&mut self) -> bool {
+        self.0 += 1;
+        self.0 == REJECTION_LIMIT
     }
 }
 
@@ -136,11 +220,7 @@ impl MySql {
         body: &types::Claim,
     ) -> Result<types::Claims, Error> {
         validate_namespace(namespace)?;
-        if body.limit == 0 || body.limit > 1024 {
-            return Err(Error::Invalid(
-                "claim limit must be between 1 and 1024".to_string(),
-            ));
-        }
+        validate_limit(body.limit)?;
         validate_worker_id(&body.worker_id)?;
         let modes = canonical_modes(&body.modes)?;
         let digest = operation::digest(&(body.limit, &body.worker_id, &modes))?;
@@ -176,56 +256,29 @@ impl MySql {
              AND JSON_CONTAINS(failed_workers, JSON_QUOTE(?)) = 0 \
              ORDER BY priority DESC, sequence ASC LIMIT ? FOR UPDATE SKIP LOCKED"
         );
-        let mut request = sqlx::query(AssertSqlSafe(query))
-            .bind(namespace)
-            .bind(observed_at);
-        for mode in &modes {
-            request = request.bind(mode);
-        }
-        let rows = request
-            .bind(&body.worker_id)
-            .bind(body.limit as u64)
-            .fetch_all(&mut *tx)
-            .await?;
         let mut traces = HashMap::<String, Option<Arc<spider::trace::Snapshot>>>::new();
-        let mut candidates = Vec::with_capacity(rows.len());
-        for row in rows {
-            let stored = parse_stored(row)?;
-            let parsed = match stored.pending() {
-                Ok(request) => request,
-                Err(error) => {
-                    recover::reject(
-                        &mut tx,
-                        namespace,
-                        &stored,
-                        observed_at,
-                        &format!("invalid pending Request: {error}"),
-                    )
-                    .await?;
-                    continue;
-                }
-            };
-            let Some(version) = parsed.version.checked_add(1) else {
-                recover::reject(
-                    &mut tx,
-                    namespace,
-                    &stored,
-                    observed_at,
-                    "invalid pending Request: version overflow",
-                )
-                .await?;
-                continue;
-            };
-            let trace = if let Some(trace) = traces.get(&parsed.trace_id) {
-                trace.clone()
-            } else {
-                match trace::load(&mut tx, namespace, &parsed.trace_id).await {
-                    Ok(trace) => {
-                        let trace = trace.map(Arc::new);
-                        traces.insert(parsed.trace_id.clone(), trace.clone());
-                        trace
-                    }
-                    Err(error) if recover::is_stored_data_error(&error) => {
+        let mut selection = Selection::new(self.max_response_bytes)?;
+        let mut claimed = Vec::new();
+        let mut rejections = Rejections::default();
+        'scan: while claimed.len() < body.limit {
+            let rows = scan(
+                &mut tx,
+                &query,
+                namespace,
+                observed_at,
+                &body.worker_id,
+                &modes,
+            )
+            .await?;
+            if rows.is_empty() {
+                break;
+            }
+
+            for row in rows {
+                let stored = parse_stored(row)?;
+                let candidate = match inspect(&mut tx, namespace, &stored, &mut traces).await {
+                    Ok(candidate) => candidate,
+                    Err(InspectError::Invalid(error)) => {
                         recover::reject(
                             &mut tx,
                             namespace,
@@ -234,74 +287,57 @@ impl MySql {
                             &format!("invalid pending Request: {error}"),
                         )
                         .await?;
+                        if rejections.record() {
+                            break 'scan;
+                        }
                         continue;
                     }
-                    Err(error) => return Err(error),
+                    Err(InspectError::Storage(error)) => return Err(error),
+                };
+                let include_trace = selection.needs_trace(&candidate.request.trace_id);
+                // Measure with the widest non-negative timestamp. Replacing it with the final
+                // lease start can only make the serialized response smaller.
+                let request = candidate.claimed(&body.worker_id, i64::MAX, include_trace);
+                let (capacity, request) = selection.include(request)?;
+                match capacity {
+                    Capacity::Oversized => {
+                        let rejected_at = now_millis();
+                        recover::reject_state(
+                            &mut tx,
+                            namespace,
+                            &candidate.request,
+                            rejected_at,
+                            &format!(
+                                "claimed Request exceeds the configured {} byte API response limit",
+                                self.max_response_bytes
+                            ),
+                        )
+                        .await?;
+                        if rejections.record() {
+                            break 'scan;
+                        }
+                        continue;
+                    }
+                    Capacity::Full => break 'scan,
+                    Capacity::Accepted => {}
                 }
-            };
-            if let Err(error) = trace::validate_snapshot(&parsed.snapshot, trace.as_deref()) {
-                recover::reject(
-                    &mut tx,
-                    namespace,
-                    &stored,
-                    observed_at,
-                    &format!("invalid pending Request: {error}"),
-                )
-                .await?;
-                continue;
-            }
-            candidates.push(Candidate {
-                request: parsed,
-                version,
-                trace,
-            });
-        }
-
-        let lease_time = now_millis();
-        let mut selection = Selection::new(self.max_response_bytes)?;
-        let mut claimed = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            let include_trace = selection.needs_trace(&candidate.request.trace_id);
-            let request = candidate.claimed(&body.worker_id, lease_time, include_trace);
-            let (capacity, request) = selection.include(request)?;
-            match capacity {
-                Capacity::Oversized => {
-                    recover::reject_state(
-                        &mut tx,
-                        namespace,
-                        &candidate.request,
-                        lease_time,
-                        &format!(
-                            "claimed Request exceeds the configured {} byte API response limit",
-                            self.max_response_bytes
-                        ),
-                    )
+                candidate
+                    .assign(&mut tx, namespace, &body.worker_id, observed_at)
                     .await?;
-                    continue;
+                claimed.push(request);
+                if claimed.len() == body.limit {
+                    break 'scan;
                 }
-                Capacity::Full => break,
-                Capacity::Accepted => {}
             }
-            let updated = sqlx::query(
-                "UPDATE requests SET state = 1, leased_by = ?, lease_time = ?, version = ?, \
-                 ack_version = NULL, updated_time = ? WHERE namespace = ? AND id = ? AND state = 0",
-            )
-            .bind(&body.worker_id)
-            .bind(lease_time)
-            .bind(candidate.version)
-            .bind(lease_time)
-            .bind(namespace)
-            .bind(&candidate.request.id)
-            .execute(&mut *tx)
-            .await?;
-            if updated.rows_affected() != 1 {
-                return Err(Error::Unavailable(format!(
-                    "claim lost Request state transition: {}",
-                    candidate.request.id
-                )));
-            }
-            claimed.push(request);
         }
+        begin_lease(
+            &mut tx,
+            namespace,
+            &body.worker_id,
+            observed_at,
+            &mut claimed,
+        )
+        .await?;
         let result = types::Claims { requests: claimed };
         operation::record(&mut tx, namespace, "claim", key, &digest, &result).await?;
         tx.commit().await?;
@@ -309,9 +345,80 @@ impl MySql {
     }
 }
 
+async fn scan(
+    tx: &mut Transaction<'_, SqlxMySql>,
+    query: &str,
+    namespace: &str,
+    observed_at: i64,
+    worker_id: &str,
+    modes: &[String],
+) -> Result<Vec<MySqlRow>, Error> {
+    let mut request = sqlx::query(AssertSqlSafe(query.to_string()))
+        .bind(namespace)
+        .bind(observed_at);
+    for mode in modes {
+        request = request.bind(mode);
+    }
+    Ok(request
+        .bind(worker_id)
+        .bind(SCAN_SIZE)
+        .fetch_all(&mut **tx)
+        .await?)
+}
+
+async fn begin_lease(
+    tx: &mut Transaction<'_, SqlxMySql>,
+    namespace: &str,
+    worker_id: &str,
+    observed_at: i64,
+    requests: &mut [types::Claimed],
+) -> Result<(), Error> {
+    let lease_time = now_millis();
+    for request in requests {
+        if lease_time != observed_at {
+            let updated = sqlx::query(
+                "UPDATE requests SET lease_time = ?, updated_time = ? \
+                 WHERE namespace = ? AND id = ? AND state = 1 AND version = ? AND leased_by = ?",
+            )
+            .bind(lease_time)
+            .bind(lease_time)
+            .bind(namespace)
+            .bind(&request.snapshot.id)
+            .bind(request.execution.version)
+            .bind(worker_id)
+            .execute(&mut **tx)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(Error::Unavailable(format!(
+                    "claim lost lease start transition: {}",
+                    request.snapshot.id
+                )));
+            }
+        }
+        request.execution.lease_time = lease_time;
+    }
+    Ok(())
+}
+
+fn validate_limit(value: usize) -> Result<(), Error> {
+    if value == 0 {
+        return Err(Error::Invalid(
+            "claim limit must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_limit_has_no_private_upper_bound() {
+        assert!(validate_limit(0).is_err());
+        validate_limit(1025).unwrap();
+        validate_limit(usize::MAX).unwrap();
+    }
 
     #[test]
     fn limit_uses_the_exact_response_size() {
@@ -346,6 +453,30 @@ mod tests {
         let mut full = Size::new(bytes).unwrap();
         assert_eq!(full.include(request_bytes).unwrap(), Capacity::Accepted);
         assert_eq!(full.include(request_bytes).unwrap(), Capacity::Full);
+    }
+
+    #[test]
+    fn lease_size_estimate_covers_the_final_timestamp() {
+        let request = spider::net::Request::follow("https://example.com/article")
+            .unwrap()
+            .node("detail");
+        let mut claimed = types::Claimed {
+            snapshot: spider::net::request::Snapshot::try_from(request).unwrap(),
+            execution: types::Execution {
+                version: 1,
+                next_time: 0,
+                leased_by: "worker-1".to_string(),
+                lease_time: i64::MAX,
+                retry_count: 0,
+                failed_workers: Vec::new(),
+            },
+            trace: None,
+        };
+        let estimated = serde_json::to_vec(&claimed).unwrap().len();
+
+        claimed.execution.lease_time = now_millis();
+
+        assert!(serde_json::to_vec(&claimed).unwrap().len() <= estimated);
     }
 
     #[test]

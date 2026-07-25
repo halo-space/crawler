@@ -349,6 +349,17 @@ modes. The per-mode recovery share prevents equal Redis timestamps in one backlo
 other mode. It promotes
 and inspects at most 128 delayed Requests for each requested mode. Additional due entries remain
 indexed for later claims rather than being dropped.
+Failed-Worker eligibility has a separate `pending_exclusions:<mode>` ZSET containing only pending
+Request/Worker pairs. Ready selection inspects at most 128 excluded members per invocation. Its local
+cursor stores, for each mode, the latest inspected ready-event revision and the last excluded ready
+member. Every ready-queue insertion, including requeue and delayed promotion, appends an event to the
+mode-scoped `ready_events:<mode>` ZSET. Before continuing after the saved member, claim inspects later
+events for that mode. A new ready member resets progress only when it sorts before the cursor and the
+current Worker is eligible for it; lower-priority events and writes to another mode do not reset the
+cursor. Removing the saved member restarts that mode from its head. If any requested mode still has an
+unresolved higher-priority prefix, the claim yields temporarily instead of selecting a lower-priority
+candidate from another mode. `has_pending_requests` compares the two queue sizes with the Worker's
+lexicographically indexed exclusions; it therefore remains exact without an unbounded Lua scan.
 When recovery, promotion, or ready-queue selection finds a missing record, it removes the dangling
 index entry. A stale processing projection backed by a valid Hash is repaired; malformed Request or
 queue state is quarantined by removing its active entries, recording a terminal failure and
@@ -360,8 +371,10 @@ the canonical digest before overlaying mutable execution fields. A mismatch foll
 recovery and is never returned as executable work. When that digest is valid, its immutable retry
 limit controls recovery and repairs a mismatched mutable Hash value. Recovery failure for one damaged
 record does not withhold valid Requests already claimed in the same atomic operation; the damaged
-record remains processing for normal lease-timeout recovery. The current internal key layout does not migrate
-older Redis namespaces.
+record remains processing for normal lease-timeout recovery. Every Request Snapshot requires
+`max_retry_count` in `1..=128`; the immutable Snapshot value controls recovery and bounds failed-Worker
+history, while the mutable Hash cannot expand it. The current internal key layout does not migrate older
+Redis namespaces.
 
 `push_items` serializes the full collection before mutation and appends one Redis Stream entry for
 each accepted non-empty Item Payload. The entry preserves the Payload identity, framework Item IDs, business
@@ -410,11 +423,15 @@ Rules, Trace Snapshots, Request Snapshots, Payloads, or Items.
 Master extracts and validates the applicable credential and namespace from request parts before any
 JSON or raw-body extractor runs. An unauthorized malformed or oversized body therefore returns the
 authentication error first and cannot consume the body-processing path.
+The Axum listener itself is plain HTTP. A production topology must terminate TLS at a trusted reverse
+proxy or load balancer before this listener; bearer credentials are not safe over an untrusted
+plaintext hop.
 
 An API-backed Worker has a finite external lifecycle. `Api::open()` fetches and verifies the Master
 lease policy and advertised response limit (64 MiB by default). `Api::with_max_response_bytes(...)`
-sets the Worker's receive capacity before opening; Master sets its request/response limit with the
-YAML `max_api_bytes` field or `master::Config::with_max_api_bytes(...)`. Opening rejects a
+sets the Worker's receive capacity before opening; Master sets its request/response limit with YAML
+`api.max_size` or `master::Config::with_api(...)`. The YAML accepts human-readable sizes such as
+`64MiB`; values must be between 1 KiB and 4 GiB minus one byte. Opening rejects a
 Master limit larger than that local capacity, so 64 MiB is a default, not a fixed topology-wide limit. The first
 claim or pending-work check registers the supplied `worker_id` and supported modes. Later calls only
 rewrite that record when modes change or its heartbeat is stale, and heartbeat maintenance stops when
@@ -430,7 +447,7 @@ the Engine's outer retry in the same task, because an ambiguous committed Item r
 duplicate output. Definite success or a deterministic error clears that key; an unresolved key expires
 exactly five minutes after its first creation rather than sliding on reuse, and the local store refuses
 new keys at its 4096-entry bound instead of evicting a live operation. Master requires
-`history_retention >= max(lease_timeout, 5m30s)`, preserving persistent operation and completion
+`history.ttl >= max(lease_timeout, 5m30s)`, preserving persistent operation and completion
 replay records beyond that client window. Without a current Tokio task identity, each Init/Item call
 uses a fresh key instead of entering this unresolved-operation store. If a successful `POST` response
 exceeds the client bound, the result remains `Unavailable` rather than becoming a deterministic
@@ -467,7 +484,10 @@ pending, so an old Request does not jump ahead of work accepted while it was exe
 bounded and ordered. A Request at `i64::MAX` execution version is quarantined as failed instead of
 remaining permanently unclaimable, and statistics rows are locked in stable name order.
 Claim validates stored Requests and their Trace ownership before taking the lease timestamp, caches
-Trace reads by `trace_id`, and measures the response incrementally. A response embeds a Trace at most
+Trace reads by `trace_id`, and measures the response incrementally. It reads at most 128 rows per
+storage query and quarantines at most 128 invalid candidates in one call; later calls resume cleanup,
+while valid candidates can continue across pages until the caller's limit or response capacity is
+reached. All accepted Requests then receive one common lease start. A response embeds a Trace at most
 once per `trace_id`; when `Request + Trace` does not fit but the Request alone does, it omits the Trace
 and lets the Worker retrieve and cache it through the Trace endpoint. Only a Request that cannot fit by
 itself is quarantined as oversized.

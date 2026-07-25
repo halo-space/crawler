@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use spider::{net, payload, scheduler, trace};
 use tokio::sync::Mutex;
 
 use super::error::{message, redis as redis_error, status};
 use super::key::Keys;
+use super::request::Cursor;
 use super::script::Scripts;
 
 /// A Redis 7 standalone Scheduler.
@@ -15,6 +18,7 @@ pub struct Redis {
     pub(super) keys: Keys,
     pub(super) lease: scheduler::Lease,
     pub(super) scripts: Scripts,
+    pub(super) claim_cursors: Mutex<HashMap<String, Cursor>>,
 }
 
 impl Redis {
@@ -29,6 +33,7 @@ impl Redis {
             keys: Keys::new("crawler")?,
             lease: scheduler::Lease::default(),
             scripts: Scripts::new(),
+            claim_cursors: Mutex::new(HashMap::new()),
         })
     }
 
@@ -115,6 +120,7 @@ impl scheduler::Scheduler for Redis {
 
     async fn close(&self) -> Result<(), scheduler::Error> {
         self.connection.lock().await.take();
+        self.claim_cursors.lock().await.clear();
         Ok(())
     }
 

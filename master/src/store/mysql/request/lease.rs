@@ -2,7 +2,7 @@ use super::super::MySql;
 use super::super::operation;
 use super::super::time::now_millis;
 use super::super::validate::{identity as validate_identity, namespace as validate_namespace};
-use super::{load, queue, verify_identity, verify_lease};
+use super::{load, queue, validate_processing, verify_lease, verify_ownership};
 use crate::{Error, types};
 
 impl MySql {
@@ -14,10 +14,11 @@ impl MySql {
         validate_namespace(namespace)?;
         validate_identity(identity)?;
         let mut tx = self.pool.begin().await?;
-        let row = load(&mut tx, namespace, &identity.id).await?;
-        verify_identity(&row, identity)?;
-        verify_lease(&row, self.lease_timeout_ms)?;
-        if row.ack_version == Some(identity.version) {
+        let request = load(&mut tx, namespace, &identity.id).await?;
+        verify_ownership(&request, identity)?;
+        validate_processing(&request)?;
+        verify_lease(&request, self.lease_timeout_ms)?;
+        if request.ack_version == Some(identity.version) {
             tx.commit().await?;
             return Ok(());
         }
@@ -53,9 +54,10 @@ impl MySql {
             tx.commit().await?;
             return Ok(());
         }
-        let row = load(&mut tx, namespace, &identity.id).await?;
-        verify_identity(&row, identity)?;
-        verify_lease(&row, self.lease_timeout_ms)?;
+        let request = load(&mut tx, namespace, &identity.id).await?;
+        verify_ownership(&request, identity)?;
+        validate_processing(&request)?;
+        verify_lease(&request, self.lease_timeout_ms)?;
         let sequence = queue::next(&mut tx, namespace).await?;
         let updated = sqlx::query(
             "UPDATE requests SET state = 0, leased_by = '', lease_time = 0, ack_version = NULL, \
@@ -88,10 +90,11 @@ impl MySql {
         validate_namespace(namespace)?;
         validate_identity(identity)?;
         let mut tx = self.pool.begin().await?;
-        let row = load(&mut tx, namespace, &identity.id).await?;
-        verify_identity(&row, identity)?;
-        verify_lease(&row, self.lease_timeout_ms)?;
-        if row.ack_version != Some(identity.version) {
+        let request = load(&mut tx, namespace, &identity.id).await?;
+        verify_ownership(&request, identity)?;
+        validate_processing(&request)?;
+        verify_lease(&request, self.lease_timeout_ms)?;
+        if request.ack_version != Some(identity.version) {
             return Err(Error::NotAcknowledged(identity.id.clone()));
         }
         let now = now_millis();

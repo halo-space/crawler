@@ -13,6 +13,24 @@ use super::validate;
 const HTTP: &str = "http";
 const BROWSER: &str = "browser";
 
+#[derive(Clone, Default, Eq, PartialEq)]
+struct Position {
+    revision: String,
+    member: String,
+}
+
+#[derive(Clone, Default, Eq, PartialEq)]
+pub(super) struct Cursor {
+    http: Position,
+    browser: Position,
+}
+
+impl Cursor {
+    fn has_member(&self) -> bool {
+        !self.http.member.is_empty() || !self.browser.member.is_empty()
+    }
+}
+
 fn mode(value: &net::Mode) -> &'static str {
     match value {
         net::Mode::Http => HTTP,
@@ -172,20 +190,62 @@ impl Redis {
         let modes = modes.iter().map(mode).collect::<Vec<_>>();
         let modes = Self::encode(&modes)?;
         let mut connection = self.connection().await?;
-        let encoded: Vec<String> = self
-            .scripts
-            .claim
-            .prepare_invoke()
-            .key(self.keys.meta())
-            .key(self.keys.traces())
-            .arg(self.keys.prefix())
-            .arg(limit)
-            .arg(worker_id)
-            .arg(self.lease.timeout().as_millis() as i64)
-            .arg(modes)
-            .invoke_async(&mut connection)
-            .await
-            .map_err(redis_error)?;
+        // These cursors bound excluded-Request scans without writing Worker-local state to Redis.
+        let mut cursors = self.claim_cursors.lock().await;
+        let mut position = cursors.get(worker_id).cloned().unwrap_or_default();
+        let encoded = loop {
+            let (
+                http_revision,
+                http_member,
+                browser_revision,
+                browser_member,
+                scan_complete,
+                encoded,
+            ): (String, String, String, String, i64, Vec<String>) = self
+                .scripts
+                .claim
+                .prepare_invoke()
+                .key(self.keys.meta())
+                .key(self.keys.traces())
+                .arg(self.keys.prefix())
+                .arg(limit)
+                .arg(worker_id)
+                .arg(self.lease.timeout().as_millis() as i64)
+                .arg(&modes)
+                .arg(&position.http.revision)
+                .arg(&position.http.member)
+                .arg(&position.browser.revision)
+                .arg(&position.browser.member)
+                .invoke_async(&mut connection)
+                .await
+                .map_err(redis_error)?;
+            let next = Cursor {
+                http: Position {
+                    revision: http_revision,
+                    member: http_member,
+                },
+                browser: Position {
+                    revision: browser_revision,
+                    member: browser_member,
+                },
+            };
+            if scan_complete != 0 || !encoded.is_empty() {
+                position = next;
+                break encoded;
+            }
+            if next == position {
+                return Err(scheduler::Error::Message(
+                    "Redis ready-event cursor did not advance".to_string(),
+                ));
+            }
+            position = next;
+        };
+        if position.has_member() {
+            cursors.insert(worker_id.to_string(), position);
+        } else {
+            cursors.remove(worker_id);
+        }
+        drop(cursors);
         drop(connection);
 
         let mut requests = Vec::with_capacity(encoded.len());
@@ -300,6 +360,7 @@ impl Redis {
             .pending
             .prepare_invoke()
             .arg(self.keys.prefix())
+            .arg(worker_id)
             .arg(modes)
             .invoke_async(&mut connection)
             .await
@@ -483,7 +544,7 @@ fn snapshot_retry_limit(claimed: &Claimed) -> Option<i32> {
         && snapshot.node == claimed.node
         && mode(&snapshot.mode) == claimed.mode
         && snapshot.priority == claimed.priority
-        && snapshot.max_retry_count > 0;
+        && (1..=net::request::MAX_RETRY_COUNT).contains(&snapshot.max_retry_count);
     matches.then_some(snapshot.max_retry_count)
 }
 

@@ -2,7 +2,7 @@ use sqlx::types::Json;
 
 use super::MySql;
 use super::operation;
-use super::request::{load, verify_identity, verify_lease};
+use super::request::{load, validate_processing, verify_lease, verify_ownership};
 use super::time::now_millis;
 use super::trace;
 use super::validate::{identifier, identity, namespace as validate_namespace};
@@ -38,7 +38,8 @@ impl MySql {
         if !body.context.id.is_empty() {
             identity(&body.context)?;
             let parent = load(&mut tx, namespace, &body.context.id).await?;
-            verify_identity(&parent, &body.context)?;
+            verify_ownership(&parent, &body.context)?;
+            validate_processing(&parent)?;
             verify_lease(&parent, self.lease_timeout_ms)?;
         }
         let trace = if body.context.trace_id.is_empty() {

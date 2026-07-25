@@ -126,7 +126,7 @@ redis.call('ZREM', processing, token)
 redis.call('ZREM', other_processing, token)
 redis.call('HSET', key,
     'state', 'done', 'leased_by', '', 'lease_time', '0', 'ack_version', '',
-    'queue_kind', '', 'queue_member', '', 'updated_time', now)
+    'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)
 redis.call('HSET', completion,
     'task_id', payload.task_id, 'trace_id', payload.trace_id, 'node', payload.node,
     'worker_id', payload.worker_id, 'state', payload.state, 'error', '')

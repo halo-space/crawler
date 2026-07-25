@@ -66,7 +66,7 @@ engine.start().await?;
 
 所有 Redis key 都按 namespace 隔离；正常 `close()` 只释放客户端资源，不会删除排队数据。Redis 保存
 Trace Snapshot、Request 状态、按 mode 分域的 processing 租约、结算、统计和 Item。每个
-`processing:<mode>` ZSET 是唯一的活动 Request 索引，score 使用 `lease_time`；Request Hash 仍是状态
+`processing:<mode>` ZSET 是唯一的活动执行权/租约投影，score 使用 `lease_time`；Request Hash 仍是状态
 事实来源。每个已接受的非空 Item `Payload` 都写成一条 Redis Stream entry，保持 at-least-once 语义，
 不做业务 Item 去重。
 
@@ -77,8 +77,16 @@ mode，最多提升并巡检 128 条延迟 Request。在回收、延迟提升、
 Request Hash 或队列记录本身非法时才会移出活动索引，写入完成记录并转为失败终态。这些记录都不会阻塞
 后续正常 Request。领取返回前，Worker 会重新计算不可变 Request Snapshot 的摘要；摘要不一致会进入同一
 恢复路径，不会执行该 Request。已通过摘要验证的 Snapshot 重试上限不能被可变 Hash 覆盖；单条恢复失败也
-不能扣留同批合法 Request。共享索引的 Redis 类型损坏则会在状态写入前明确使本次领取失败。当前 key
-布局不迁移旧 Redis namespace，部署时使用新的 namespace。
+不能扣留同批合法 Request。共享索引的 Redis 类型损坏则会在状态写入前明确使本次领取失败。Request
+Snapshot 的 `max_retry_count` 必须位于 `1..=128`；恢复以不可变 Snapshot 为准，可变 Hash 不能扩大该值。
+当前 key 布局不迁移旧 Redis namespace，部署时使用新的 namespace。
+
+失败 Worker 的领取资格投影到按 mode 分域的 `pending_exclusions` ZSET。单次领取最多检查 128 个排除成员，
+必要时会推进按 mode 保存的“最新已检查 ready-event revision + 最后一个排除的 ready member”游标并临时
+返回空集合。每次进入 ready 队列都会向 `ready_events:<mode>` 写入事件；恢复游标前只检查该 mode 的后续
+事件。仅当新的 ready Request 排在游标 member 之前且当前 Worker 可以领取时才重置扫描；低优先级或其他
+mode 的 ready 写入不会丢失已有进度。选择不会越过尚未确认的高优先级前缀或 mode。Pending 判断直接比较
+排队数量和当前 Worker 的排除索引，不会在一次 Redis Lua 调用中扫描完整积压。
 
 本版本只支持 Redis 7+ 单实例 primary，不支持 Redis Cluster。多 key Lua 状态转换依赖单实例原子性，
 Cluster 将作为独立 Scheduler 设计。需要可恢复持久化时，必须启用 AOF（`appendonly yes`）并配置
@@ -172,6 +180,19 @@ token、control token 和运行限制统一写入严格校验的 `master/etc/mas
 cargo run -p master -- --config master/etc/master-api.yaml
 ```
 
+Master 自身监听明文 HTTP。生产环境必须由可信反向代理或负载均衡器在流量到达该监听端口前终止 TLS；
+Bearer token 不能通过不可信网络明文传输。
+
+仓库中的模板将两项 token 留空，部署方填入两套不同凭据前 Master 会拒绝启动。容量和保留时间使用带单位的值：
+
+```yaml
+api:
+  max_size: "64MiB"
+history:
+  ttl: "48h"
+  cleanup_limit: 1000
+```
+
 控制面按职责分层：`master/src/handler/` 负责 Axum 提取器和路由 handler，
 `master/src/logic/` 负责资源业务操作，`master/src/svc.rs` 持有共享 service context，
 `master/src/types/` 统一 Worker/control DTO。Handler 不直接调用 MySQL；
@@ -179,7 +200,8 @@ cargo run -p master -- --config master/etc/master-api.yaml
 
 两端的 API 消息上限默认都是 64 MiB。Worker 在打开前通过
 `Api::with_max_response_bytes(...)` 设置接收容量；Master 通过
-YAML 的 `max_api_bytes` 字段或 `master::Config::with_max_api_bytes(...)` 设置请求/响应上限。
+YAML 的 `api.max_size` 或 `master::Config::with_api(...)` 设置请求/响应上限，允许范围为 1 KiB 到
+4 GiB 减一字节。
 启动时若 Master 上限大于 Worker 已配置的容量会被拒绝，因此 64 MiB 是默认值，不是全局固定上限。
 Worker 会在发起网络请求前，把每条出站 JSON 消息序列化到同一个有界容量中，并在传输重试时复用这份
 不可变 bytes。Master 在读取或解析请求体前先校验对应的 bearer 凭据与 namespace，因此未认证的非法或
@@ -200,10 +222,13 @@ Master 把 Task 保存为 Rules DSL 或序列化的代码 seeds，从不保存 R
 Worker 的租约，但不启动、停止或监督 Worker。Task 发布只做静态校验；Cron 直接将保存的 Rules 或
 代码 seed 实例化并入队，seed 派发期间不会执行任何 Worker 的 `before_scheduler`、Middleware 或 Dedup。
 确定性损坏的持久化 Task 会被隔离为 `failed`，并通过 control API 暴露错误；它不会阻塞后续到期 Task，
-重新发布修正后的定义即可再次进入调度。Claim 会先完成候选校验，再生成租约时间；一个响应对同一
+重新发布修正后的定义即可再次进入调度。Claim 按 128 行的存储页完成候选校验，再为接受结果统一生成
+租约时间；单次调用最多隔离 128 条非法候选后让出，后续领取继续清理。全部合法时可以持续跨页，直到达到
+请求数量或响应容量。
+一个响应对同一
 `trace_id` 最多内嵌一次 Trace Snapshot。Worker 会独立读取并缓存省略的 Trace，因此不能仅因 Request
 与 Trace 合并后超过响应上限，就把本可单独传输的 Request 判为坏数据。
-未决的本地 Init/Item operation key 从创建起固定保留五分钟；Master 要求 history retention 至少为
+未决的本地 Init/Item operation key 从创建起固定保留五分钟；Master 要求 `history.ttl` 至少为
 `max(lease timeout, 5m30s)`，保证持久化的 operation 与 completion 重放记录覆盖该窗口。配置中的保留期
 参数随后会驱动终态 Request、completion 和 operation 历史的有上限清理；Item、Trace、Task 和
 trace-stat 的保留仍是独立工作。远程 Worker 是有限生命周期的 Engine：首次使用立即注册，只在能力

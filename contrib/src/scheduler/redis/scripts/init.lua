@@ -51,6 +51,12 @@ for _, mode in ipairs({'http', 'browser'}) do
     if not has_type(prefix .. 'processing:' .. mode, 'zset') then
         return 'CORRUPT_PROCESSING'
     end
+    if not has_type(prefix .. 'pending_exclusions:' .. mode, 'zset') then
+        return 'CORRUPT_PENDING_EXCLUSIONS'
+    end
+    if not has_type(prefix .. 'ready_events:' .. mode, 'zset') then
+        return 'CORRUPT_READY_EVENTS'
+    end
 end
 
 if redis.call('HEXISTS', KEYS[2], trace_id) == 1 then
@@ -88,13 +94,17 @@ end
 
 local function enqueue(request, key, sequence_text)
     if pad(request.next_time, 19) <= pad(now, 19) then
-        local member = sequence_text .. '|' .. request.token
+        local member = sequence_text .. '|' .. sequence_text .. '|' .. request.token
+        local event = sequence_text .. '|' .. member
         redis.call('ZADD', prefix .. 'queue:' .. request.mode .. ':ready', -tonumber(request.priority), member)
-        redis.call('HSET', key, 'queue_kind', 'ready', 'queue_member', member)
+        redis.call('ZADD', prefix .. 'ready_events:' .. request.mode, 0, event)
+        redis.call('HSET', key,
+            'queue_kind', 'ready', 'queue_member', member, 'ready_event', event)
     else
         local member = pad(request.next_time, 19) .. '|' .. sequence_text .. '|' .. request.token
         redis.call('ZADD', prefix .. 'queue:' .. request.mode .. ':delayed', 0, member)
-        redis.call('HSET', key, 'queue_kind', 'delayed', 'queue_member', member)
+        redis.call('HSET', key,
+            'queue_kind', 'delayed', 'queue_member', member, 'ready_event', '')
     end
 end
 

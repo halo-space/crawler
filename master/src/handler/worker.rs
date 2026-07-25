@@ -23,7 +23,7 @@ async fn list(
     let query = super::extract::query(query)?;
     super::response::bounded(
         logic::worker::list(&app, &query).await?,
-        app.config.max_api_bytes(),
+        app.config.api().max_size,
     )
 }
 

@@ -365,7 +365,7 @@ async fn wrong_type_settlement_indices_do_not_partially_settle() {
         .unwrap();
     scheduler.failure(&failure).await.unwrap();
     let retried = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
+        .next_requests(1, worker::B, worker::HTTP)
         .await
         .unwrap()
         .pop()

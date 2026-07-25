@@ -1,5 +1,7 @@
 #[tokio::main]
 async fn main() -> Result<(), master::Error> {
+    tracing_subscriber::fmt::init();
+
     let mut args = std::env::args_os().skip(1);
     let path = match args.next().as_deref() {
         Some(value) if value.to_str() == Some("--config") => args

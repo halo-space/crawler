@@ -34,7 +34,7 @@ async fn list(
     let query = super::extract::query(query)?;
     super::response::bounded(
         logic::trace::list(&app, &query).await?,
-        app.config.max_api_bytes(),
+        app.config.api().max_size,
     )
 }
 
@@ -47,5 +47,5 @@ async fn detail(
     let trace = logic::trace::detail(&app, &id)
         .await?
         .ok_or_else(|| Error::TraceNotFound(id))?;
-    super::response::bounded(trace, app.config.max_api_bytes())
+    super::response::bounded(trace, app.config.api().max_size)
 }
