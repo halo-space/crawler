@@ -1,5 +1,5 @@
 use crate::Error;
-use crate::wire;
+use crate::types;
 
 const MAX_IDENTIFIER_BYTES: usize = 191;
 
@@ -26,7 +26,7 @@ pub(super) fn worker_id(value: &str) -> Result<(), Error> {
     identifier(value, "worker_id")
 }
 
-pub(super) fn identity(value: &wire::Identity) -> Result<(), Error> {
+pub(super) fn identity(value: &types::Identity) -> Result<(), Error> {
     if value.version <= 0 {
         return Err(Error::Invalid(
             "request identity requires a positive version".to_string(),

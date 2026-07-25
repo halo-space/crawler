@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use sqlx::Row;
 
 use super::{Database, Result, clear, init_body, require, snapshot};
-use crate::wire;
+use crate::types;
 
 #[tokio::test]
 async fn control_queries_have_keyset_indexes() -> Result<()> {
@@ -189,7 +189,7 @@ async fn exercise_long_error(database: &Database) -> Result<()> {
         .claim(
             &database.namespace,
             "error-claim",
-            &wire::Claim {
+            &types::Claim {
                 limit: 1,
                 worker_id: "error-worker".to_string(),
                 modes: vec![spider::net::Mode::Http],
@@ -199,7 +199,7 @@ async fn exercise_long_error(database: &Database) -> Result<()> {
         .requests
         .pop()
         .ok_or_else(|| std::io::Error::other("long error fixture did not claim a Request"))?;
-    let identity = wire::Identity {
+    let identity = types::Identity {
         id: claimed.snapshot.id,
         task_id: claimed.snapshot.task_id,
         trace_id: claimed.snapshot.trace_id,
@@ -213,7 +213,7 @@ async fn exercise_long_error(database: &Database) -> Result<()> {
         .store
         .failure(
             &database.namespace,
-            &wire::Completion {
+            &types::Completion {
                 identity: identity.clone(),
                 stats: Default::default(),
                 start_time: 1,

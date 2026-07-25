@@ -2,7 +2,7 @@ use sqlx::Row;
 
 use super::super::time::now_millis;
 use super::{Database, Result, claim, init, require};
-use crate::wire;
+use crate::types;
 
 #[tokio::test]
 async fn claim_starts_the_lease_after_recovery_waits() -> Result<()> {
@@ -48,7 +48,7 @@ async fn exercise(database: &Database) -> Result<()> {
             .claim(
                 &namespace,
                 "waiting-claim",
-                &wire::Claim {
+                &types::Claim {
                     limit: 2,
                     worker_id: "ready-worker".to_string(),
                     modes: vec![spider::net::Mode::Http],

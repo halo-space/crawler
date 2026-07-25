@@ -5,7 +5,7 @@ use super::MySql;
 use super::request::mode_name;
 use super::time::now_millis;
 use super::validate::{namespace as validate_namespace, worker_id};
-use crate::{Error, wire};
+use crate::{Error, types};
 
 pub(super) fn canonical_modes(values: &[spider::net::Mode]) -> Result<Vec<String>, Error> {
     if values.is_empty() {
@@ -24,7 +24,7 @@ impl MySql {
     pub(crate) async fn pending(
         &self,
         namespace: &str,
-        body: &wire::Worker,
+        body: &types::Worker,
     ) -> Result<bool, Error> {
         validate_namespace(namespace)?;
         worker_id(&body.worker_id)?;
@@ -56,7 +56,7 @@ impl MySql {
     pub(crate) async fn heartbeat(
         &self,
         namespace: &str,
-        body: &wire::Heartbeat,
+        body: &types::Heartbeat,
     ) -> Result<(), Error> {
         validate_namespace(namespace)?;
         worker_id(&body.worker_id)?;

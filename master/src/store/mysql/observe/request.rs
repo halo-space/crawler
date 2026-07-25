@@ -6,7 +6,7 @@ use sqlx::{MySql as SqlxMySql, QueryBuilder, Row};
 use super::super::MySql;
 use super::super::validate::{identifier, namespace as validate_namespace, worker_id};
 use crate::Error;
-use crate::control::{Page, cursor, request};
+use crate::types::{Page, cursor, request};
 
 const ENDPOINT: &str = "requests";
 const LIST: &str = "SELECT r.id, r.task_id, r.trace_id, r.node, r.mode, r.state, r.version, \
@@ -130,8 +130,8 @@ fn summary(row: &MySqlRow) -> Result<request::Summary, Error> {
     })
 }
 
-fn completion(row: MySqlRow) -> Result<request::Completion, Error> {
-    Ok(request::Completion {
+fn completion(row: MySqlRow) -> Result<request::CompletionInfo, Error> {
+    Ok(request::CompletionInfo {
         version: row.try_get("version")?,
         worker_id: row.try_get("worker_id")?,
         state: request::state(row.try_get("state")?)?,

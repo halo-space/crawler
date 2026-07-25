@@ -53,10 +53,76 @@ pub(crate) struct Detail {
     pub summary: Summary,
     pub params: HashMap<String, Value>,
     pub dsl: Option<spider::config::Config>,
-    pub seeds: Vec<crate::store::CodeSeed>,
+    pub seeds: Vec<CodeSeed>,
     pub persister_id: Option<String>,
     pub attachment: Option<Value>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodeSeed {
+    pub node: String,
+    pub url: String,
+    #[serde(default)]
+    pub method: spider::net::Method,
+    #[serde(default)]
+    pub headers: spider::net::Headers,
+    #[serde(default)]
+    pub body: spider::net::Body,
+    #[serde(default)]
+    pub cookies: spider::net::Cookies,
+    #[serde(default)]
+    pub vals: HashMap<String, Value>,
+    #[serde(default)]
+    pub kwargs: HashMap<String, Value>,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub dont_filter: bool,
+    #[serde(default)]
+    pub mode: spider::net::Mode,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub max_body_bytes: Option<u64>,
+    #[serde(default)]
+    pub proxy: Option<spider::net::ProxyConfig>,
+    #[serde(default)]
+    pub tls: Option<spider::net::TlsConfig>,
+    #[serde(default)]
+    pub middlewares: Vec<spider::middleware::Spec>,
+    #[serde(default = "default_retry_count")]
+    pub max_retry_count: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Task {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub periodic: bool,
+    #[serde(default)]
+    pub interval_ms: i64,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub params: HashMap<String, Value>,
+    #[serde(default)]
+    pub dsl: Option<spider::config::Config>,
+    #[serde(default)]
+    pub seeds: Vec<CodeSeed>,
+    #[serde(default)]
+    pub persister_id: Option<String>,
+    #[serde(default)]
+    pub attachment: Option<Value>,
+    #[serde(default)]
+    pub next_time: i64,
+}
+
+fn default_retry_count() -> i32 {
+    1
 }
 
 #[derive(Debug, Deserialize)]

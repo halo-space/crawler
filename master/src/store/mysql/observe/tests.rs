@@ -1,8 +1,8 @@
 use std::error::Error as StdError;
 
 use super::super::MySql;
-use crate::control::{item, request, task, trace, worker};
-use crate::{Config, wire};
+use crate::types::{item, request, task, trace, worker};
+use crate::{Config, types};
 use serde_json::json;
 
 type Result<T> = std::result::Result<T, Box<dyn StdError>>;
@@ -118,7 +118,7 @@ async fn exercise(store: &MySql, namespace: &str) -> Result<()> {
         .init(
             namespace,
             "observe-init",
-            &wire::Init {
+            &types::Init {
                 trace_id: trace_id.to_string(),
                 trace: trace_snapshot,
                 requests: vec![snapshot],
@@ -220,7 +220,7 @@ async fn exercise(store: &MySql, namespace: &str) -> Result<()> {
     store
         .heartbeat(
             namespace,
-            &wire::Heartbeat {
+            &types::Heartbeat {
                 worker_id: "worker-online".to_string(),
                 modes: vec![spider::net::Mode::Http],
             },

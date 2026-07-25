@@ -7,7 +7,7 @@ use super::{
     Database, Result, claim, completion, identity, init, init_body, require, require_one_conflict,
     snapshot,
 };
-use crate::wire;
+use crate::types;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -99,7 +99,7 @@ async fn concurrent_items_are_written_once() -> Result<()> {
 
 async fn exercise_items(database: &Database) -> Result<()> {
     init(database, "items-init", "items-task", "items-trace", &[], 1).await?;
-    let context = wire::Identity {
+    let context = types::Identity {
         id: String::new(),
         task_id: "items-task".to_string(),
         trace_id: "items-trace".to_string(),
@@ -107,9 +107,9 @@ async fn exercise_items(database: &Database) -> Result<()> {
         worker_id: String::new(),
         node: String::new(),
     };
-    let body = wire::Items {
+    let body = types::Items {
         context: context.clone(),
-        items: vec![wire::Item {
+        items: vec![types::item::Item {
             id: "item-once".to_string(),
             data: json!({"title": "same"}),
         }],
@@ -132,16 +132,16 @@ async fn exercise_items(database: &Database) -> Result<()> {
         "concurrent item replay wrote the Item twice",
     )?;
 
-    let left_body = wire::Items {
+    let left_body = types::Items {
         context: context.clone(),
-        items: vec![wire::Item {
+        items: vec![types::item::Item {
             id: "item-left".to_string(),
             data: json!({"title": "left"}),
         }],
     };
-    let right_body = wire::Items {
+    let right_body = types::Items {
         context,
-        items: vec![wire::Item {
+        items: vec![types::item::Item {
             id: "item-right".to_string(),
             data: json!({"title": "right"}),
         }],
@@ -183,7 +183,7 @@ async fn exercise_claim(database: &Database) -> Result<()> {
         1,
     )
     .await?;
-    let body = wire::Claim {
+    let body = types::Claim {
         limit: 1,
         worker_id: "claim-worker".to_string(),
         modes: vec![spider::net::Mode::Http],
@@ -213,12 +213,12 @@ async fn exercise_claim(database: &Database) -> Result<()> {
         "claim replay leased more than one Request",
     )?;
 
-    let left_body = wire::Claim {
+    let left_body = types::Claim {
         limit: 1,
         worker_id: "claim-left".to_string(),
         modes: vec![spider::net::Mode::Http],
     };
-    let right_body = wire::Claim {
+    let right_body = types::Claim {
         limit: 1,
         worker_id: "claim-right".to_string(),
         modes: vec![spider::net::Mode::Http],

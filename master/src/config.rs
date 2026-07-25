@@ -6,6 +6,8 @@ use axum::http::HeaderValue;
 
 use crate::Error;
 
+mod file;
+
 const DEFAULT_MAX_API_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_CRON_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_DISPATCH_LIMIT: usize = 64;
@@ -14,6 +16,30 @@ const DEFAULT_HISTORY_RETENTION: Duration = Duration::from_secs(2 * 24 * 60 * 60
 const DEFAULT_CLEANUP_LIMIT: usize = 1_000;
 const MIN_OPERATION_RETENTION: Duration = Duration::from_secs(5 * 60 + 30);
 const MAX_API_BYTES: usize = u32::MAX as usize;
+
+const fn default_max_api_bytes() -> usize {
+    DEFAULT_MAX_API_BYTES
+}
+
+const fn default_cron_interval_ms() -> u64 {
+    DEFAULT_CRON_INTERVAL.as_millis() as u64
+}
+
+const fn default_dispatch_limit() -> usize {
+    DEFAULT_DISPATCH_LIMIT
+}
+
+const fn default_recovery_limit() -> usize {
+    DEFAULT_RECOVERY_LIMIT
+}
+
+const fn default_history_retention_ms() -> u64 {
+    DEFAULT_HISTORY_RETENTION.as_millis() as u64
+}
+
+const fn default_cleanup_limit() -> usize {
+    DEFAULT_CLEANUP_LIMIT
+}
 
 #[derive(Clone, Debug)]
 pub struct Policy {
@@ -93,6 +119,10 @@ impl fmt::Debug for Config {
 }
 
 impl Config {
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        file::File::read(path)
+    }
+
     pub fn new(
         bind: SocketAddr,
         database_url: impl Into<String>,
@@ -114,49 +144,6 @@ impl Config {
             history_retention: DEFAULT_HISTORY_RETENTION,
             cleanup_limit: DEFAULT_CLEANUP_LIMIT,
         };
-        config.validate()?;
-        Ok(config)
-    }
-
-    pub fn from_env() -> Result<Self, Error> {
-        let bind = std::env::var("CRAWLER_MASTER_BIND")
-            .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
-            .parse()
-            .map_err(|error| Error::Config(format!("invalid CRAWLER_MASTER_BIND: {error}")))?;
-        let database_url = std::env::var("CRAWLER_MASTER_DATABASE_URL")
-            .map_err(|_| Error::Config("CRAWLER_MASTER_DATABASE_URL is required".to_string()))?;
-        let namespace = std::env::var("CRAWLER_MASTER_NAMESPACE")
-            .map_err(|_| Error::Config("CRAWLER_MASTER_NAMESPACE is required".to_string()))?;
-        let worker_token = std::env::var("CRAWLER_MASTER_WORKER_TOKEN")
-            .map_err(|_| Error::Config("CRAWLER_MASTER_WORKER_TOKEN is required".to_string()))?;
-        let control_token = std::env::var("CRAWLER_MASTER_CONTROL_TOKEN")
-            .map_err(|_| Error::Config("CRAWLER_MASTER_CONTROL_TOKEN is required".to_string()))?;
-
-        let mut config = Self::new(bind, database_url, namespace, worker_token, control_token)?;
-        config.policy.lease_timeout_ms = env_i64(
-            "CRAWLER_MASTER_LEASE_TIMEOUT_MS",
-            config.policy.lease_timeout_ms,
-        )?;
-        config.policy.lease_interval_ms = env_i64(
-            "CRAWLER_MASTER_LEASE_INTERVAL_MS",
-            config.policy.lease_interval_ms,
-        )?;
-        config.policy.heartbeat_interval_ms = env_i64(
-            "CRAWLER_MASTER_HEARTBEAT_INTERVAL_MS",
-            config.policy.heartbeat_interval_ms,
-        )?;
-        config.max_api_bytes = env_usize("CRAWLER_MASTER_MAX_API_BYTES", config.max_api_bytes)?;
-        config.cron_interval = Duration::from_millis(env_u64(
-            "CRAWLER_MASTER_CRON_INTERVAL_MS",
-            config.cron_interval.as_millis() as u64,
-        )?);
-        config.dispatch_limit = env_usize("CRAWLER_MASTER_DISPATCH_LIMIT", config.dispatch_limit)?;
-        config.recovery_limit = env_usize("CRAWLER_MASTER_RECOVERY_LIMIT", config.recovery_limit)?;
-        config.history_retention = Duration::from_millis(env_u64(
-            "CRAWLER_MASTER_HISTORY_RETENTION_MS",
-            config.history_retention.as_millis() as u64,
-        )?);
-        config.cleanup_limit = env_usize("CRAWLER_MASTER_CLEANUP_LIMIT", config.cleanup_limit)?;
         config.validate()?;
         Ok(config)
     }
@@ -327,36 +314,6 @@ fn validate_token(token: &str, name: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn env_i64(name: &str, fallback: i64) -> Result<i64, Error> {
-    match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|error| Error::Config(format!("invalid {name}: {error}"))),
-        Err(std::env::VarError::NotPresent) => Ok(fallback),
-        Err(error) => Err(Error::Config(format!("cannot read {name}: {error}"))),
-    }
-}
-
-fn env_u64(name: &str, fallback: u64) -> Result<u64, Error> {
-    match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|error| Error::Config(format!("invalid {name}: {error}"))),
-        Err(std::env::VarError::NotPresent) => Ok(fallback),
-        Err(error) => Err(Error::Config(format!("cannot read {name}: {error}"))),
-    }
-}
-
-fn env_usize(name: &str, fallback: usize) -> Result<usize, Error> {
-    match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .map_err(|error| Error::Config(format!("invalid {name}: {error}"))),
-        Err(std::env::VarError::NotPresent) => Ok(fallback),
-        Err(error) => Err(Error::Config(format!("cannot read {name}: {error}"))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +465,18 @@ mod tests {
         assert!(!debug.contains("mysql://crawler"));
         assert!(debug.contains("has_worker_token: true"));
         assert!(debug.contains("has_control_token: true"));
+    }
+
+    #[test]
+    fn file_configuration_loads_the_checked_in_runtime_shape() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("etc/master-api.yaml");
+        let config = Config::from_file(path).unwrap();
+
+        assert_eq!(config.bind(), "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.namespace(), "crawler");
+        assert_eq!(config.max_api_bytes(), DEFAULT_MAX_API_BYTES);
+        assert_eq!(config.dispatch_limit(), DEFAULT_DISPATCH_LIMIT);
+        assert_eq!(config.recovery_limit(), DEFAULT_RECOVERY_LIMIT);
+        config.validate().unwrap();
     }
 }

@@ -11,7 +11,7 @@ use super::operation;
 use super::time::now_millis;
 use super::trace;
 use super::validate::{identifier, namespace as validate_namespace};
-use crate::{Error, wire};
+use crate::{Error, types};
 
 mod claim;
 mod lease;
@@ -67,7 +67,7 @@ struct Stored {
 }
 
 impl MySql {
-    pub(crate) async fn push(&self, namespace: &str, body: &wire::Push) -> Result<(), Error> {
+    pub(crate) async fn push(&self, namespace: &str, body: &types::Push) -> Result<(), Error> {
         validate_namespace(namespace)?;
         let mut tx = self.pool.begin().await?;
         if !body.context.id.is_empty() {
@@ -292,7 +292,7 @@ pub(super) fn validate_new_snapshot(
     Ok(())
 }
 
-pub(super) fn verify_identity(request: &State, identity: &wire::Identity) -> Result<(), Error> {
+pub(super) fn verify_identity(request: &State, identity: &types::Identity) -> Result<(), Error> {
     if request.id != identity.id {
         return Err(Error::RequestNotFound(identity.id.clone()));
     }

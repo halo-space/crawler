@@ -4,7 +4,7 @@ use std::error::Error as StdError;
 use serde_json::Value;
 
 use super::MySql;
-use crate::{Config, Error, wire};
+use crate::{Config, Error, types};
 
 mod claim;
 mod idempotency;
@@ -96,8 +96,8 @@ fn init_body(
     task_id: &str,
     trace_id: &str,
     requests: Vec<spider::net::request::Snapshot>,
-) -> wire::Init {
-    wire::Init {
+) -> types::Init {
+    types::Init {
         trace_id: trace_id.to_string(),
         trace: spider::trace::Snapshot::code(task_id),
         requests,
@@ -132,13 +132,13 @@ async fn claim(
     key: &str,
     worker_id: &str,
     limit: usize,
-) -> Result<Vec<wire::Claimed>> {
+) -> Result<Vec<types::Claimed>> {
     Ok(database
         .store
         .claim(
             &database.namespace,
             key,
-            &wire::Claim {
+            &types::Claim {
                 limit,
                 worker_id: worker_id.to_string(),
                 modes: vec![spider::net::Mode::Http],
@@ -148,8 +148,8 @@ async fn claim(
         .requests)
 }
 
-fn identity(request: &wire::Claimed, worker_id: &str) -> wire::Identity {
-    wire::Identity {
+fn identity(request: &types::Claimed, worker_id: &str) -> types::Identity {
+    types::Identity {
         id: request.snapshot.id.clone(),
         task_id: request.snapshot.task_id.clone(),
         trace_id: request.snapshot.trace_id.clone(),
@@ -160,11 +160,11 @@ fn identity(request: &wire::Claimed, worker_id: &str) -> wire::Identity {
 }
 
 fn completion(
-    identity: wire::Identity,
+    identity: types::Identity,
     stats: HashMap<String, Value>,
     error: Option<&str>,
-) -> wire::Completion {
-    wire::Completion {
+) -> types::Completion {
+    types::Completion {
         identity,
         stats,
         start_time: 1,

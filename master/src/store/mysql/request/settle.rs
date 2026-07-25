@@ -7,13 +7,13 @@ use super::super::time::now_millis;
 use super::super::trace;
 use super::super::validate::{identity as validate_identity, namespace as validate_namespace};
 use super::{DONE, FAILED, PENDING, State, load, queue, verify_identity, verify_lease};
-use crate::{Error, wire};
+use crate::{Error, types};
 
 impl MySql {
     pub(crate) async fn success(
         &self,
         namespace: &str,
-        body: &wire::Completion,
+        body: &types::Completion,
     ) -> Result<(), Error> {
         if body.error.is_some() {
             return Err(Error::Invalid(
@@ -26,7 +26,7 @@ impl MySql {
     pub(crate) async fn failure(
         &self,
         namespace: &str,
-        body: &wire::Completion,
+        body: &types::Completion,
     ) -> Result<(), Error> {
         validate_error(body.error.as_deref(), self.max_response_bytes)?;
         self.settle(namespace, body, false).await
@@ -35,7 +35,7 @@ impl MySql {
     async fn settle(
         &self,
         namespace: &str,
-        body: &wire::Completion,
+        body: &types::Completion,
         success: bool,
     ) -> Result<(), Error> {
         validate_namespace(namespace)?;
@@ -181,7 +181,7 @@ pub(super) fn append_worker(workers: &mut Vec<String>, worker: &str) {
 async fn completion_replay(
     tx: &mut Transaction<'_, SqlxMySql>,
     namespace: &str,
-    body: &wire::Completion,
+    body: &types::Completion,
     payload_digest: &str,
     success: bool,
 ) -> Result<bool, Error> {
@@ -236,7 +236,7 @@ async fn completion_replay(
 pub(super) async fn insert_completion(
     tx: &mut Transaction<'_, SqlxMySql>,
     namespace: &str,
-    body: &wire::Completion,
+    body: &types::Completion,
     payload_digest: &str,
     success: bool,
 ) -> Result<(), Error> {

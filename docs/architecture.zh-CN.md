@@ -385,7 +385,7 @@ Master 会在任何 JSON 或原始 body extractor 运行前，从 request parts 
 
 API Worker 是有限生命周期的外部进程。`Api::open()` 会读取并校验 Master 的租约策略与公布的响应
 上限（默认 64 MiB）。`Api::with_max_response_bytes(...)` 在打开前设置 Worker 的接收容量；Master 通过
-`master::Config::with_max_api_bytes(...)` 或 `CRAWLER_MASTER_MAX_API_BYTES` 设置请求/响应上限。若 Master 上限
+YAML 的 `max_api_bytes` 字段或 `master::Config::with_max_api_bytes(...)` 设置请求/响应上限。若 Master 上限
 大于本地容量，打开会被拒绝，因此 64 MiB 是默认值，不是整套拓扑的固定上限。第一次领取或待处理判断会
 登记传入的 `worker_id` 和支持的 mode；后续只在 mode 改变或心跳已过期时重写记录，Scheduler 关闭后
 停止心跳维护。client 的连接、读取、单次
@@ -850,11 +850,14 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `contrib/src/scheduler/api/request/{claim,init,trace}.rs` | 将领取、运行初始化与不可变 Trace 读取映射到 Worker API |
 | `master/src/server.rs` | 管理 Axum 服务生命周期，并随服务启动/停止 Cron |
 | `master/src/server/cron.rs` | 协调有界 Cron 恢复、派发与清理 store 操作 |
-| `master/src/{routes,config,error,wire}.rs` | 路由组合、配置、错误 envelope 和私有 wire 合同 |
-| `master/src/routes/{worker,access,extract,response}.rs` 与 `master/src/routes/control/*.rs` | Worker/control 路由、body 提取前认证、有界输入和响应处理 |
-| `master/src/store/mysql/task.rs` | Task 与代码 seed 合同、静态校验和 Request 实例化 |
+| `master/etc/master-api.yaml` | 独立 Master 的严格运行时配置模板 |
+| `master/src/config.rs` 与 `master/src/config/file.rs` | 程序化配置、校验和严格 YAML 运行时加载 |
+| `master/src/svc.rs` | 共享 service Context，持有已校验 Config 与私有 MySQL 依赖 |
+| `master/src/types.rs` 与 `master/src/types/*.rs` | 统一 Worker/control DTO、Task seed、分页、过滤器和 cursor 合同 |
+| `master/src/handler.rs` 与 `master/src/handler/*.rs` | Axum 路由组合、提取/认证、HTTP 响应处理和资源 handler |
+| `master/src/logic.rs` 与 `master/src/logic/*.rs` | 位于 HTTP handler 与私有 store 之间的资源业务操作 |
+| `master/src/store/mysql/task.rs` | 对 `master/src/types/task.rs` 定义的 Task/code seed 执行静态校验和 Request 实例化 |
 | `master/src/store/mysql/task/{write,dispatch}.rs` | Task 持久化、有界 Cron seed 派发和确定性坏 Task 隔离 |
-| `master/src/routes/control.rs` 与 `master/src/control/*.rs` | control 路由、严格 query/response 数据、分页和 cursor 绑定 |
 | `master/src/store/mysql/request/{claim,lease,queue,recover,settle}.rs` | Request 领取、执行权转换、FIFO 分配、有界恢复和结算 |
 | `master/src/store/mysql/observe.rs` 与 `master/src/store/mysql/observe/{task,trace,request,worker,item}.rs` | Task、Trace、Request、Worker 和 Item 的只读投影 |
 | `master/src/store/mysql/{task,request,trace,item,worker,operation,validate,time}.rs` | 私有 MySQL 数据域入口、幂等、校验和时间辅助 |

@@ -165,20 +165,21 @@ let mut engine = engine::Engine::new()
 engine.start().await?;
 ```
 
-`master` 是一个独立的 Axum 服务，使用私有 MySQL 8.0.19+ 存储。启动时必须明确提供数据库 URL、
-namespace、Worker token 和 control token，例如：
+`master` 是一个独立的 Axum 服务，使用私有 MySQL 8.0.19+ 存储。数据库 URL、namespace、Worker
+token、control token 和运行限制统一写入严格校验的 `master/etc/master-api.yaml`，启动时显式传入该文件：
 
 ```bash
-CRAWLER_MASTER_DATABASE_URL='mysql://...'
-CRAWLER_MASTER_NAMESPACE='crawler'
-CRAWLER_MASTER_WORKER_TOKEN='...'
-CRAWLER_MASTER_CONTROL_TOKEN='...'
-cargo run -p master
+cargo run -p master -- --config master/etc/master-api.yaml
 ```
+
+控制面按职责分层：`master/src/handler/` 负责 Axum 提取器和路由 handler，
+`master/src/logic/` 负责资源业务操作，`master/src/svc.rs` 持有共享 service context，
+`master/src/types/` 统一 Worker/control DTO。Handler 不直接调用 MySQL；
+`master/src/config/` 负责加载并校验运行时 YAML，`master/src/store/mysql/` 保持为控制面的私有持久化实现。
 
 两端的 API 消息上限默认都是 64 MiB。Worker 在打开前通过
 `Api::with_max_response_bytes(...)` 设置接收容量；Master 通过
-`master::Config::with_max_api_bytes(...)` 或 `CRAWLER_MASTER_MAX_API_BYTES` 设置请求/响应上限。
+YAML 的 `max_api_bytes` 字段或 `master::Config::with_max_api_bytes(...)` 设置请求/响应上限。
 启动时若 Master 上限大于 Worker 已配置的容量会被拒绝，因此 64 MiB 是默认值，不是全局固定上限。
 Worker 会在发起网络请求前，把每条出站 JSON 消息序列化到同一个有界容量中，并在传输重试时复用这份
 不可变 bytes。Master 在读取或解析请求体前先校验对应的 bearer 凭据与 namespace，因此未认证的非法或

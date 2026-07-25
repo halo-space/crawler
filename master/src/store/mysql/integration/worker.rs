@@ -1,7 +1,7 @@
 use sqlx::Row as _;
 
 use super::{Database, Result, require};
-use crate::wire;
+use crate::types;
 
 #[tokio::test]
 async fn repeated_polling_does_not_rewrite_a_fresh_worker() -> Result<()> {
@@ -13,7 +13,7 @@ async fn repeated_polling_does_not_rewrite_a_fresh_worker() -> Result<()> {
 }
 
 async fn exercise(database: &Database) -> Result<()> {
-    let worker = wire::Worker {
+    let worker = types::Worker {
         worker_id: "worker-1".to_string(),
         modes: vec![spider::net::Mode::Http],
     };

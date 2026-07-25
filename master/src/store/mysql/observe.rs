@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::Error;
-use crate::control::{Page, cursor};
+use crate::types::{Page, cursor};
 
 mod item;
 mod request;

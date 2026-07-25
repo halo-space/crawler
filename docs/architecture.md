@@ -413,8 +413,8 @@ authentication error first and cannot consume the body-processing path.
 
 An API-backed Worker has a finite external lifecycle. `Api::open()` fetches and verifies the Master
 lease policy and advertised response limit (64 MiB by default). `Api::with_max_response_bytes(...)`
-sets the Worker's receive capacity before opening; Master sets its request/response limit with
-`master::Config::with_max_api_bytes(...)` or `CRAWLER_MASTER_MAX_API_BYTES`. Opening rejects a
+sets the Worker's receive capacity before opening; Master sets its request/response limit with the
+YAML `max_api_bytes` field or `master::Config::with_max_api_bytes(...)`. Opening rejects a
 Master limit larger than that local capacity, so 64 MiB is a default, not a fixed topology-wide limit. The first
 claim or pending-work check registers the supplied `worker_id` and supported modes. Later calls only
 rewrite that record when modes change or its heartbeat is stale, and heartbeat maintenance stops when
@@ -919,11 +919,14 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `contrib/src/scheduler/api/request/{claim,init,trace}.rs` | Map claims, run initialization, and immutable Trace reads to the Worker API |
 | `master/src/server.rs` | Own the Axum server lifecycle and start/stop Cron with the service |
 | `master/src/server/cron.rs` | Coordinate bounded Cron recovery, dispatch, and cleanup store operations |
-| `master/src/{routes,config,error,wire}.rs` | Route composition, configuration, error envelope, and private wire contracts |
-| `master/src/routes/{worker,access,extract,response}.rs` and `master/src/routes/control/*.rs` | Worker/control routes, authentication-before-body extraction, bounded input, and response handling |
-| `master/src/store/mysql/task.rs` | Task and code-seed contracts, static validation, and Request materialization |
+| `master/etc/master-api.yaml` | Strict standalone Master runtime configuration template |
+| `master/src/config.rs` and `master/src/config/file.rs` | Programmatic configuration, validation, and strict YAML runtime loading |
+| `master/src/svc.rs` | Shared service Context containing validated Config and private MySQL dependencies |
+| `master/src/types.rs` and `master/src/types/*.rs` | Unified Worker/control DTOs, Task seeds, pagination, filters, and cursor contracts |
+| `master/src/handler.rs` and `master/src/handler/*.rs` | Axum route composition, extraction/authentication, HTTP response handling, and resource handlers |
+| `master/src/logic.rs` and `master/src/logic/*.rs` | Resource business operations between HTTP handlers and the private store |
+| `master/src/store/mysql/task.rs` | Static validation and Request materialization for Task/code-seed types defined in `master/src/types/task.rs` |
 | `master/src/store/mysql/task/{write,dispatch}.rs` | Task persistence, bounded Cron seed dispatch, and deterministic invalid-Task quarantine |
-| `master/src/routes/control.rs` and `master/src/control/*.rs` | Control routes, strict query/response records, pagination, and cursor binding |
 | `master/src/store/mysql/request/{claim,lease,queue,recover,settle}.rs` | Request claiming, ownership transitions, FIFO allocation, bounded recovery, and settlement |
 | `master/src/store/mysql/observe.rs` and `master/src/store/mysql/observe/{task,trace,request,worker,item}.rs` | Read-only Task, Trace, Request, Worker, and Item projections |
 | `master/src/store/mysql/{task,request,trace,item,worker,operation,validate,time}.rs` | Private MySQL domain entry points, idempotency, validation, and time helpers |

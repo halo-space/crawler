@@ -16,8 +16,6 @@ mod trace;
 mod validate;
 mod worker;
 
-pub use task::{CodeSeed, Task};
-
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
 pub(super) fn duplicate(error: &sqlx::Error) -> bool {

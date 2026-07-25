@@ -10,7 +10,7 @@ use super::super::trace;
 use super::super::validate::{namespace as validate_namespace, worker_id as validate_worker_id};
 use super::super::worker::canonical_modes;
 use super::{State, parse_stored, recover};
-use crate::{Error, wire};
+use crate::{Error, types};
 
 const EMPTY_RESPONSE_BYTES: usize = b"{\"requests\":[]}".len();
 
@@ -21,10 +21,10 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn claimed(&self, worker_id: &str, lease_time: i64, include_trace: bool) -> wire::Claimed {
-        wire::Claimed {
+    fn claimed(&self, worker_id: &str, lease_time: i64, include_trace: bool) -> types::Claimed {
+        types::Claimed {
             snapshot: self.request.snapshot.clone(),
-            execution: wire::Execution {
+            execution: types::Execution {
                 version: self.version,
                 next_time: self.request.next_time,
                 leased_by: worker_id.to_string(),
@@ -105,7 +105,10 @@ impl Selection {
         !trace_id.is_empty() && !self.traces.contains(trace_id)
     }
 
-    fn include(&mut self, mut request: wire::Claimed) -> Result<(Capacity, wire::Claimed), Error> {
+    fn include(
+        &mut self,
+        mut request: types::Claimed,
+    ) -> Result<(Capacity, types::Claimed), Error> {
         if self.traces.contains(&request.snapshot.trace_id) {
             request.trace = None;
         }
@@ -120,7 +123,7 @@ impl Selection {
         Ok((capacity, request))
     }
 
-    fn measure(&mut self, request: &wire::Claimed) -> Result<Capacity, Error> {
+    fn measure(&mut self, request: &types::Claimed) -> Result<Capacity, Error> {
         self.size.include(serde_json::to_vec(request)?.len())
     }
 }
@@ -130,8 +133,8 @@ impl MySql {
         &self,
         namespace: &str,
         key: &str,
-        body: &wire::Claim,
-    ) -> Result<wire::Claims, Error> {
+        body: &types::Claim,
+    ) -> Result<types::Claims, Error> {
         validate_namespace(namespace)?;
         if body.limit == 0 || body.limit > 1024 {
             return Err(Error::Invalid(
@@ -143,7 +146,7 @@ impl MySql {
         let digest = operation::digest(&(body.limit, &body.worker_id, &modes))?;
         let mut tx = self.pool.begin().await?;
         if let Some(previous) =
-            operation::reserve::<wire::Claims>(&mut tx, namespace, "claim", key, &digest).await?
+            operation::reserve::<types::Claims>(&mut tx, namespace, "claim", key, &digest).await?
         {
             self.ensure_worker(&mut tx, namespace, &body.worker_id, &modes)
                 .await?;
@@ -299,7 +302,7 @@ impl MySql {
             }
             claimed.push(request);
         }
-        let result = wire::Claims { requests: claimed };
+        let result = types::Claims { requests: claimed };
         operation::record(&mut tx, namespace, "claim", key, &digest, &result).await?;
         tx.commit().await?;
         Ok(result)
@@ -311,13 +314,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn limit_uses_the_exact_wire_size() {
+    fn limit_uses_the_exact_response_size() {
         let request = spider::net::Request::follow("https://example.com/article")
             .unwrap()
             .node("detail");
-        let claimed = wire::Claimed {
+        let claimed = types::Claimed {
             snapshot: spider::net::request::Snapshot::try_from(request).unwrap(),
-            execution: wire::Execution {
+            execution: types::Execution {
                 version: 1,
                 next_time: 0,
                 leased_by: "worker-1".to_string(),
@@ -327,7 +330,7 @@ mod tests {
             },
             trace: None,
         };
-        let bytes = serde_json::to_vec(&wire::Claims {
+        let bytes = serde_json::to_vec(&types::Claims {
             requests: vec![claimed.clone()],
         })
         .unwrap()
@@ -355,9 +358,9 @@ mod tests {
         request.trace_id = "trace-1".to_string();
         let mut trace = spider::trace::Snapshot::code("task-1");
         trace.attachment = Some(serde_json::Value::String("x".repeat(2048)));
-        let first = wire::Claimed {
+        let first = types::Claimed {
             snapshot: spider::net::request::Snapshot::try_from(request).unwrap(),
-            execution: wire::Execution {
+            execution: types::Execution {
                 version: 1,
                 next_time: 0,
                 leased_by: "worker-1".to_string(),
@@ -371,7 +374,7 @@ mod tests {
         first_without_trace.trace = None;
         let mut second = first_without_trace.clone();
         second.snapshot.id = "request-2".to_string();
-        let requests_bytes = serde_json::to_vec(&wire::Claims {
+        let requests_bytes = serde_json::to_vec(&types::Claims {
             requests: vec![first_without_trace, second.clone()],
         })
         .unwrap()
@@ -381,7 +384,7 @@ mod tests {
         assert!(trace_bytes <= max);
         assert!(serde_json::to_vec(&second).unwrap().len() + EMPTY_RESPONSE_BYTES <= max);
         assert!(
-            serde_json::to_vec(&wire::Claims {
+            serde_json::to_vec(&types::Claims {
                 requests: vec![first.clone()],
             })
             .unwrap()

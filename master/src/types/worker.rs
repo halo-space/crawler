@@ -27,6 +27,29 @@ pub(crate) struct Filter {
     online: Option<bool>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Worker {
+    pub worker_id: String,
+    pub modes: Vec<spider::net::Mode>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Heartbeat {
+    pub worker_id: String,
+    pub modes: Vec<spider::net::Mode>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Policy {
+    pub lease_timeout_ms: i64,
+    pub lease_interval_ms: i64,
+    pub heartbeat_interval_ms: i64,
+    pub max_response_bytes: u64,
+}
+
 impl List {
     pub(crate) fn limit(&self) -> Result<usize, Error> {
         super::limit(self.limit)

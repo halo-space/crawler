@@ -11,6 +11,7 @@ base64 = { workspace = true }
 http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 spider = { path = "../spider" }
 sqlx = { workspace = true }

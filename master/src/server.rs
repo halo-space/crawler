@@ -4,7 +4,7 @@ use axum::Router;
 use tokio::sync::watch;
 
 use crate::store::MySql;
-use crate::{Config, Error, routes};
+use crate::{Config, Error, handler};
 
 mod cron;
 
@@ -29,12 +29,8 @@ impl Server {
         Ok(Self { config, store })
     }
 
-    pub async fn from_env() -> Result<Self, Error> {
-        Self::from_config(Config::from_env()?).await
-    }
-
     pub(crate) fn router(&self) -> Router {
-        routes::build(self.config.clone(), self.store.clone())
+        handler::build(self.config.clone(), self.store.clone())
     }
 
     pub async fn serve(self) -> Result<(), Error> {

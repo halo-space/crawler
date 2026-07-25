@@ -1,12 +1,13 @@
 #![deny(unsafe_code)]
 
 mod config;
-mod control;
 mod error;
-mod routes;
+mod handler;
+mod logic;
 mod server;
 mod store;
-mod wire;
+mod svc;
+mod types;
 
 #[cfg(test)]
 mod api_test;

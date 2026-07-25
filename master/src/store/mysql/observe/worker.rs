@@ -7,7 +7,7 @@ use super::super::request::mode_name;
 use super::super::time::now_millis;
 use super::super::validate::namespace as validate_namespace;
 use crate::Error;
-use crate::control::{Page, cursor, request, worker};
+use crate::types::{Page, cursor, request, worker};
 
 const ENDPOINT: &str = "workers";
 

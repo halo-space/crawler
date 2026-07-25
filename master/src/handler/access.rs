@@ -1,15 +1,15 @@
 use axum::extract::FromRequestParts;
 use axum::http::{HeaderMap, header, request::Parts};
 
-use super::App;
+use crate::svc::Context;
 use crate::{Config, Error};
 
 pub(super) struct Worker;
 
-impl FromRequestParts<App> for Worker {
+impl FromRequestParts<Context> for Worker {
     type Rejection = Error;
 
-    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, app: &Context) -> Result<Self, Self::Rejection> {
         authorize(&app.config, app.config.worker_token(), &parts.headers)?;
         Ok(Self)
     }
@@ -17,10 +17,10 @@ impl FromRequestParts<App> for Worker {
 
 pub(super) struct Control;
 
-impl FromRequestParts<App> for Control {
+impl FromRequestParts<Context> for Control {
     type Rejection = Error;
 
-    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, app: &Context) -> Result<Self, Self::Rejection> {
         authorize(&app.config, app.config.control_token(), &parts.headers)?;
         Ok(Self)
     }

@@ -166,20 +166,23 @@ let mut engine = engine::Engine::new()
 engine.start().await?;
 ```
 
-`master` is a separate Axum service backed by private MySQL 8.0.19+ storage. Start it with an
-explicit database URL, namespace, Worker token, and control token, for example:
+`master` is a separate Axum service backed by private MySQL 8.0.19+ storage. Configure its database
+URL, namespace, Worker token, control token, and runtime limits in the strict YAML template at
+`master/etc/master-api.yaml`, then start it explicitly with that file:
 
 ```bash
-CRAWLER_MASTER_DATABASE_URL='mysql://...'
-CRAWLER_MASTER_NAMESPACE='crawler'
-CRAWLER_MASTER_WORKER_TOKEN='...'
-CRAWLER_MASTER_CONTROL_TOKEN='...'
-cargo run -p master
+cargo run -p master -- --config master/etc/master-api.yaml
 ```
+
+The control plane is split by responsibility: `master/src/handler/` contains Axum extraction and
+route handlers, `master/src/logic/` contains resource operations, `master/src/svc.rs` owns the
+shared service context, and `master/src/types/` contains the unified Worker/control DTOs. Handlers
+do not call MySQL directly. `master/src/config/` loads and validates runtime YAML, while
+`master/src/store/mysql/` remains the private persistence implementation.
 
 Both sides default to a 64 MiB API message limit. Set a Worker's receive capacity with
 `Api::with_max_response_bytes(...)` before opening it, and set Master's request/response limit with
-`master::Config::with_max_api_bytes(...)` or `CRAWLER_MASTER_MAX_API_BYTES`. Startup rejects a
+the YAML `max_api_bytes` field or `master::Config::with_max_api_bytes(...)`. Startup rejects a
 Master limit larger than the Worker's configured capacity, so 64 MiB is a default rather than a
 fixed system-wide limit. The Worker serializes every outbound JSON message into the same bounded
 capacity before network I/O and reuses those immutable bytes across transport retries. Master checks

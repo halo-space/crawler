@@ -6,14 +6,14 @@ use super::request::{load, verify_identity, verify_lease};
 use super::time::now_millis;
 use super::trace;
 use super::validate::{identifier, identity, namespace as validate_namespace};
-use crate::{Error, wire};
+use crate::{Error, types};
 
 impl MySql {
     pub(crate) async fn items(
         &self,
         namespace: &str,
         key: &str,
-        body: &wire::Items,
+        body: &types::Items,
     ) -> Result<(), Error> {
         validate_namespace(namespace)?;
         let digest = operation::digest(body)?;

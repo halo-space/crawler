@@ -1,6 +1,6 @@
 mod mysql;
 
-pub(crate) use mysql::{CodeSeed, MySql, Task};
+pub(crate) use mysql::MySql;
 
 #[cfg(test)]
 mod mysql_test;

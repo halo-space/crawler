@@ -3,13 +3,13 @@ use super::super::operation;
 use super::super::time::now_millis;
 use super::super::validate::{identity as validate_identity, namespace as validate_namespace};
 use super::{load, queue, verify_identity, verify_lease};
-use crate::{Error, wire};
+use crate::{Error, types};
 
 impl MySql {
     pub(crate) async fn ack(
         &self,
         namespace: &str,
-        identity: &wire::Identity,
+        identity: &types::Identity,
     ) -> Result<(), Error> {
         validate_namespace(namespace)?;
         validate_identity(identity)?;
@@ -40,7 +40,7 @@ impl MySql {
         &self,
         namespace: &str,
         key: &str,
-        identity: &wire::Identity,
+        identity: &types::Identity,
     ) -> Result<(), Error> {
         validate_namespace(namespace)?;
         validate_identity(identity)?;
@@ -83,7 +83,7 @@ impl MySql {
     pub(crate) async fn refresh(
         &self,
         namespace: &str,
-        identity: &wire::Identity,
+        identity: &types::Identity,
     ) -> Result<(), Error> {
         validate_namespace(namespace)?;
         validate_identity(identity)?;

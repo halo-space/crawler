@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use sqlx::types::Json;
 
-use super::super::{CodeSeed, Task};
 use super::{Database, Result, require, require_one_conflict};
+use crate::types::task::{CodeSeed, Task};
 
 #[tokio::test]
 async fn task_name_conflict_preserves_the_existing_owner() -> Result<()> {

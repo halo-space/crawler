@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::time::Duration;
 
-use super::{CodeSeed, MySql, Task};
-use crate::{Config, wire};
+use super::MySql;
+use crate::types::task::{CodeSeed, Task};
+use crate::{Config, types};
 use sqlx::{MySql as SqlxMySql, Pool, Row};
 
 type Result<T> = std::result::Result<T, Box<dyn StdError>>;
@@ -338,7 +339,7 @@ async fn exercise_claim(store: &MySql, namespace: &str) -> Result<()> {
         .init(
             namespace,
             "claim-init",
-            &wire::Init {
+            &types::Init {
                 trace_id: trace_id.to_string(),
                 trace: spider::trace::Snapshot::code(task_id),
                 requests: snapshots,
@@ -357,7 +358,7 @@ async fn exercise_claim(store: &MySql, namespace: &str) -> Result<()> {
         .claim(
             namespace,
             "claim-operation",
-            &wire::Claim {
+            &types::Claim {
                 limit: 3,
                 worker_id: "worker-1".to_string(),
                 modes: vec![spider::net::Mode::Http],

@@ -8,7 +8,7 @@ use super::super::operation;
 use super::super::trace;
 use super::super::validate::namespace as validate_namespace;
 use super::{FAILED, State, Stored, parse_stored, queue, settle};
-use crate::{Error, wire};
+use crate::{Error, types};
 
 struct Failure<'a> {
     id: &'a str,
@@ -166,8 +166,8 @@ pub(super) async fn expired(
             now,
         )
         .await?;
-        let completion = wire::Completion {
-            identity: wire::Identity {
+        let completion = types::Completion {
+            identity: types::Identity {
                 id: request.id.clone(),
                 task_id: request.task_id.clone(),
                 trace_id: request.trace_id.clone(),
@@ -255,8 +255,8 @@ async fn fail(
             request.id
         )));
     }
-    let completion = wire::Completion {
-        identity: wire::Identity {
+    let completion = types::Completion {
+        identity: types::Identity {
             id: request.id.to_string(),
             task_id: request.task_id.to_string(),
             trace_id: request.trace_id.to_string(),

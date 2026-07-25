@@ -6,7 +6,7 @@ use sqlx::{MySql as SqlxMySql, QueryBuilder, Row};
 use super::super::MySql;
 use super::super::validate::{identifier, namespace as validate_namespace};
 use crate::Error;
-use crate::control::{Page, cursor, item};
+use crate::types::{Page, cursor, item};
 
 const ENDPOINT: &str = "items";
 

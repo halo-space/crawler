@@ -10,14 +10,14 @@ use super::request::insert as insert_requests;
 use super::time::now_millis;
 use super::validate::{identifier, namespace as validate_namespace};
 use super::{MySql, duplicate};
-use crate::{Error, wire};
+use crate::{Error, types};
 
 impl MySql {
     pub(crate) async fn init(
         &self,
         namespace: &str,
         key: &str,
-        body: &wire::Init,
+        body: &types::Init,
     ) -> Result<(), Error> {
         validate_namespace(namespace)?;
         body.trace

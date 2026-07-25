@@ -1,84 +1,15 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use super::validate::identifier;
-use crate::Error;
 
 mod dispatch;
 mod write;
 
-#[cfg(test)]
-pub(super) use dispatch::next_period;
+use super::validate::identifier;
+use crate::Error;
+pub(super) use crate::types::task::{CodeSeed, Task};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CodeSeed {
-    pub node: String,
-    pub url: String,
-    #[serde(default)]
-    pub method: spider::net::Method,
-    #[serde(default)]
-    pub headers: spider::net::Headers,
-    #[serde(default)]
-    pub body: spider::net::Body,
-    #[serde(default)]
-    pub cookies: spider::net::Cookies,
-    #[serde(default)]
-    pub vals: HashMap<String, Value>,
-    #[serde(default)]
-    pub kwargs: HashMap<String, Value>,
-    #[serde(default)]
-    pub priority: i32,
-    #[serde(default)]
-    pub dont_filter: bool,
-    #[serde(default)]
-    pub mode: spider::net::Mode,
-    #[serde(default)]
-    pub timeout: Option<u64>,
-    #[serde(default)]
-    pub max_body_bytes: Option<u64>,
-    #[serde(default)]
-    pub proxy: Option<spider::net::ProxyConfig>,
-    #[serde(default)]
-    pub tls: Option<spider::net::TlsConfig>,
-    #[serde(default)]
-    pub middlewares: Vec<spider::middleware::Spec>,
-    #[serde(default = "default_retry_count")]
-    pub max_retry_count: i32,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Task {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub periodic: bool,
-    #[serde(default)]
-    pub interval_ms: i64,
-    #[serde(default)]
-    pub priority: i32,
-    #[serde(default)]
-    pub params: HashMap<String, Value>,
-    #[serde(default)]
-    pub dsl: Option<spider::config::Config>,
-    #[serde(default)]
-    pub seeds: Vec<CodeSeed>,
-    #[serde(default)]
-    pub persister_id: Option<String>,
-    #[serde(default)]
-    pub attachment: Option<Value>,
-    #[serde(default)]
-    pub next_time: i64,
-}
-
-fn default_retry_count() -> i32 {
-    1
-}
-
-fn validate(task: &Task) -> Result<(), Error> {
+pub(super) fn validate(task: &Task) -> Result<(), Error> {
     identifier(&task.id, "Task id")?;
     identifier(&task.name, "Task name")?;
     if task.next_time < 0 {
@@ -173,50 +104,4 @@ pub(super) fn materialize(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn one_shot_task_rejects_an_unused_interval() {
-        let mut task = code_task();
-        task.interval_ms = 1;
-
-        assert!(validate(&task).is_err());
-        task.interval_ms = 0;
-        assert!(validate(&task).is_ok());
-    }
-
-    fn code_task() -> Task {
-        Task {
-            id: "task".to_string(),
-            name: "task".to_string(),
-            periodic: false,
-            interval_ms: 0,
-            priority: 0,
-            params: HashMap::new(),
-            dsl: None,
-            seeds: vec![CodeSeed {
-                node: "index".to_string(),
-                url: "https://example.com".to_string(),
-                method: Default::default(),
-                headers: Default::default(),
-                body: Default::default(),
-                cookies: Default::default(),
-                vals: HashMap::new(),
-                kwargs: HashMap::new(),
-                priority: 0,
-                dont_filter: false,
-                mode: Default::default(),
-                timeout: None,
-                max_body_bytes: None,
-                proxy: None,
-                tls: None,
-                middlewares: Vec::new(),
-                max_retry_count: 1,
-            }],
-            persister_id: None,
-            attachment: None,
-            next_time: 0,
-        }
-    }
-}
+pub(super) use dispatch::next_period;

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, FromRequestParts as _, rejection::JsonRejection};
@@ -7,6 +8,10 @@ use axum::{Json, Router};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::oneshot;
+
+use crate::Config;
+use crate::store::MySql;
+use crate::svc::Context;
 
 use super::*;
 
@@ -41,7 +46,7 @@ fn parts(token: &str, namespace: &str) -> Parts {
 async fn authentication_extractors_isolate_tokens_and_namespace() {
     let config = config();
     let store = MySql::disconnected(&config);
-    let app = App {
+    let app = Context {
         config: Arc::new(config),
         store,
     };

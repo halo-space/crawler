@@ -86,7 +86,7 @@ async fn exercise(
     ensure_success(response, "publish Task").await?;
 
     let claimed = claim(client, &base, namespace, worker_token, worker_id).await?;
-    let identity = crate::wire::Identity {
+    let identity = crate::types::Identity {
         id: claimed.snapshot.id,
         task_id: claimed.snapshot.task_id,
         trace_id: claimed.snapshot.trace_id,
@@ -130,7 +130,7 @@ async fn exercise(
         .send()
         .await?;
     let response = ensure_success(response, "check pending Requests").await?;
-    let pending: crate::wire::Pending = response.json().await?;
+    let pending: crate::types::request::Pending = response.json().await?;
     if pending.pending {
         return Err(std::io::Error::other("Master still reports a pending Request").into());
     }
@@ -143,7 +143,7 @@ async fn claim(
     namespace: &str,
     token: &str,
     worker_id: &str,
-) -> Result<crate::wire::Claimed> {
+) -> Result<crate::types::Claimed> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut attempt = 0_u32;
     loop {
@@ -163,7 +163,7 @@ async fn claim(
             .send()
             .await?;
         let response = ensure_success(response, "claim Request").await?;
-        let claims: crate::wire::Claims = response.json().await?;
+        let claims: crate::types::Claims = response.json().await?;
         if claims.requests.len() > 1 {
             return Err(std::io::Error::other("Master returned more Requests than claimed").into());
         }
