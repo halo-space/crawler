@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::config;
 
-pub fn next_id(spider_name: &str) -> String {
-    format!("trace_{spider_name}_{}", uuid::Uuid::now_v7())
+pub fn next_id() -> String {
+    format!("trace_{}", uuid::Uuid::now_v7())
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -83,6 +83,14 @@ mod tests {
 
         assert!(snapshot.dsl.is_none());
         snapshot.validate().unwrap();
+    }
+
+    #[test]
+    fn generated_id_is_opaque_and_fixed_length() {
+        let id = next_id();
+
+        assert!(id.starts_with("trace_"));
+        assert_eq!(id.len(), "trace_".len() + 36);
     }
 
     #[test]

@@ -84,7 +84,9 @@ async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
 
     let trace_ids = engine.scheduler().trace_ids();
     assert_eq!(trace_ids.len(), 1);
-    assert!(trace_ids[0].starts_with("trace_v1-acceptance_"));
+    assert!(trace_ids[0].starts_with("trace_"));
+    assert_eq!(trace_ids[0].len(), "trace_".len() + 36);
+    assert!(!trace_ids[0].contains("v1-acceptance"));
     let stats = engine.scheduler().trace_stats(&trace_ids[0]);
     assert_eq!(stats["index"].total, 1);
     assert_eq!(stats["index"].done, 1);

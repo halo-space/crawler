@@ -1,5 +1,5 @@
 [workspace]
-members = ["spider", "contrib", "examples", "macros"]
+members = ["spider", "contrib", "examples", "macros", "master"]
 resolver = "3"
 
 [workspace.package]
@@ -10,6 +10,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 async-openai = { version = "0.41.1", default-features = false, features = ["chat-completion", "middleware", "rustls"] }
+axum = "0.8.9"
 base64 = "0.22"
 bytes = { version = "1", features = ["serde"] }
 chrono = "0.4"
@@ -36,6 +37,7 @@ url = "2"
 uuid = { version = "1", features = ["v7"] }
 validator = { git = "https://github.com/halo-space/validator.git", rev = "2b3128a" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "brotli", "deflate", "stream"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["mysql", "runtime-tokio", "tls-rustls-aws-lc-rs", "migrate", "json", "macros"] }
 secrecy = "0.10"
 cookie_store = { version = "0.22.1", default-features = false, features = ["serde"] }
 psl = "2.1.219"

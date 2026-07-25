@@ -7,12 +7,18 @@ license.workspace = true
 
 [dependencies]
 base64 = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
 redis = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 spider = { path = "../spider" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 uuid = { workspace = true }

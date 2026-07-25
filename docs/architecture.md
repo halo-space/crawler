@@ -4,16 +4,17 @@ This document describes the features implemented by the current source tree, the
 
 ## 1. Positioning and Current Scope
 
-`crawler` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` also provides a Redis 7 standalone Scheduler for durable multi-Worker queues. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
+`crawler` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` provides both a Redis 7 standalone Scheduler and the Worker-side HTTP API Scheduler for durable multi-Worker queues. The separate `master` crate is an Axum/MySQL control plane; it is not a Scheduler. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
 
-The workspace contains four crates:
+The workspace contains five crates:
 
 | Crate | Responsibility |
 | --- | --- |
 | `spider` | Core runtime, public data objects, extension contracts, default Memory Scheduler, and HTTP Downloader |
 | `macros` | The `#[spider]` procedural macro, including code-mode construction, node registration, and dispatch bindings |
-| `contrib` | Replaceable external Scheduler implementations; Redis is implemented, while API and MySQL remain future work |
+| `contrib` | Replaceable external Scheduler implementations: Redis and Worker-side API are implemented |
 | `examples` | Runnable code-mode and Rules-mode examples |
+| `master` | Axum control plane with private MySQL storage, Task dispatch, Worker API, and control API |
 
 ### 1.1 Capability Status
 
@@ -34,8 +35,9 @@ The workspace contains four crates:
 | Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots; attachment download is planned for v5 |
 | Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
 | Redis Scheduler | Implemented | Redis 7+ standalone only; namespaced complete Scheduler/Init contract, Lua-atomic transitions, and Redis Stream Item output |
-| API/MySQL Schedulers | Planned | Separate v4 `contrib` implementations; each must implement the complete Scheduler contract |
-| Master control plane | Planned | A v4 capability, not part of the core Scheduler itself |
+| API Scheduler | Implemented | `contrib::scheduler::api::Api` is the Worker-side HTTP Scheduler implementation; it preserves the complete Scheduler/Init contract through Master |
+| Master control plane | Implemented | Separate Axum service with private MySQL 8.0.19+ storage, Task dispatch, and recovery; it does not implement Scheduler |
+| Direct MySQL Scheduler | Out of scope | MySQL is Master-private control-plane storage; Workers use `Api`, never a direct MySQL Scheduler |
 | Runtime tracing | Planned | v4 will use `fasttrace`; this is separate from the business `trace_id` |
 
 XPath has been removed from the roadmap. CSS is the sole HTML selector path; the project does not maintain a partial XPath implementation.
@@ -62,6 +64,9 @@ flowchart LR
     S["Scheduler contract"]
     M["Memory Scheduler"]
     Z["Redis 7 Scheduler"]
+    AP["Api Scheduler<br/>Worker-side HTTP client"]
+    CP["master<br/>Axum control plane"]
+    DB["Private MySQL"]
     W["Request Worker"]
     MW["Middleware Registry"]
     D["Downloader"]
@@ -78,6 +83,9 @@ flowchart LR
     A --> S
     S --> M
     S --> Z
+    S --> AP
+    AP <--> CP
+    CP --> DB
     A --> W
     W --> MW
     W --> D
@@ -93,6 +101,11 @@ flowchart LR
 ```
 
 The Engine uses one private Kameo Actor as its message-driven coordinator, but it does not force the Scheduler, Downloader, Executor, or AI selector into Actor types. Components retain method-based contracts. The Actor directly owns runtime state and dependencies; Request and output work still runs in independent Tokio tasks so no long I/O blocks message handling.
+
+For the remote topology, `Api` is the only object in this diagram that enters
+`Engine::with_scheduler(...)`. `master` remains outside Engine: it exposes the Worker API and a
+separate control API, while its MySQL database is private control-plane storage. It does not
+implement `scheduler::Scheduler`, and no Worker opens a database connection to claim or settle work.
 
 ## 4. Identity, Tasks, and Run Seeds
 
@@ -364,6 +377,122 @@ Durable deployments must enable AOF (`appendonly yes`) and set `maxmemory-policy
 smaller persistence window, while `everysec` commonly offers higher throughput with up to roughly
 one second of acknowledged-write exposure. Operators must also monitor Redis capacity and choose an
 explicit Item Stream retention policy.
+
+### 6.4 API Scheduler and Master Control Plane
+
+`contrib::scheduler::api::Api` is a complete Worker-side implementation of `Scheduler` and `Init`.
+It translates `open / close / push / push_items / trace / next_requests / has_pending_requests / ack /
+release / refresh_lease / success / failure` to the Master Worker API, preserving the core Payload,
+identity, capability, lease, retry, and terminal-state semantics. It owns an HTTP client, bounded
+response reads, bounded outbound JSON serialization, operation keys where the remote operation
+requires idempotency, a bounded immutable Trace cache, and Worker heartbeat tasks. Outbound retries
+reuse one immutable byte buffer instead of serializing or cloning the full message again. It is not a
+direct MySQL client and no Engine code has a Master-specific branch.
+
+`master` is a separate Axum executable with private MySQL 8.0.19+ storage. It does not implement
+`Scheduler`, cannot be passed to `Engine::with_scheduler(...)`, and never starts or stops Workers.
+It owns the HTTP boundary, MySQL migrations, Task records, Trace Snapshots, Request state, Item
+records, settlement history, Worker observations, and trace statistics. Its pool uses `READ COMMITTED`;
+namespace and identity columns use binary `utf8mb4_0900_bin` collations so IDs and idempotency keys
+remain byte-sensitive. A direct MySQL Scheduler is deliberately absent: a Worker connects only to
+`Api`, while only Master holds database credentials.
+
+The two API surfaces use separate bearer credentials and require the configured namespace:
+
+| Surface | Credential | Responsibility |
+| --- | --- | --- |
+| Worker API | Worker token | Scheduler operations, Trace reads, claims, acknowledgements, lease refresh, settlement, Item submission, and heartbeat |
+| Control API | Control token | Task publication plus read-only Task, Trace, Request, Worker, and Item observation |
+
+A Worker token cannot publish Tasks; a control token is not a Worker Scheduler credential. Credentials
+and Master database URLs are Worker-local or control-plane deployment configuration and never enter
+Rules, Trace Snapshots, Request Snapshots, Payloads, or Items.
+Master extracts and validates the applicable credential and namespace from request parts before any
+JSON or raw-body extractor runs. An unauthorized malformed or oversized body therefore returns the
+authentication error first and cannot consume the body-processing path.
+
+An API-backed Worker has a finite external lifecycle. `Api::open()` fetches and verifies the Master
+lease policy and advertised response limit (64 MiB by default). `Api::with_max_response_bytes(...)`
+sets the Worker's receive capacity before opening; Master sets its request/response limit with
+`master::Config::with_max_api_bytes(...)` or `CRAWLER_MASTER_MAX_API_BYTES`. Opening rejects a
+Master limit larger than that local capacity, so 64 MiB is a default, not a fixed topology-wide limit. The first
+claim or pending-work check registers the supplied `worker_id` and supported modes. Later calls only
+rewrite that record when modes change or its heartbeat is stale, and heartbeat maintenance stops when
+the Scheduler closes. Client connect, read, request, and aggregate retry
+deadlines are bounded; response bodies are streamed into a bounded buffer. Its activity gate lets
+`Api::close()` reject new calls and wait for calls already admitted before it stops heartbeat tasks
+and clears Worker-local operation-key and Trace caches. The immutable Trace cache is bounded by both
+128 entries and 64 MiB.
+
+Claim and release create a fresh idempotency key for every public invocation; only HTTP retries inside
+that invocation reuse it. Init and Item submission retain one unresolved logical-operation key across
+the Engine's outer retry in the same task, because an ambiguous committed Item response must not
+duplicate output. Definite success or a deterministic error clears that key; an unresolved key expires
+exactly five minutes after its first creation rather than sliding on reuse, and the local store refuses
+new keys at its 4096-entry bound instead of evicting a live operation. Master requires
+`history_retention >= max(lease_timeout, 5m30s)`, preserving persistent operation and completion
+replay records beyond that client window. Without a current Tokio task identity, each Init/Item call
+uses a fresh key instead of entering this unresolved-operation store. If a successful `POST` response
+exceeds the client bound, the result remains `Unavailable` rather than becoming a deterministic
+failure; calls carrying an operation key retain it for replay.
+
+Engine exits under its normal capability-scoped pending-work rules; Master only observes the
+heartbeat and never supervises that Engine process. A missing heartbeat may trigger the same recovery
+transition early, but lease expiry remains the universal recovery path.
+
+Master Cron is control-plane maintenance, not a Worker supervisor. On each tick it:
+
+1. recovers, through the same retry and terminal-state rules used by normal failure, expired leases
+   and leases whose owning Worker is offline, up to the configured recovery limit;
+2. dispatches up to the configured dispatch limit of due Tasks atomically by creating a fresh
+   `trace_id`, immutable Trace Snapshot, and initial Requests, then advances a periodic Task or
+   marks a one-shot Task complete;
+
+Task publication performs only static Rules/code-seed and Snapshot validation. During dispatch,
+Cron materializes the stored Rules or code seed and inserts it directly; it does not run a Worker's
+`before_scheduler`, Middleware, or Dedup admission chain.
+Dispatch attempts are bounded independently from the number of successful Traces. A deterministically
+invalid stored Task is rolled back, rechecked under lock, and quarantined as `failed` with its error
+visible through the control API; later due Tasks still run. Republishing a corrected definition clears
+that error and makes the Task schedulable again. Database and other transient errors still fail the tick.
+
+The control-plane retention duration and cleanup limit drive bounded cleanup of terminal Request,
+completion, and operation history. Item, Trace, Task, and trace-stat retention remains a separate
+follow-up rather than an implemented automatic purge. Master has no persisted Event/audit domain in
+this release; one must be introduced only together with real transactionally recorded actions.
+
+Every newly accepted Request receives a namespace-local monotonically increasing queue sequence.
+Release, retryable failure, and lease recovery allocate a new sequence when they return a Request to
+pending, so an old Request does not jump ahead of work accepted while it was executing. Recovery is
+bounded and ordered. A Request at `i64::MAX` execution version is quarantined as failed instead of
+remaining permanently unclaimable, and statistics rows are locked in stable name order.
+Claim validates stored Requests and their Trace ownership before taking the lease timestamp, caches
+Trace reads by `trace_id`, and measures the response incrementally. A response embeds a Trace at most
+once per `trace_id`; when `Request + Trace` does not fit but the Request alone does, it omits the Trace
+and lets the Worker retrieve and cache it through the Trace endpoint. Only a Request that cannot fit by
+itself is quarantined as oversized.
+
+The control token exposes the following implemented surface. Lists return
+`{"items":[...],"next_cursor":...}`, default to 50 rows, cap requests at 200 rows, and bind each
+keyset cursor to its namespace, endpoint, and active filters. Summary rows omit large payloads.
+
+| Route | Result |
+| --- | --- |
+| `PUT /v1/control/tasks/{task_id}` | Validate and publish one Rules or code-seed Task |
+| `GET /v1/control/tasks[/{task_id}]` | Task summaries or definition detail |
+| `GET /v1/control/traces[/{trace_id}]` | Trace summaries or Snapshot, stats, and Request counts |
+| `GET /v1/control/requests[/{request_id}]` | Execution summaries or Snapshot, failed Workers, ack version, and latest completion |
+| `GET /v1/control/workers` | Worker modes, heartbeat, and computed online state |
+| `GET /v1/control/items[/{row_id}]` | Item summaries or data selected by the internal row identity |
+
+This surface is observational except for Task publication. It does not provide start, stop, pause,
+manual requeue, replay, or delete operations.
+
+A Task contains either complete Rules DSL or serialized code Request seeds. Master never persists a
+Rust handler; a code Worker resolves the stable node through its own deployed Spider registry.
+`Api::initializes_run()` is `false`, so a remote code Worker does not create a local Trace or call
+`Spider.start()`; it only claims Master-dispatched Requests. Browser downloading and `fasttrace`
+runtime tracing remain separate future work and do not alter this boundary.
 
 ## 7. Complete Request Lifecycle
 
@@ -785,7 +914,19 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `contrib/src/scheduler/redis/settle.rs` | Redis acknowledgement, release, refresh, success, and failure transitions |
 | `contrib/src/scheduler/redis/item.rs` | Redis Stream Item submission and Trace metadata projection |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | Key isolation, Lua loading, boundary validation, and error mapping |
-| `contrib/src/scheduler/{api,mysql}.rs` | Future external Scheduler boundaries |
+| `contrib/src/scheduler/api/{contract,client,request,item,settle,worker,state,wire}.rs` | Worker-side API Scheduler contract mapping, lifecycle, bounded HTTP transport, Trace cache, heartbeat, and wire data |
+| `contrib/src/scheduler/api/client/response.rs` | Bound streamed Master responses and map transport-size failures |
+| `contrib/src/scheduler/api/request/{claim,init,trace}.rs` | Map claims, run initialization, and immutable Trace reads to the Worker API |
+| `master/src/server.rs` | Own the Axum server lifecycle and start/stop Cron with the service |
+| `master/src/server/cron.rs` | Coordinate bounded Cron recovery, dispatch, and cleanup store operations |
+| `master/src/{routes,config,error,wire}.rs` | Route composition, configuration, error envelope, and private wire contracts |
+| `master/src/routes/{worker,access,extract,response}.rs` and `master/src/routes/control/*.rs` | Worker/control routes, authentication-before-body extraction, bounded input, and response handling |
+| `master/src/store/mysql/task.rs` | Task and code-seed contracts, static validation, and Request materialization |
+| `master/src/store/mysql/task/{write,dispatch}.rs` | Task persistence, bounded Cron seed dispatch, and deterministic invalid-Task quarantine |
+| `master/src/routes/control.rs` and `master/src/control/*.rs` | Control routes, strict query/response records, pagination, and cursor binding |
+| `master/src/store/mysql/request/{claim,lease,queue,recover,settle}.rs` | Request claiming, ownership transitions, FIFO allocation, bounded recovery, and settlement |
+| `master/src/store/mysql/observe.rs` and `master/src/store/mysql/observe/{task,trace,request,worker,item}.rs` | Read-only Task, Trace, Request, Worker, and Item projections |
+| `master/src/store/mysql/{task,request,trace,item,worker,operation,validate,time}.rs` | Private MySQL domain entry points, idempotency, validation, and time helpers |
 
 Names rely on module context. For example, `request::State`, `memory::State`, and `registry::Bind` do not repeat their module names. Files likewise avoid mixing unrelated parsing, storage, and control-plane responsibilities.
 
@@ -794,13 +935,14 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 ### Release Boundaries
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
-- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, and Engine-level Worker-local `ai::OpenAI` provider injection are implemented. API and MySQL Schedulers, the Master control plane, auditable Item snapshot replay, and `fasttrace` runtime tracing remain separate work. These implementations depend on the core Scheduler contract, not on Browser delivery.
+- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, Engine-level Worker-local `ai::OpenAI` provider injection, Worker-side API Scheduler, and Axum/MySQL Master control plane are implemented. A direct MySQL Scheduler, auditable Item snapshot replay, and `fasttrace` runtime tracing remain separate work. The API Scheduler and Master depend on the core Scheduler contract, not on Browser delivery.
 - v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance, and a separate Item attachment downloader. Attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:
 
 - replacing the Scheduler must not change the business shape of Engine, Spider, Downloader, Middleware, Request, Response, or Item;
-- Redis, API, and MySQL implementations must provide atomic claims, leases, lease refresh, version validation, retry, terminal states, Trace reads, and Item submission themselves; every lease-backed implementation must recover expired leases even while the Worker is online, while offline-Worker recovery can only trigger that transition earlier;
+- Redis and API Scheduler implementations must provide atomic claims, leases, lease refresh, version validation, retry, terminal states, Trace reads, and Item submission themselves; every lease-backed implementation must recover expired leases even while the Worker is online, while offline-Worker recovery can only trigger that transition earlier;
+- Master is a control plane, not a Scheduler: only `Api` crosses the Engine Scheduler boundary, Worker and control credentials remain distinct, and Master-private MySQL is never exposed to Workers;
 - Worker capability filtering must be atomic with the Scheduler claim, rather than claiming an incompatible Request and dropping it in the Downloader;
 - Browser must implement the existing `Download` contract and produce the same `Response` model;
 - `fasttrace` span context is operational telemetry and must not replace business `task_id / trace_id`.
@@ -813,6 +955,8 @@ These capabilities must preserve the existing core contracts:
 - batching an entire Trace's Items at Engine shutdown;
 - using Item ID for business deduplication;
 - supporting Redis Cluster through the standalone Redis Scheduler; Cluster needs a separate Scheduler design;
+- providing a direct MySQL Scheduler or direct Worker access to Master storage;
+- automatically purging Master Item, Trace, Task, or trace-stat history; current bounded cleanup covers terminal Requests, completions, and operations;
 - downloading Item attachments; that capability is unimplemented and assigned to an independent v5 change;
 - making the core `spider` crate depend on `contrib` or a control-plane implementation.
 
@@ -827,7 +971,8 @@ Implementation and extensions should continue to satisfy these checks:
 5. `success`, `failure`, `release`, and `refresh_lease` each express exactly one state transition semantic.
 6. CSS Healing and AI remain independent and explicit selection capabilities.
 7. Character decoding never mutates `Response.body`, and every response text consumer uses the same deterministic decoding path.
-8. Planned components are never presented as implemented merely because placeholder files or configuration fields exist.
+8. `master` is never passed to Engine as a Scheduler; only `contrib::scheduler::api::Api` is the remote Scheduler boundary, and Worker/control credentials cannot substitute for each other.
+9. Planned components are never presented as implemented merely because placeholder files or configuration fields exist.
 
 ## 15. Related Documentation
 

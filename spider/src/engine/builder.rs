@@ -136,7 +136,7 @@ where
         let spider = self.spider_factory.build(tx);
         let seed = self.scheduler.initializes_run().then(|| {
             let task_id = spider.name().to_string();
-            let trace_id = crate::trace::next_id(&task_id);
+            let trace_id = crate::trace::next_id();
             spider.tx().set_trace(task_id.clone(), trace_id.clone());
             (task_id, trace_id)
         });

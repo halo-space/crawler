@@ -50,7 +50,7 @@ impl Config {
     }
 
     pub fn next_trace_id(&self) -> String {
-        crate::trace::next_id(&self.spider.name)
+        crate::trace::next_id()
     }
 
     pub fn initial_requests(
@@ -356,7 +356,7 @@ graph:
         let second = config.next_trace_id();
 
         assert_ne!(first, second);
-        let uuid = first.strip_prefix("trace_books_").unwrap();
+        let uuid = first.strip_prefix("trace_").unwrap();
         let uuid = uuid::Uuid::parse_str(uuid).unwrap();
         assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
     }

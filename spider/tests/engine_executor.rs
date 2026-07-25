@@ -2695,7 +2695,7 @@ async fn engine_waits_for_output_sent_after_the_request_task_finishes() {
         })
         .unwrap();
     assert_eq!(emitted[0].task_id, "late-event");
-    assert!(emitted[0].trace_id.starts_with("trace_late-event_"));
+    assert!(emitted[0].trace_id.starts_with("trace_"));
     let trace_id = emitted[0].trace_id.clone();
     let items = pushed_items.lock().unwrap();
     assert_eq!(items[0].task_id, "late-event");

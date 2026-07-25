@@ -4,16 +4,17 @@
 
 ## 1. 定位与当前范围
 
-`crawler` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 还提供 Redis 7 单实例 Scheduler，用于持久化多 Worker 队列。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
+`crawler` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 提供 Redis 7 单实例 Scheduler 和 Worker 侧 HTTP API Scheduler，用于持久化多 Worker 队列。独立的 `master` crate 是基于 Axum/MySQL 的控制面，不是 Scheduler。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
 
-当前 workspace 包含四个 crate：
+当前 workspace 包含五个 crate：
 
 | crate | 职责 |
 | --- | --- |
 | `spider` | 核心运行时、公共数据对象、扩展合同，以及默认 Memory Scheduler 和 HTTP Downloader |
 | `macros` | `#[spider]` 过程宏；生成代码模式 Spider 的构造、node 注册和分发连接代码 |
-| `contrib` | 可替换外部 Scheduler 的实现边界；Redis 已实现，API 与 MySQL 仍是后续工作 |
+| `contrib` | 可替换外部 Scheduler 的实现边界；Redis 与 Worker 侧 API 已实现 |
 | `examples` | 可运行的代码模式和 Rules 模式示例 |
+| `master` | Axum 控制面；私有 MySQL 存储、Task 派发、Worker API 和 control API |
 
 ### 1.1 能力状态
 
@@ -34,8 +35,9 @@
 | Item 输出 | 已实现 | Schema 校验、媒体规范化、JSONL 输出和提交失败快照；附件下载计划在 v5 实现 |
 | Worker 能力领取 | 已实现 | Memory 只在当前 Worker 配置的 Request mode 范围内领取并判断待处理工作 |
 | Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；按 namespace 隔离，完整实现 Scheduler/Init 合同、Lua 原子转换与 Redis Stream Item 输出 |
-| API/MySQL Scheduler | 规划中 | 独立的 v4 `contrib` 实现；必须完整实现相同 Scheduler 合同 |
-| Master control-plane | 规划中 | v4 能力，不属于核心 Scheduler 本身 |
+| API Scheduler | 已实现 | `contrib::scheduler::api::Api` 是 Worker 侧 HTTP Scheduler 实现；通过 Master 保持完整 Scheduler/Init 合同 |
+| Master control-plane | 已实现 | 独立 Axum 服务，使用私有 MySQL 8.0.19+ 存储，负责 Task 派发和恢复；不实现 Scheduler |
+| 直接 MySQL Scheduler | 不在范围内 | MySQL 只是 Master 私有控制面存储；Worker 使用 `Api`，不使用直连 MySQL Scheduler |
 | 运行期链路追踪 | 规划中 | v4 使用 `fasttrace`；与业务 `trace_id` 是两个概念 |
 
 XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护不完整的 XPath 子集。
@@ -62,6 +64,9 @@ flowchart LR
     S["Scheduler 合同"]
     M["Memory Scheduler"]
     Z["Redis 7 Scheduler"]
+    AP["Api Scheduler<br/>Worker 侧 HTTP client"]
+    CP["master<br/>Axum 控制面"]
+    DB["私有 MySQL"]
     W["Request Worker"]
     MW["Middleware Registry"]
     D["Downloader"]
@@ -78,6 +83,9 @@ flowchart LR
     A --> S
     S --> M
     S --> Z
+    S --> AP
+    AP <--> CP
+    CP --> DB
     A --> W
     W --> MW
     W --> D
@@ -93,6 +101,10 @@ flowchart LR
 ```
 
 Engine 内部使用一个私有 Kameo Actor 作为消息驱动的单一协调者，但不会把 Scheduler、Downloader、Executor 或 AI 强制改造成 Actor。对外组件仍使用方法合同；Actor 直接持有运行状态和依赖，Request 与输出工作继续在独立 Tokio 任务中执行，长 I/O 不会阻塞消息处理。
+
+远程拓扑中，图里唯一进入 `Engine::with_scheduler(...)` 的对象是 `Api`。`master` 保持在
+Engine 之外：它提供 Worker API 和独立的 control API，MySQL 只作为其私有控制面存储。它不实现
+`scheduler::Scheduler`，Worker 也不会通过数据库连接领取或结算工作。
 
 ## 4. 身份、Task 与运行种子
 
@@ -343,6 +355,100 @@ Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算�
 必须启用 AOF（`appendonly yes`）并设置 `maxmemory-policy noeviction`。`appendfsync` 由运维侧在
 持久化强度与写入吞吐/延迟之间选择：`always` 缩小持久化窗口但降低吞吐，`everysec` 通常吞吐更高，
 但已确认写入可能暴露约一秒。还应监控 Redis 容量，并为 Item Stream 选择明确的外部保留策略。
+
+### 6.4 API Scheduler 与 Master 控制面
+
+`contrib::scheduler::api::Api` 是完整的 Worker 侧 `Scheduler` 与 `Init` 实现。它把
+`open / close / push / push_items / trace / next_requests / has_pending_requests / ack / release /
+refresh_lease / success / failure` 转换为 Master Worker API，并保持核心 Payload、身份、能力、租约、
+重试和终态语义。它持有 HTTP client、有界响应读取、有界出站 JSON 序列化、远端操作需要幂等时的
+operation key、有界不可变 Trace 缓存和 Worker 心跳任务。出站重试复用同一份不可变 byte buffer，不会
+重复序列化或完整克隆消息。它不是 MySQL 直连 client，Engine 也没有 Master 特例分支。
+
+`master` 是独立的 Axum 可执行服务，使用私有 MySQL 8.0.19+ 存储。它不实现 `Scheduler`，不能传给
+`Engine::with_scheduler(...)`，也不启动或停止 Worker。它负责 HTTP 边界、MySQL migration、Task、
+Trace Snapshot、Request 状态、Item、结算历史、Worker 观测和 Trace 统计。连接池使用 `READ COMMITTED`；
+namespace 与身份类列使用二进制 `utf8mb4_0900_bin` collation，保证 ID 与幂等 key 按字节区分。直接
+MySQL Scheduler 被明确排除：Worker 只连接 `Api`，只有 Master 持有数据库凭据。
+
+两套 API 使用独立的 Bearer 凭据，并且都必须带上配置的 namespace：
+
+| API | 凭据 | 职责 |
+| --- | --- | --- |
+| Worker API | Worker token | Scheduler 操作、Trace 读取、领取、ack、续租、结算、Item 提交和心跳 |
+| control API | control token | 发布 Task，以及只读观测 Task、Trace、Request、Worker 和 Item |
+
+Worker token 不能发布 Task；control token 也不是 Worker Scheduler 凭据。凭据和 Master 数据库 URL
+属于 Worker 本地或控制面部署配置，不会进入 Rules、Trace Snapshot、Request Snapshot、Payload 或 Item。
+Master 会在任何 JSON 或原始 body extractor 运行前，从 request parts 提取并校验对应凭据与 namespace。
+因此未认证的非法或超大 body 会先返回认证错误，不能进入请求体处理路径。
+
+API Worker 是有限生命周期的外部进程。`Api::open()` 会读取并校验 Master 的租约策略与公布的响应
+上限（默认 64 MiB）。`Api::with_max_response_bytes(...)` 在打开前设置 Worker 的接收容量；Master 通过
+`master::Config::with_max_api_bytes(...)` 或 `CRAWLER_MASTER_MAX_API_BYTES` 设置请求/响应上限。若 Master 上限
+大于本地容量，打开会被拒绝，因此 64 MiB 是默认值，不是整套拓扑的固定上限。第一次领取或待处理判断会
+登记传入的 `worker_id` 和支持的 mode；后续只在 mode 改变或心跳已过期时重写记录，Scheduler 关闭后
+停止心跳维护。client 的连接、读取、单次
+请求和整体重试都有明确 deadline，响应体以流式方式读入有上限的 buffer。activity gate 使 `Api::close()`
+先拒绝新调用并等待已经进入的调用，再停止心跳并清空 Worker 本地 operation key 与 Trace cache；不可变
+Trace cache 同时受 128 条和 64 MiB 限制。
+
+每次公开 claim/release 都生成新的幂等 key，只有该次调用内部的 HTTP 自动重试复用它。Init 与 Item
+提交则在同一任务的 Engine 外层重试期间保留未决逻辑操作 key，因为已经提交但响应不确定的 Item
+不能重复写入。明确成功或确定性错误会清除 key；未决 key 从首次创建起恰好五分钟后过期，复用不会滑动
+续期，达到 4096 条上限时拒绝新操作，不淘汰仍存活的操作。Master 要求
+`history_retention >= max(lease_timeout, 5m30s)`，使持久化的 operation 与 completion 重放记录覆盖该
+client 窗口。若当前没有 Tokio task 身份，每次 Init/Item 调用都会使用新 key，不进入这份未决操作存储。
+成功 `POST` 的响应若超过 client 上限，结果仍为 `Unavailable`，不会被误判为确定性失败；携带
+operation key 的调用会保留该 key 以供重放。
+
+Engine 继续按普通的能力范围 pending-work 规则退出；Master 只观察心跳，不监督这个 Engine 进程。
+心跳消失可以提前触发同一条恢复转换，但租约到期始终是通用恢复路径。
+
+Master Cron 是控制面维护，不是 Worker supervisor。每次 tick 会：
+
+1. 按配置的 recovery 上限，通过与正常 failure 相同的重试和终态规则恢复过期租约及 owner Worker
+   已离线的租约；
+2. 对配置的 dispatch 上限内的到期 Task 原子创建新的 `trace_id`、不可变 Trace Snapshot 和初始
+   Request，再推进周期 Task 的下次时间或将一次性 Task 标记完成；
+
+Task 发布只做 Rules/code seed 与 Snapshot 的静态校验。派发时 Cron 直接实例化保存的 Rules 或代码 seed
+并写入队列，不运行任何 Worker 的 `before_scheduler`、Middleware 或 Dedup 准入链路。
+派发尝试次数独立于成功 Trace 数量并受到固定上限约束。确定性损坏的持久化 Task 会先回滚，再在锁内
+确认数据未被并发修正，然后隔离为 `failed` 并通过 control API 暴露错误；后续到期 Task 仍会继续执行。
+重新发布修正后的定义会清除错误并恢复可调度状态；数据库等临时错误仍会终止当前 tick。
+
+控制面的保留期和清理上限会驱动终态 Request、completion 和 operation 历史的有上限清理。Item、
+Trace、Task 和 trace-stat 的保留仍是独立后续工作，不能被描述为已经自动清除。本版本没有持久化的
+Event/审计数据域；只有真正的人工动作能与状态转换在同一事务中写入时，才应新增该能力。
+
+每条新接受的 Request 都获得 namespace 内单调递增的 queue sequence。release、可重试 failure 和租约
+恢复把 Request 放回 pending 时会分配新 sequence，旧 Request 不会插回执行期间新任务的前面。恢复
+按稳定顺序且有批次上限；执行 version 已到 `i64::MAX` 的 Request 会隔离为 failed，不会永远留在
+pending；统计行按稳定 name 顺序加锁。
+Claim 会先校验持久化 Request 及其 Trace 归属，再取得租约时间；Trace 读取按 `trace_id` 缓存，响应大小
+增量计算。同一个响应对每个 `trace_id` 最多内嵌一次 Trace；若 `Request + Trace` 超限但 Request 本身可
+传输，则省略 Trace，由 Worker 通过 Trace 接口读取并缓存。只有 Request 自身也无法装入响应时才按超大
+坏数据隔离。
+
+control token 提供以下已实现接口。列表返回 `{"items":[...],"next_cursor":...}`，默认 50 条、最大
+200 条；keyset cursor 与 namespace、endpoint 和当前 filter 绑定。列表摘要不包含大字段。
+
+| 路由 | 返回内容 |
+| --- | --- |
+| `PUT /v1/control/tasks/{task_id}` | 校验并发布一条 Rules 或代码 seed Task |
+| `GET /v1/control/tasks[/{task_id}]` | Task 摘要列表或完整定义 |
+| `GET /v1/control/traces[/{trace_id}]` | Trace 摘要，或 Snapshot、统计和 Request 状态计数 |
+| `GET /v1/control/requests[/{request_id}]` | 执行摘要，或 Snapshot、失败 Worker、ack version 与最近 completion |
+| `GET /v1/control/workers` | Worker mode、心跳和计算出的在线状态 |
+| `GET /v1/control/items[/{row_id}]` | Item 摘要，或按内部行 ID 查询的数据 |
+
+除 Task 发布外，这套接口只负责观测，不提供 start、stop、pause、人工 requeue、replay 或 delete。
+
+Task 保存完整 Rules DSL 或序列化的代码 Request seeds，Master 从不持久化 Rust handler。代码 Worker
+通过自己部署的 Spider 注册表解析稳定 node。`Api::initializes_run()` 返回 `false`，因此远程代码
+Worker 不会创建本地 Trace 或调用 `Spider.start()`，只领取 Master 已派发的 Request。Browser 下载和
+`fasttrace` 运行期链路追踪仍是独立的后续工作，不改变这条边界。
 
 ## 7. 单条 Request 的完整生命周期
 
@@ -739,7 +845,19 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `contrib/src/scheduler/redis/settle.rs` | Redis ack、release、续租、success 与 failure 转换 |
 | `contrib/src/scheduler/redis/item.rs` | Redis Stream Item 提交与 Trace 元数据投影 |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | key 隔离、Lua 加载、边界校验和错误映射 |
-| `contrib/src/scheduler/{api,mysql}.rs` | 后续外部 Scheduler 边界 |
+| `contrib/src/scheduler/api/{contract,client,request,item,settle,worker,state,wire}.rs` | Worker 侧 API Scheduler 的合同映射、生命周期、有界 HTTP 传输、Trace cache、心跳和 wire 数据 |
+| `contrib/src/scheduler/api/client/response.rs` | 流式限制 Master 响应并映射传输大小错误 |
+| `contrib/src/scheduler/api/request/{claim,init,trace}.rs` | 将领取、运行初始化与不可变 Trace 读取映射到 Worker API |
+| `master/src/server.rs` | 管理 Axum 服务生命周期，并随服务启动/停止 Cron |
+| `master/src/server/cron.rs` | 协调有界 Cron 恢复、派发与清理 store 操作 |
+| `master/src/{routes,config,error,wire}.rs` | 路由组合、配置、错误 envelope 和私有 wire 合同 |
+| `master/src/routes/{worker,access,extract,response}.rs` 与 `master/src/routes/control/*.rs` | Worker/control 路由、body 提取前认证、有界输入和响应处理 |
+| `master/src/store/mysql/task.rs` | Task 与代码 seed 合同、静态校验和 Request 实例化 |
+| `master/src/store/mysql/task/{write,dispatch}.rs` | Task 持久化、有界 Cron seed 派发和确定性坏 Task 隔离 |
+| `master/src/routes/control.rs` 与 `master/src/control/*.rs` | control 路由、严格 query/response 数据、分页和 cursor 绑定 |
+| `master/src/store/mysql/request/{claim,lease,queue,recover,settle}.rs` | Request 领取、执行权转换、FIFO 分配、有界恢复和结算 |
+| `master/src/store/mysql/observe.rs` 与 `master/src/store/mysql/observe/{task,trace,request,worker,item}.rs` | Task、Trace、Request、Worker 和 Item 的只读投影 |
+| `master/src/store/mysql/{task,request,trace,item,worker,operation,validate,time}.rs` | 私有 MySQL 数据域入口、幂等、校验和时间辅助 |
 
 命名依赖模块上下文表达含义。例如 `request::State`、`memory::State`、`registry::Bind` 不重复附加模块名前缀；文件也不混入无关的解析、存储或控制面职责。
 
@@ -748,13 +866,14 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 ### 版本边界
 
 - v3：按 Worker 能力范围原子领取 Request；确定性响应字符集解码，以及基于 fixture 的更完整页面回归。这些合同均已实现。
-- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler，以及 Engine 级 Worker 本地 `ai::OpenAI` provider 注入均已实现。API、MySQL Scheduler、Master control-plane、可审计 Item 快照回放和 `fasttrace` 运行期链路追踪仍是独立工作。这些实现依赖核心 Scheduler 合同，不依赖 Browser 交付。
+- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler、Engine 级 Worker 本地 `ai::OpenAI` provider 注入、Worker 侧 API Scheduler，以及 Axum/MySQL Master 控制面均已实现。直接 MySQL Scheduler、可审计 Item 快照回放和 `fasttrace` 运行期链路追踪仍是独立工作。API Scheduler 与 Master 依赖核心 Scheduler 合同，不依赖 Browser 交付。
 - v5：真实 Browser Downloader、HTTP/browser 混合端到端 Engine 验收，以及独立的 Item 附件下载。附件下载和 Browser 下载是互不依赖的两个交付项；按能力领取的语义仍属于 v3 合同。
 
 这些能力必须沿用当前核心合同：
 
 - Scheduler 替换不能改变 Engine、Spider、Downloader、Middleware、Request、Response 或 Item 的业务形态；
-- Redis、API、MySQL 实现必须自行完成领取原子性、租约、续租、版本校验、重试、终态、Trace 读取和 Item 提交；所有提供租约的实现都必须在 Worker 仍在线时按租约到期恢复，offline Worker 只能提前触发同一回收，不得替代超时恢复；
+- Redis 与 API Scheduler 实现必须自行完成领取原子性、租约、续租、版本校验、重试、终态、Trace 读取和 Item 提交；所有提供租约的实现都必须在 Worker 仍在线时按租约到期恢复，offline Worker 只能提前触发同一回收，不得替代超时恢复；
+- Master 是控制面，不是 Scheduler：只有 `Api` 跨越 Engine 的 Scheduler 边界，Worker/control 凭据必须隔离，Master 私有 MySQL 不会暴露给 Worker；
 - Worker 能力筛选必须在 Scheduler 领取时原子完成，不能先领取不兼容 Request 再由 Downloader 丢弃；
 - Browser 必须实现现有 `Download` 合同，输出同一个 `Response` 模型；
 - `fasttrace` 的 span context 只用于运行期观测，不能替代业务 `task_id / trace_id`。
@@ -767,6 +886,8 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 - 不在 Engine 末尾批量提交整个 Trace 的 Items；
 - 不让 Item ID 承担业务去重；
 - Redis 单实例 Scheduler 不支持 Redis Cluster；Cluster 需要独立的 Scheduler 设计；
+- 不提供直接 MySQL Scheduler，也不向 Worker 暴露 Master 存储直连；
+- 不自动清理 Master 的 Item、Trace、Task 或 trace-stat 历史；当前有上限清理覆盖终态 Request、completion 和 operation；
 - 不下载 Item 附件；该能力尚未实现，已分配到独立的 v5 变更；
 - 不让核心 `spider` crate 依赖 `contrib` 或控制面实现。
 
@@ -781,7 +902,8 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 5. `success`、`failure`、`release`、`refresh_lease` 各自只表达一种状态语义。
 6. CSS Healing 和 AI 始终是独立、显式的选择能力。
 7. 字符解码不能改变 `Response.body`，所有响应文本消费者必须共用同一条确定性解码路径。
-8. 规划中的组件不能以占位文件或配置字段被描述为已实现能力。
+8. `master` 绝不能作为 Scheduler 传入 Engine；远程 Scheduler 边界只有 `contrib::scheduler::api::Api`，Worker/control 凭据不能互相替代。
+9. 规划中的组件不能以占位文件或配置字段被描述为已实现能力。
 
 ## 15. 相关文档
 

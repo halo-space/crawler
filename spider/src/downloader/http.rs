@@ -734,6 +734,7 @@ mod tests {
     #[tokio::test]
     async fn applies_request_timeout() {
         let (listener, base_url) = listener();
+        let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = read_request(&mut stream);
@@ -745,6 +746,7 @@ mod tests {
         request.timeout = Some(10);
 
         let error = Http::new().fetch(request).await.unwrap_err();
+        let _ = TcpStream::connect(address);
         server.join().unwrap();
 
         assert!(matches!(error, downloader::Error::Timeout));
