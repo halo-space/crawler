@@ -12,6 +12,27 @@ use spider::{downloader, engine, net, payload};
 #[path = "support/ai.rs"]
 mod ai;
 
+const FIXTURE_TASK: &str = "fixture-task";
+const FIXTURE_TRACE: &str = "fixture-trace";
+
+fn bound_request(url: impl Into<String>) -> net::Request {
+    let mut request = net::Request::follow(url).unwrap();
+    request.task_id = FIXTURE_TASK.to_string();
+    request.trace_id = FIXTURE_TRACE.to_string();
+    request
+}
+
+async fn init_run(scheduler: &impl Init) {
+    scheduler
+        .init(
+            FIXTURE_TRACE.to_string(),
+            spider::trace::Snapshot::code(FIXTURE_TASK),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+}
+
 #[macros::spider]
 struct RulesSpider;
 
@@ -845,9 +866,8 @@ async fn code_parse_retry_reuses_the_emitted_request_id() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(pushed_requests.clone(), records);
     let attempts = Arc::new(AtomicUsize::new(0));
-    let request = net::Request::follow("https://example.com/source")
-        .unwrap()
-        .with_retry(1, [0]);
+    init_run(&scheduler.inner).await;
+    let request = bound_request("https://example.com/source").with_retry(1, [0]);
     scheduler
         .inner
         .push(payload::Payload::new().requests(vec![request]))
@@ -2942,7 +2962,8 @@ async fn engine_open_closes_prior_resources_when_store_open_fails() {
 #[tokio::test]
 async fn executor_completes_current_request() {
     let scheduler = spider::Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    init_run(&scheduler).await;
+    let request = bound_request("https://example.com");
 
     scheduler
         .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))
@@ -3244,8 +3265,9 @@ async fn spider_macro_keeps_user_business_fields_and_injects_tx() {
 async fn engine_records_failed_request_and_continues_other_requests() {
     let spider = TestSpider::new();
     let scheduler = spider::Memory::new();
-    let failed = net::Request::follow("https://example.com/fail").unwrap();
-    let ok = net::Request::follow("https://example.com/ok").unwrap();
+    init_run(&scheduler).await;
+    let failed = bound_request("https://example.com/fail");
+    let ok = bound_request("https://example.com/ok");
 
     scheduler
         .push(payload::Payload::for_request(&failed, "worker-1").requests(vec![failed, ok]))
@@ -3272,9 +3294,10 @@ async fn engine_records_failed_request_and_continues_other_requests() {
 async fn engine_concurrency_controls_concurrent_requests() {
     let spider = EmptySpider::new();
     let scheduler = spider::Memory::new();
+    init_run(&scheduler).await;
     let requests = vec![
-        net::Request::follow("https://example.com/1").unwrap(),
-        net::Request::follow("https://example.com/2").unwrap(),
+        bound_request("https://example.com/1"),
+        bound_request("https://example.com/2"),
     ];
 
     scheduler
@@ -3307,10 +3330,9 @@ async fn engine_concurrency_controls_concurrent_requests() {
 async fn engine_refreshes_the_lease_while_a_request_is_running() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = LifecycleScheduler::new(calls);
+    init_run(&scheduler).await;
     scheduler
-        .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/slow").unwrap(),
-        ]))
+        .push(payload::Payload::new().requests(vec![bound_request("https://example.com/slow")]))
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -3333,10 +3355,9 @@ async fn engine_refreshes_the_lease_while_a_request_is_running() {
 async fn slow_lease_refresh_does_not_pause_request_execution() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = LifecycleScheduler::new(calls).block_refresh();
+    init_run(&scheduler).await;
     scheduler
-        .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/slow").unwrap(),
-        ]))
+        .push(payload::Payload::new().requests(vec![bound_request("https://example.com/slow")]))
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -3362,10 +3383,9 @@ async fn slow_lease_refresh_does_not_pause_request_execution() {
 async fn transient_refresh_errors_are_retried_before_the_lease_expires() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = LifecycleScheduler::new(calls).transient_refreshes(2);
+    init_run(&scheduler).await;
     scheduler
-        .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/slow").unwrap(),
-        ]))
+        .push(payload::Payload::new().requests(vec![bound_request("https://example.com/slow")]))
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -3390,10 +3410,11 @@ async fn lease_is_refreshed_until_completion_finishes() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler =
         LifecycleScheduler::new(calls).delay_completion(std::time::Duration::from_millis(50));
+    init_run(&scheduler).await;
     scheduler
-        .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/completion").unwrap(),
-        ]))
+        .push(
+            payload::Payload::new().requests(vec![bound_request("https://example.com/completion")]),
+        )
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -3413,10 +3434,9 @@ async fn lease_is_refreshed_until_completion_finishes() {
 async fn engine_does_not_settle_after_lease_refresh_is_rejected() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = LifecycleScheduler::new(calls).reject_refresh();
+    init_run(&scheduler).await;
     scheduler
-        .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/slow").unwrap(),
-        ]))
+        .push(payload::Payload::new().requests(vec![bound_request("https://example.com/slow")]))
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -3524,9 +3544,10 @@ async fn rejected_requests_only_fail_current_request_and_keep_consuming() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(requests, records.clone()).reject_emitted();
-    let failed = net::Request::follow("https://example.com/push-fail").unwrap();
+    init_run(&scheduler).await;
+    let failed = bound_request("https://example.com/push-fail");
     let failed_id = failed.id.clone();
-    let ok = net::Request::follow("https://example.com/ok").unwrap();
+    let ok = bound_request("https://example.com/ok");
     let ok_id = ok.id.clone();
     scheduler
         .push(payload::Payload::new().requests(vec![failed, ok]))
@@ -3570,10 +3591,11 @@ async fn rejected_items_only_fail_current_request_and_keep_consuming() {
     let scheduler = RecordingScheduler::new(requests, records.clone());
     let store = RecordingStore::new(pushed_items.clone()).reject();
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let mut failed = net::Request::follow("https://example.com/item-fail").unwrap();
+    init_run(&scheduler).await;
+    let mut failed = bound_request("https://example.com/item-fail");
     failed.middlewares = vec![lifecycle_spec("error_parse")];
     let failed_id = failed.id.clone();
-    let ok = net::Request::follow("https://example.com/ok").unwrap();
+    let ok = bound_request("https://example.com/ok");
     let ok_id = ok.id.clone();
     scheduler
         .push(payload::Payload::new().requests(vec![failed, ok]))
@@ -3621,9 +3643,10 @@ async fn rejected_items_only_fail_current_request_and_keep_consuming() {
 #[tokio::test]
 async fn independent_items_run_concurrently() {
     let scheduler = spider::Memory::new();
+    init_run(&scheduler).await;
     let requests = vec![
-        net::Request::follow("https://example.com/item-fail").unwrap(),
-        net::Request::follow("https://example.com/item-fail").unwrap(),
+        bound_request("https://example.com/item-fail"),
+        bound_request("https://example.com/item-fail"),
     ];
     scheduler
         .push(payload::Payload::new().requests(requests))
@@ -3653,10 +3676,11 @@ async fn engine_retries_transient_success_error_without_reexecution() {
         claim_calls: AtomicUsize::new(0),
         delay_second_claim: false,
     };
+    init_run(&scheduler).await;
     scheduler
         .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/one").unwrap(),
-            net::Request::follow("https://example.com/two").unwrap(),
+            bound_request("https://example.com/one"),
+            bound_request("https://example.com/two"),
         ]))
         .await
         .unwrap();
@@ -3692,10 +3716,9 @@ async fn engine_retries_the_same_success_payload_after_a_lost_response() {
         claim_calls: AtomicUsize::new(0),
         delay_second_claim: false,
     };
+    init_run(&scheduler).await;
     scheduler
-        .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/one").unwrap(),
-        ]))
+        .push(payload::Payload::new().requests(vec![bound_request("https://example.com/one")]))
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -3735,7 +3758,8 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
         claim_calls: AtomicUsize::new(0),
         delay_second_claim: false,
     };
-    let mut request = net::Request::follow("https://example.com/retry").unwrap();
+    init_run(&scheduler).await;
+    let mut request = bound_request("https://example.com/retry");
     request.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -3761,7 +3785,7 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
     assert_eq!(engine.scheduler().inner.failed_len(), 0);
     assert_eq!(engine.scheduler().inner.queued_len(), 0);
     assert_eq!(engine.scheduler().inner.processing_len(), 0);
-    let stats = engine.scheduler().inner.trace_stats("");
+    let stats = engine.scheduler().inner.trace_stats(FIXTURE_TRACE);
     assert_eq!(stats["index"].total, 2);
     assert_eq!(stats["index"].done, 1);
     assert_eq!(stats["index"].download, 1);
@@ -3779,10 +3803,11 @@ async fn claim_returning_after_a_request_error_still_executes_its_request() {
         claim_calls: AtomicUsize::new(0),
         delay_second_claim: true,
     };
+    init_run(&scheduler).await;
     scheduler
         .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/one").unwrap(),
-            net::Request::follow("https://example.com/two").unwrap(),
+            bound_request("https://example.com/one"),
+            bound_request("https://example.com/two"),
         ]))
         .await
         .unwrap();

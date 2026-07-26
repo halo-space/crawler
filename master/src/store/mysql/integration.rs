@@ -12,6 +12,7 @@ mod queue;
 mod schema;
 mod stats;
 mod task;
+mod trace;
 mod worker;
 
 type Result<T> = std::result::Result<T, Box<dyn StdError>>;

@@ -144,6 +144,8 @@ async fn independent_release_invocations_use_fresh_keys() {
     api.open().await.unwrap();
     let mut request = net::Request::follow("https://example.com").unwrap();
     request.id = "request-1".to_string();
+    request.task_id = "task-1".to_string();
+    request.trace_id = "trace-1".to_string();
     request.version = 1;
     let mut payload = payload::Payload::for_request(&request, "worker-1");
     payload.state = net::State::Processing;

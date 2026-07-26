@@ -14,7 +14,8 @@ async fn versions_and_stats_remain_exact_above_lua_safe_integers() {
     };
     let namespace = server::namespace("integers");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     scheduler
         .init(
@@ -102,7 +103,8 @@ async fn fifo_sequence_remains_exact_above_lua_safe_integers() {
     };
     let namespace = server::namespace("sequence");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
     let mut connection = server.connection().await;
     redis::cmd("HSET")
         .arg(format!("{namespace}:meta"))
@@ -153,13 +155,14 @@ async fn fifo_sequence_remains_exact_above_lua_safe_integers() {
 }
 
 #[tokio::test]
-async fn stats_overflow_fails_without_partial_settlement() {
+async fn success_stats_overflow_names_the_counter_without_partial_settlement() {
     let Some(server) = server::Handle::connect().await else {
         return;
     };
     let namespace = server::namespace("stats-overflow");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
     scheduler
         .init(
             "overflow-trace".to_string(),
@@ -200,6 +203,15 @@ async fn stats_overflow_fails_without_partial_settlement() {
         .query_async::<HashMap<String, String>>(&mut connection)
         .await
         .unwrap();
+    let processing_key = key::processing(&namespace, "http");
+    let request_token = key::token("overflow-request");
+    let before_lease = redis::cmd("ZSCORE")
+        .arg(&processing_key)
+        .arg(&request_token)
+        .query_async::<Option<String>>(&mut connection)
+        .await
+        .unwrap();
+    assert!(before_lease.is_some());
 
     let mut overflow = settlement::success(&claimed);
     overflow.stats.insert(
@@ -213,6 +225,10 @@ async fn stats_overflow_fails_without_partial_settlement() {
     );
     let error = scheduler.success(&overflow).await.unwrap_err();
     assert!(!error.is_transient());
+    assert_eq!(
+        error.to_string(),
+        "scheduler error: stats counter overflow: parse.done"
+    );
 
     let after = redis::cmd("HGETALL")
         .arg(&stats_key)
@@ -227,6 +243,13 @@ async fn stats_overflow_fails_without_partial_settlement() {
         .await
         .unwrap();
     assert_eq!(state, "processing");
+    let after_lease = redis::cmd("ZSCORE")
+        .arg(&processing_key)
+        .arg(&request_token)
+        .query_async::<Option<String>>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(after_lease, before_lease);
     let completion_exists = redis::cmd("EXISTS")
         .arg(key::completion(
             &namespace,
@@ -247,13 +270,155 @@ async fn stats_overflow_fails_without_partial_settlement() {
 }
 
 #[tokio::test]
+async fn failure_stats_overflow_names_the_counter_without_partial_settlement() {
+    let Some(server) = server::Handle::connect().await else {
+        return;
+    };
+    let namespace = server::namespace("failure-stats-overflow");
+    let scheduler = server.redis(&namespace);
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
+    let mut request = request::for_trace(
+        "failure-overflow-request",
+        "https://example.com/failure-overflow",
+        "failure-overflow-task",
+        "failure-overflow-trace",
+    );
+    request.max_retry_count = 2;
+    scheduler
+        .init(
+            "failure-overflow-trace".to_string(),
+            trace::Snapshot::code("failure-overflow-task"),
+            vec![request],
+        )
+        .await
+        .unwrap();
+    let claimed = scheduler
+        .next_requests(1, worker::A, worker::HTTP)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    scheduler
+        .ack(&settlement::processing(&claimed))
+        .await
+        .unwrap();
+
+    let mut connection = server.connection().await;
+    let stats_key = key::stats(&namespace, "failure-overflow-trace");
+    redis::cmd("HSET")
+        .arg(&stats_key)
+        .arg("parse.total")
+        .arg(41)
+        .arg("parse.download")
+        .arg(i64::MAX)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    let request_key = key::request(&namespace, "failure-overflow-request");
+    let completion_key = key::completion(&namespace, "failure-overflow-request", claimed.version);
+    let failed_workers_key = format!("{request_key}:failed_workers");
+    let ready_key = format!("{namespace}:queue:http:ready");
+    let ready_events_key = format!("{namespace}:ready_events:http");
+    let meta_key = format!("{namespace}:meta");
+    let processing_key = key::processing(&namespace, "http");
+    let before_stats = redis::cmd("HGETALL")
+        .arg(&stats_key)
+        .query_async::<HashMap<String, String>>(&mut connection)
+        .await
+        .unwrap();
+    let before_request = redis::cmd("HGETALL")
+        .arg(&request_key)
+        .query_async::<HashMap<String, String>>(&mut connection)
+        .await
+        .unwrap();
+    let before_sequence = redis::cmd("HGET")
+        .arg(&meta_key)
+        .arg("enqueue_sequence")
+        .query_async::<Option<String>>(&mut connection)
+        .await
+        .unwrap();
+
+    let mut overflow =
+        payload::Payload::for_request(&claimed, claimed.leased_by.clone()).failed("failed");
+    overflow.start_time = Some(1);
+    overflow.end_time = Some(2);
+    overflow.stats.insert(
+        "parse".to_string(),
+        serde_json::to_value(stats::Counter {
+            total: 3,
+            download: 1,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let error = scheduler.failure(&overflow).await.unwrap_err();
+    assert!(!error.is_transient());
+    assert_eq!(
+        error.to_string(),
+        "scheduler error: stats counter overflow: parse.download"
+    );
+
+    let after_stats = redis::cmd("HGETALL")
+        .arg(&stats_key)
+        .query_async::<HashMap<String, String>>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(after_stats, before_stats);
+    let after_request = redis::cmd("HGETALL")
+        .arg(&request_key)
+        .query_async::<HashMap<String, String>>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(after_request, before_request);
+    let after_sequence = redis::cmd("HGET")
+        .arg(&meta_key)
+        .arg("enqueue_sequence")
+        .query_async::<Option<String>>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(after_sequence, before_sequence);
+    for key in [&completion_key, &failed_workers_key] {
+        let exists = redis::cmd("EXISTS")
+            .arg(key)
+            .query_async::<usize>(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0);
+    }
+    for key in [&ready_key, &ready_events_key] {
+        let queued = redis::cmd("ZCARD")
+            .arg(key)
+            .query_async::<usize>(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0);
+    }
+    let processing = redis::cmd("ZSCORE")
+        .arg(&processing_key)
+        .arg(key::token("failure-overflow-request"))
+        .query_async::<Option<f64>>(&mut connection)
+        .await
+        .unwrap();
+    assert!(processing.is_some());
+
+    scheduler
+        .success(&settlement::success(&claimed))
+        .await
+        .unwrap();
+    scheduler.close().await.unwrap();
+    server.clear(&namespace).await;
+}
+
+#[tokio::test]
 async fn request_version_overflow_records_a_terminal_failure() {
     let Some(server) = server::Handle::connect().await else {
         return;
     };
     let namespace = server::namespace("version-overflow");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
     scheduler
         .push(payload::Payload::new().requests(vec![request::new(
             "version-overflow-request",

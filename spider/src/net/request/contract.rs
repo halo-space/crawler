@@ -275,14 +275,18 @@ impl Request {
     }
 
     /// Validates the execution fields required for a newly scheduled Request.
+    ///
+    /// [`Request::follow`] creates an unbound Request. The Engine must attach its task and Trace
+    /// identities before this scheduling boundary is validated.
     pub fn validate_initial(&self) -> Result<(), String> {
         if self.id.is_empty() {
             return Err("new Request id must not be empty".to_string());
         }
-        if self.task_id.is_empty() != self.trace_id.is_empty() {
-            return Err(
-                "new Request task_id and trace_id must both be set or both be empty".to_string(),
-            );
+        if self.task_id.is_empty() {
+            return Err("new Request task_id must not be empty".to_string());
+        }
+        if self.trace_id.is_empty() {
+            return Err("new Request trace_id must not be empty".to_string());
         }
         if self.version != 0 {
             return Err("new Request version must be 0".to_string());
@@ -410,10 +414,22 @@ mod tests {
         let request = Request::follow("https://example.com").unwrap();
 
         assert_eq!(request.node_key(), "index");
+        assert!(request.task_id.is_empty());
+        assert!(request.trace_id.is_empty());
         assert_eq!(request.method, Method::Get);
         assert_eq!(request.mode, Mode::Http);
         let id = uuid::Uuid::parse_str(request.id.strip_prefix("req_").unwrap()).unwrap();
         assert_eq!(id.get_version(), Some(uuid::Version::SortRand));
+    }
+
+    #[test]
+    fn initial_validation_rejects_an_unbound_follow_request() {
+        let request = Request::follow("https://example.com").unwrap();
+
+        assert_eq!(
+            request.validate_initial(),
+            Err("new Request task_id must not be empty".to_string())
+        );
     }
 
     #[test]
@@ -474,14 +490,14 @@ mod tests {
                 "new Request id must not be empty",
             ),
             (
-                "task without trace",
-                |request| request.task_id = "task-1".to_string(),
-                "new Request task_id and trace_id must both be set or both be empty",
+                "empty task",
+                |request| request.task_id.clear(),
+                "new Request task_id must not be empty",
             ),
             (
-                "trace without task",
-                |request| request.trace_id = "trace-1".to_string(),
-                "new Request task_id and trace_id must both be set or both be empty",
+                "empty trace",
+                |request| request.trace_id.clear(),
+                "new Request trace_id must not be empty",
             ),
             (
                 "positive version",
@@ -551,6 +567,8 @@ mod tests {
 
         for (name, mutate, expected) in cases {
             let mut request = Request::follow("https://example.com").unwrap();
+            request.task_id = "task-1".to_string();
+            request.trace_id = "trace-1".to_string();
             mutate(&mut request);
 
             let error = request.validate_initial().expect_err(name);

@@ -36,16 +36,19 @@ fn operation_digest_ignores_map_insertion_order_recursively() {
 
 #[test]
 fn new_snapshot_requires_initial_execution_state() {
-    let request = spider::net::Request::follow("https://example.com/article")
+    let mut request = spider::net::Request::follow("https://example.com/article")
         .unwrap()
         .node("detail");
+    request.task_id = "task-a".to_string();
+    request.trace_id = "trace-a".to_string();
     let mut snapshot = spider::net::request::Snapshot::try_from(request).unwrap();
+    let trace = spider::trace::Snapshot::code("task-a");
 
-    assert!(validate_new_snapshot(&snapshot, None).is_ok());
+    assert!(validate_new_snapshot(&snapshot, &trace).is_ok());
 
     snapshot.version = 1;
     assert!(
-        validate_new_snapshot(&snapshot, None)
+        validate_new_snapshot(&snapshot, &trace)
             .unwrap_err()
             .to_string()
             .contains("new Request Snapshot version must be 0")
@@ -63,8 +66,8 @@ fn traced_snapshot_must_restore_against_its_trace() {
     let trace = spider::trace::Snapshot::code("task-a");
     let other = spider::trace::Snapshot::code("task-b");
 
-    assert!(validate_new_snapshot(&snapshot, Some(&trace)).is_ok());
-    assert!(validate_new_snapshot(&snapshot, Some(&other)).is_err());
+    assert!(validate_new_snapshot(&snapshot, &trace).is_ok());
+    assert!(validate_new_snapshot(&snapshot, &other).is_err());
 }
 
 #[test]

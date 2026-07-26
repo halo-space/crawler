@@ -67,7 +67,10 @@ local function merged_stats()
             local index = indexes[name]
             local current = index and values[index][2] or (redis.call('HGET', stats_key, name) or '0')
             local merged, error = add_counter(current, counter[field])
-            if not merged then return nil, error end
+            if not merged then
+                if error == 'STATS_OVERFLOW' then return nil, error .. ':' .. name end
+                return nil, error
+            end
             if index then
                 values[index][2] = merged
             else

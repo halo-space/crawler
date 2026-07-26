@@ -12,6 +12,7 @@ mod redis {
     mod processing;
     mod ready;
     mod request;
+    mod run;
     mod server;
     mod settlement;
     mod worker;

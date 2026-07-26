@@ -12,6 +12,27 @@ use spider::{downloader, engine, net, payload};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
+const FIXTURE_TASK: &str = "v1-main-path-fixture";
+const FIXTURE_TRACE: &str = "v1-main-path-trace";
+
+fn bound_request(url: impl Into<String>) -> net::Request {
+    let mut request = net::Request::follow(url).unwrap();
+    request.task_id = FIXTURE_TASK.to_string();
+    request.trace_id = FIXTURE_TRACE.to_string();
+    request
+}
+
+async fn init_run(scheduler: &impl Init) {
+    scheduler
+        .init(
+            FIXTURE_TRACE.to_string(),
+            spider::trace::Snapshot::code(FIXTURE_TASK),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+}
+
 #[derive(Clone, Debug)]
 struct PayloadRecord {
     id: String,
@@ -613,7 +634,8 @@ async fn snapshot_files(runtime_dir: &Path, task_id: &str) -> Vec<PathBuf> {
 async fn payload_contains_request_and_item_stats() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records.clone());
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    init_run(&scheduler).await;
+    let mut request = bound_request("https://example.com");
     request.id = "stats-success".to_string();
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -643,10 +665,11 @@ async fn payload_contains_request_and_item_stats() {
 async fn default_validate_filters_response_before_parse_and_records_stats() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records.clone());
+    init_run(&scheduler).await;
     scheduler
-        .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/not-found").unwrap(),
-        ]))
+        .push(
+            payload::Payload::new().requests(vec![bound_request("https://example.com/not-found")]),
+        )
         .await
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -671,9 +694,8 @@ async fn download_retry_recovers_without_recording_final_download_failure() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records.clone());
     let attempts = Arc::new(AtomicUsize::new(0));
-    let request = net::Request::follow("https://example.com")
-        .unwrap()
-        .with_retry(2, [0, 0]);
+    init_run(&scheduler).await;
+    let request = bound_request("https://example.com").with_retry(2, [0, 0]);
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -700,11 +722,9 @@ async fn download_retry_recovers_without_recording_final_download_failure() {
 async fn final_download_failure_records_download_stats() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records.clone());
+    init_run(&scheduler).await;
     scheduler
-        .push(
-            payload::Payload::new()
-                .requests(vec![net::Request::follow("https://example.com").unwrap()]),
-        )
+        .push(payload::Payload::new().requests(vec![bound_request("https://example.com")]))
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -750,11 +770,9 @@ async fn dedup_skips_duplicate_request_and_memory_accumulates_stats() {
 async fn item_validate_skip_does_not_fail_current_request() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records.clone());
+    init_run(&scheduler).await;
     scheduler
-        .push(
-            payload::Payload::new()
-                .requests(vec![net::Request::follow("https://example.com").unwrap()]),
-        )
+        .push(payload::Payload::new().requests(vec![bound_request("https://example.com")]))
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -777,11 +795,9 @@ async fn item_validate_skip_does_not_fail_current_request() {
 async fn request_validate_skip_does_not_fail_current_request() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records.clone());
+    init_run(&scheduler).await;
     scheduler
-        .push(
-            payload::Payload::new()
-                .requests(vec![net::Request::follow("https://example.com").unwrap()]),
-        )
+        .push(payload::Payload::new().requests(vec![bound_request("https://example.com")]))
         .await
         .unwrap();
     let mut engine = engine::Builder::new()
@@ -806,9 +822,8 @@ async fn parse_retry_reinvokes_handler_until_it_succeeds() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records.clone());
     let attempts = Arc::new(AtomicUsize::new(0));
-    let request = net::Request::follow("https://example.com")
-        .unwrap()
-        .with_retry(2, [0, 0]);
+    init_run(&scheduler).await;
+    let request = bound_request("https://example.com").with_retry(2, [0, 0]);
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await

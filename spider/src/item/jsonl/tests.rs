@@ -197,7 +197,7 @@ async fn empty_submission_is_a_no_op() {
 }
 
 #[tokio::test]
-async fn rejects_empty_task_and_framework_ids_without_writing() {
+async fn rejects_empty_run_and_framework_ids_without_writing() {
     let dir = temp_dir();
     let store = Jsonl::with_dir(&dir);
     store.open().await.unwrap();
@@ -206,6 +206,11 @@ async fn rejects_empty_task_and_framework_ids_without_writing() {
     missing_task.task_id.clear();
     let error = store.submit(&missing_task).await.unwrap_err();
     assert!(error.to_string().contains("task id"));
+
+    let mut missing_trace = payload(vec![item("item-1", 1)]);
+    missing_trace.trace_id.clear();
+    let error = store.submit(&missing_trace).await.unwrap_err();
+    assert!(error.to_string().contains("trace id"));
 
     let error = store.submit(&payload(vec![item("", 1)])).await.unwrap_err();
     assert!(error.to_string().contains("framework Item ID"));

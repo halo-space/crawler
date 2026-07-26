@@ -12,7 +12,10 @@ pub trait Execute: Send + Sync {
     }
 
     /// 返回当前 Request 所属爬虫允许访问的域名。
-    fn allowed_domains(&self, request: &net::Request) -> impl Future<Output = Vec<String>> + Send;
+    fn allowed_domains(
+        &self,
+        request: &net::Request,
+    ) -> impl Future<Output = Result<Vec<String>, crate::Error>> + Send;
 
     /// 在下载前校验当前 Request 是否能由本执行器处理。
     fn validate(&self, request: &net::Request) -> Result<(), crate::Error>;

@@ -14,7 +14,8 @@ async fn push_rejects_a_wrong_type_index_before_writing() {
     };
     let namespace = server::namespace("processing-push-type");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let browser = key::processing(&namespace, "browser");
     let mut connection = server.connection().await;
@@ -52,7 +53,8 @@ async fn indices_are_mode_scoped_and_removed_on_settlement() {
     };
     let namespace = server::namespace("processing-modes");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let http = request::new("processing-http", "https://example.com/http");
     let mut browser = request::new("processing-browser", "https://example.com/browser");
@@ -163,7 +165,8 @@ async fn refresh_restores_the_index_and_updates_its_lease_score() {
     };
     let namespace = server::namespace("processing-refresh");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     scheduler
         .push(payload::Payload::new().requests(vec![request::new(
@@ -265,7 +268,8 @@ async fn expired_processing_score_recovers_the_request() {
     };
     let namespace = server::namespace("processing-expiry");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut original = request::new(
         "expired-processing",
@@ -337,7 +341,8 @@ async fn claim_removes_orphans_and_repairs_a_request_in_the_wrong_mode_index() {
     };
     let namespace = server::namespace("processing-repair");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let http_index = key::processing(&namespace, "http");
     let browser_index = key::processing(&namespace, "browser");
@@ -451,7 +456,8 @@ async fn expired_recovery_limit_is_shared_across_modes() {
     };
     let namespace = server::namespace("processing-recovery-limit");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut requests = Vec::with_capacity(PER_MODE * 2);
     for index in 0..PER_MODE {
@@ -526,7 +532,8 @@ async fn opposite_mode_type_errors_do_not_partially_refresh_or_settle() {
     };
     let namespace = server::namespace("processing-opposite-type");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     scheduler
         .push(payload::Payload::new().requests(vec![request::new(

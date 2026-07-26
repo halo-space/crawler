@@ -10,7 +10,7 @@ use super::MySql;
 use super::operation;
 use super::time::now_millis;
 use super::trace;
-use super::validate::{identifier, namespace as validate_namespace};
+use super::validate::{identifier, identity as validate_identity, namespace as validate_namespace};
 use crate::{Error, types};
 
 mod claim;
@@ -69,13 +69,6 @@ struct Stored {
 impl MySql {
     pub(crate) async fn push(&self, namespace: &str, body: &types::Push) -> Result<(), Error> {
         validate_namespace(namespace)?;
-        let mut tx = self.pool.begin().await?;
-        if !body.context.id.is_empty() {
-            let request = load(&mut tx, namespace, &body.context.id).await?;
-            verify_ownership(&request, &body.context)?;
-            validate_processing(&request)?;
-            verify_lease(&request, self.lease_timeout_ms)?;
-        }
         for request in &body.requests {
             if (!body.context.task_id.is_empty() && request.task_id != body.context.task_id)
                 || (!body.context.trace_id.is_empty() && request.trace_id != body.context.trace_id)
@@ -86,7 +79,33 @@ impl MySql {
                 )));
             }
         }
-        insert(&mut tx, namespace, &body.requests, false).await?;
+        let mut tx = self.pool.begin().await?;
+        let requests = plan(&mut tx, namespace, &body.requests).await?;
+        if requests.is_empty() {
+            tx.commit().await?;
+            return Ok(());
+        }
+        let parent = if body.context.id.is_empty() {
+            None
+        } else {
+            identifier(&body.context.id, "request id")?;
+            Some(load(&mut tx, namespace, &body.context.id).await?)
+        };
+        let requests = recheck(&mut tx, namespace, requests).await?;
+        if requests.is_empty() {
+            tx.commit().await?;
+            return Ok(());
+        }
+        if let Some(parent) = parent {
+            validate_identity(&body.context)?;
+            verify_ownership(&parent, &body.context)?;
+            validate_processing(&parent)?;
+            verify_lease(&parent, self.lease_timeout_ms)?;
+            if parent.ack_version != Some(body.context.version) {
+                return Err(Error::NotAcknowledged(body.context.id.clone()));
+            }
+        }
+        write(&mut tx, namespace, requests).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -103,22 +122,32 @@ pub(super) async fn insert_values(
         .map(spider::net::request::Snapshot::try_from)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|message| Error::Invalid(format!("invalid Request Snapshot: {message}")))?;
-    insert(tx, namespace, &snapshots, false).await
+    insert(tx, namespace, &snapshots).await
 }
 
 pub(super) async fn insert(
     tx: &mut Transaction<'_, SqlxMySql>,
     namespace: &str,
     requests: &[spider::net::request::Snapshot],
-    require_trace: bool,
 ) -> Result<(), Error> {
+    let requests = plan(tx, namespace, requests).await?;
+    let requests = recheck(tx, namespace, requests).await?;
+    write(tx, namespace, requests).await
+}
+
+type Candidate<'a> = (usize, &'a spider::net::request::Snapshot, String);
+
+async fn plan<'a>(
+    tx: &mut Transaction<'_, SqlxMySql>,
+    namespace: &str,
+    requests: &'a [spider::net::request::Snapshot],
+) -> Result<Vec<Candidate<'a>>, Error> {
     // Validate Request IDs in a stable order. The eventual writes return to the caller's order,
     // which defines FIFO within one submission.
     let mut ordered = requests.iter().enumerate().collect::<Vec<_>>();
     ordered.sort_unstable_by(|(_, left), (_, right)| left.id.cmp(&right.id));
     let mut seen = HashSet::with_capacity(requests.len());
-    let mut traces = HashMap::<String, Arc<spider::trace::Snapshot>>::new();
-    let mut planned = Vec::with_capacity(requests.len());
+    let mut checked = Vec::with_capacity(requests.len());
     for (position, snapshot) in ordered {
         if !seen.insert(snapshot.id.clone()) {
             return Err(Error::Invalid(format!(
@@ -126,34 +155,6 @@ pub(super) async fn insert(
                 snapshot.id
             )));
         }
-        let trace = if snapshot.trace_id.is_empty() {
-            if require_trace {
-                return Err(Error::Invalid(format!(
-                    "Request Snapshot requires a Trace Snapshot: {}",
-                    snapshot.id
-                )));
-            }
-            None
-        } else if let Some(trace) = traces.get(&snapshot.trace_id) {
-            Some(Arc::clone(trace))
-        } else {
-            let trace = trace::load(tx, namespace, &snapshot.trace_id)
-                .await?
-                .ok_or_else(|| Error::TraceNotFound(snapshot.trace_id.clone()))?;
-            let trace = Arc::new(trace);
-            traces.insert(snapshot.trace_id.clone(), Arc::clone(&trace));
-            Some(trace)
-        };
-        if trace
-            .as_deref()
-            .is_some_and(|trace| trace.task_id != snapshot.task_id)
-        {
-            return Err(Error::Identity {
-                id: snapshot.id.clone(),
-                field: "task_id",
-            });
-        }
-        validate_new_snapshot(snapshot, trace.as_deref())?;
         let snapshot_digest = operation::hex(
             &snapshot
                 .digest()
@@ -166,27 +167,58 @@ pub(super) async fn insert(
         .bind(&snapshot.id)
         .fetch_optional(&mut **tx)
         .await?;
-        if let Some(existing) = existing {
-            if existing != snapshot_digest {
-                return Err(Error::Conflict(format!(
-                    "Request Snapshot conflicts with existing request {}",
-                    snapshot.id
-                )));
-            }
-            continue;
+        if existing
+            .as_ref()
+            .is_some_and(|existing| existing != &snapshot_digest)
+        {
+            return Err(Error::Conflict(format!(
+                "Request Snapshot conflicts with existing request {}",
+                snapshot.id
+            )));
         }
-        planned.push((position, snapshot, snapshot_digest));
+        checked.push((position, snapshot, snapshot_digest, existing.is_none()));
     }
 
-    if planned.is_empty() {
-        return Ok(());
+    let mut traces = HashMap::<String, Arc<spider::trace::Snapshot>>::new();
+    for (_, snapshot, _, _) in &checked {
+        let trace = if let Some(trace) = traces.get(&snapshot.trace_id) {
+            Arc::clone(trace)
+        } else {
+            let trace = trace::load(tx, namespace, &snapshot.trace_id).await?;
+            let trace = Arc::new(trace);
+            traces.insert(snapshot.trace_id.clone(), Arc::clone(&trace));
+            trace
+        };
+        if trace.task_id != snapshot.task_id {
+            return Err(Error::Identity {
+                id: snapshot.id.clone(),
+                field: "task_id",
+            });
+        }
+        validate_new_snapshot(snapshot, &trace)?;
     }
 
+    Ok(checked
+        .into_iter()
+        .filter_map(|(position, snapshot, digest, missing)| {
+            missing.then_some((position, snapshot, digest))
+        })
+        .collect())
+}
+
+async fn recheck<'a>(
+    tx: &mut Transaction<'_, SqlxMySql>,
+    namespace: &str,
+    requests: Vec<Candidate<'a>>,
+) -> Result<Vec<Candidate<'a>>, Error> {
+    if requests.is_empty() {
+        return Ok(requests);
+    }
     // The per-namespace counter serializes the current-read recheck with all framework Request
     // inserts. This avoids missing-row gap locks while preserving atomic conflict detection.
     queue::lock(tx, namespace).await?;
-    let mut ready = Vec::with_capacity(planned.len());
-    for candidate in planned {
+    let mut ready = Vec::with_capacity(requests.len());
+    for candidate in requests {
         let (_, snapshot, snapshot_digest) = &candidate;
         let existing = sqlx::query_scalar::<_, String>(
             "SELECT snapshot_digest FROM requests WHERE namespace = ? AND id = ? FOR UPDATE",
@@ -206,11 +238,18 @@ pub(super) async fn insert(
             ready.push(candidate);
         }
     }
+    Ok(ready)
+}
 
-    ready.sort_unstable_by_key(|(position, _, _)| *position);
-    let sequences = queue::allocate(tx, namespace, ready.len()).await?;
+async fn write(
+    tx: &mut Transaction<'_, SqlxMySql>,
+    namespace: &str,
+    mut requests: Vec<Candidate<'_>>,
+) -> Result<(), Error> {
+    requests.sort_unstable_by_key(|(position, _, _)| *position);
+    let sequences = queue::allocate(tx, namespace, requests.len()).await?;
     let now = now_millis();
-    for ((_, snapshot, snapshot_digest), sequence) in ready.into_iter().zip(sequences) {
+    for ((_, snapshot, snapshot_digest), sequence) in requests.into_iter().zip(sequences) {
         sqlx::query(
             r#"INSERT INTO requests (
                 namespace, id, task_id, trace_id, node, mode, state, version, priority,
@@ -271,15 +310,13 @@ pub(super) fn mode_name(mode: &spider::net::Mode) -> &'static str {
 
 pub(super) fn validate_new_snapshot(
     snapshot: &spider::net::request::Snapshot,
-    trace: Option<&spider::trace::Snapshot>,
+    trace: &spider::trace::Snapshot,
 ) -> Result<(), Error> {
     trace::validate_snapshot(snapshot, trace)?;
     identifier(&snapshot.id, "Request Snapshot id")?;
     identifier(&snapshot.node, "Request Snapshot node")?;
-    if !snapshot.task_id.is_empty() {
-        identifier(&snapshot.task_id, "Request Snapshot task_id")?;
-        identifier(&snapshot.trace_id, "Request Snapshot trace_id")?;
-    }
+    identifier(&snapshot.task_id, "Request Snapshot task_id")?;
+    identifier(&snapshot.trace_id, "Request Snapshot trace_id")?;
     if snapshot.version != 0 {
         return Err(Error::Invalid(
             "new Request Snapshot version must be 0".to_string(),
@@ -536,6 +573,8 @@ mod tests {
             .unwrap()
             .with_id("request-1")
             .node("index");
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
         request.max_retry_count = 3;
         let snapshot = spider::net::request::Snapshot::try_from(request).unwrap();
         let snapshot_digest = operation::hex(&snapshot.digest().unwrap());

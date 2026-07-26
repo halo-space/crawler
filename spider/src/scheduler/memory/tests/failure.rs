@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn failure_rejects_stats_overflow_without_partial_settlement() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com");
     request.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -19,7 +19,7 @@ async fn failure_rejects_stats_overflow_without_partial_settlement() {
     ack.state = net::State::Processing;
     scheduler.ack(&ack).await.unwrap();
     scheduler.state().trace_stats.insert(
-        String::new(),
+        TRACE.to_string(),
         HashMap::from([(
             "overflow".to_string(),
             stats::Counter {
@@ -49,7 +49,7 @@ async fn failure_rejects_stats_overflow_without_partial_settlement() {
     assert_eq!(scheduler.queued_len(), 0);
     assert_eq!(scheduler.done_len(), 0);
     assert_eq!(scheduler.failed_len(), 0);
-    let stats = scheduler.trace_stats("");
+    let stats = scheduler.trace_stats(TRACE);
     assert_eq!(stats.len(), 1);
     assert_eq!(stats["overflow"].total, i64::MAX);
     let state = scheduler.state();
@@ -64,8 +64,8 @@ async fn failure_rejects_stats_overflow_without_partial_settlement() {
 
 #[tokio::test]
 async fn repeated_retryable_failure_does_not_duplicate_the_queue() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com");
     request.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -93,8 +93,8 @@ async fn repeated_retryable_failure_does_not_duplicate_the_queue() {
 
 #[tokio::test]
 async fn failure_requeues_when_retry_budget_remains() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com");
     request.max_retry_count = 2;
 
     scheduler
@@ -124,8 +124,8 @@ async fn failure_requeues_when_retry_budget_remains() {
 
 #[tokio::test]
 async fn repeated_failures_do_not_duplicate_the_worker_history() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com");
     request.max_retry_count = 3;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -160,8 +160,8 @@ async fn repeated_failures_do_not_duplicate_the_worker_history() {
 
 #[tokio::test]
 async fn failure_moves_to_failed_when_retry_budget_is_exhausted() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
 
     scheduler
         .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))
@@ -183,8 +183,8 @@ async fn failure_moves_to_failed_when_retry_budget_is_exhausted() {
 
 #[tokio::test]
 async fn retry_counter_overflow_still_reaches_a_terminal_completion() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -222,10 +222,8 @@ async fn retry_counter_overflow_still_reaches_a_terminal_completion() {
 
 #[tokio::test]
 async fn failure_retry_preserves_browser_mode_eligibility() {
-    let scheduler = Memory::new();
-    let mut browser = net::Request::follow("https://example.com/browser")
-        .unwrap()
-        .mode(net::Mode::Browser);
+    let scheduler = memory();
+    let mut browser = request("https://example.com/browser").mode(net::Mode::Browser);
     browser.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![browser]))

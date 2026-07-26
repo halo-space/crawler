@@ -123,7 +123,6 @@ async fn assert_binary_keys(database: &Database) -> Result<()> {
         "items.task_id",
         "items.trace_id",
         "items.request_id",
-        "items.persister_id",
         "trace_stats.namespace",
         "trace_stats.trace_id",
         "trace_stats.name",
@@ -135,6 +134,16 @@ async fn assert_binary_keys(database: &Database) -> Result<()> {
         require(
             actual == Some("utf8mb4_0900_bin"),
             format!("identity column {name} has non-binary collation {actual:?}"),
+        )?;
+    }
+    for name in [
+        "items.persister_id",
+        "items.config_version",
+        "items.timezone",
+    ] {
+        require(
+            !columns.contains_key(name),
+            format!("removed Item metadata column still exists: {name}"),
         )?;
     }
     let error_type = columns

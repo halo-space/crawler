@@ -256,9 +256,8 @@ async fn exercise(store: &MySql, namespace: &str) -> Result<()> {
         ("00000000-0000-7000-8000-000000000002", "item-new", now),
     ] {
         sqlx::query(
-            "INSERT INTO items (namespace, id, item_id, task_id, trace_id, request_id, \
-             persister_id, config_version, timezone, data, created_time, updated_time) \
-             VALUES (?, ?, ?, 'task-new', ?, ?, 'jsonl', 'v1', 'Asia/Shanghai', \
+            "INSERT INTO items (namespace, id, item_id, task_id, trace_id, request_id, data, \
+             created_time, updated_time) VALUES (?, ?, ?, 'task-new', ?, ?, \
              JSON_OBJECT('title', ?), ?, ?)",
         )
         .bind(namespace)

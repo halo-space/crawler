@@ -9,6 +9,7 @@ pub trait Init: scheduler::Scheduler {
     }
 
     /// 原子保存一份 Trace Snapshot 及调用方提供的初始 Request 批次。
+    /// 每个初始 Request 必须已经绑定该 Trace 的非空 `task_id` 和 `trace_id`。
     /// 空集合仍是一轮有效运行，必须同时保存 Trace Snapshot。
     fn init(
         &self,

@@ -58,6 +58,29 @@ async fn init_atomically_stores_trace_and_initial_requests() {
 }
 
 #[tokio::test]
+async fn init_rejects_an_unbound_follow_request_without_mutation() {
+    let scheduler = Memory::new();
+    let request = net::Request::follow("https://example.com").unwrap();
+
+    let error = scheduler
+        .init(
+            "trace-1".to_string(),
+            trace::Snapshot::code("task-1"),
+            vec![request],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("all initial requests must reference the initialized trace_id")
+    );
+    assert!(scheduler.trace("trace-1").await.unwrap().is_none());
+    assert_eq!(scheduler.queued_len(), 0);
+}
+
+#[tokio::test]
 async fn init_rejects_invalid_later_request_without_mutation() {
     let scheduler = Memory::new();
     let mut first = net::Request::follow("https://example.com/one").unwrap();

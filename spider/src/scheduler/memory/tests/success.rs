@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn repeated_success_is_idempotent() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -33,13 +33,13 @@ async fn repeated_success_is_idempotent() {
     scheduler.success(&success).await.unwrap();
 
     assert_eq!(scheduler.done_len(), 1);
-    assert_eq!(scheduler.trace_stats("")["index"].total, 1);
+    assert_eq!(scheduler.trace_stats(TRACE)["index"].total, 1);
 }
 
 #[tokio::test]
 async fn success_rejects_negative_stats_without_settling() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -71,7 +71,7 @@ async fn success_rejects_negative_stats_without_settling() {
     assert_eq!(scheduler.processing_len(), 1);
     assert_eq!(scheduler.done_len(), 0);
     assert_eq!(scheduler.failed_len(), 0);
-    assert!(scheduler.trace_stats("").is_empty());
+    assert!(scheduler.trace_stats(TRACE).is_empty());
     let state = scheduler.state();
     assert!(
         state
@@ -83,8 +83,8 @@ async fn success_rejects_negative_stats_without_settling() {
 
 #[tokio::test]
 async fn accepted_failure_remains_idempotent_after_a_later_success() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com");
     request.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -130,8 +130,8 @@ async fn accepted_failure_remains_idempotent_after_a_later_success() {
 
 #[tokio::test]
 async fn success_rejects_stale_version() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
 
     scheduler
         .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))
@@ -153,8 +153,8 @@ async fn success_rejects_stale_version() {
 
 #[tokio::test]
 async fn success_rejects_wrong_worker() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
 
     scheduler
         .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))
@@ -175,8 +175,8 @@ async fn success_rejects_wrong_worker() {
 
 #[tokio::test]
 async fn success_rejects_processing_payload_state() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
 
     scheduler
         .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))

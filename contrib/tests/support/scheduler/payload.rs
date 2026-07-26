@@ -1,11 +1,14 @@
 use spider::{net, payload};
 
+pub(super) const TASK_ID: &str = "conformance-task";
+pub(super) const TRACE_ID: &str = "conformance-trace";
+
 pub(crate) fn request(id: &str, url: &str) -> net::Request {
-    net::Request::follow(url).unwrap().with_id(id)
+    owned_request(id, url, TASK_ID, TRACE_ID)
 }
 
 pub(crate) fn owned_request(id: &str, url: &str, task_id: &str, trace_id: &str) -> net::Request {
-    let mut request = request(id, url);
+    let mut request = net::Request::follow(url).unwrap().with_id(id);
     request.task_id = task_id.to_string();
     request.trace_id = trace_id.to_string();
     request

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use contrib::scheduler::redis::Redis;
+use spider::Scheduler;
 
 const DEFAULT_URL: &str = "redis://127.0.0.1:6379";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -93,6 +94,10 @@ impl Handle {
             .with_namespace(namespace)
             .unwrap()
     }
+}
+
+pub(super) async fn open(scheduler: &Redis) {
+    scheduler.open().await.unwrap();
 }
 
 pub(super) fn namespace(label: &str) -> String {

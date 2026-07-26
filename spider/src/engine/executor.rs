@@ -35,25 +35,22 @@ where
         async move { self.spider.start().await }
     }
 
-    async fn allowed_domains(&self, request: &net::Request) -> Vec<String> {
-        let Some(snapshot) = request.snapshot() else {
-            return self.spider.allowed_domains().await;
-        };
+    async fn allowed_domains(&self, request: &net::Request) -> Result<Vec<String>, crate::Error> {
+        let snapshot = trace(request)?;
         let Some(config) = snapshot.dsl.as_ref() else {
-            return self.spider.allowed_domains().await;
+            return Ok(self.spider.allowed_domains().await);
         };
         let Some(node) = config.graph.nodes.get(request.node_key()) else {
-            return config.spider.allowed_domains.clone();
+            return Ok(config.spider.allowed_domains.clone());
         };
-        node.allowed_domains
+        Ok(node
+            .allowed_domains
             .clone()
-            .unwrap_or_else(|| config.spider.allowed_domains.clone())
+            .unwrap_or_else(|| config.spider.allowed_domains.clone()))
     }
 
     fn validate(&self, request: &net::Request) -> Result<(), crate::Error> {
-        let Some(snapshot) = request.snapshot() else {
-            return self.validate_code(request);
-        };
+        let snapshot = trace(request)?;
         if let Some(config) = snapshot.dsl.as_ref() {
             if !config.graph.nodes.contains_key(request.node_key()) {
                 return Err(crate::Error::message(format!(
@@ -76,9 +73,7 @@ where
         let spider = self.spider.clone();
         let schemas = self.schemas.clone();
         async move {
-            let Some(snapshot) = request.snapshot().cloned() else {
-                return Self::parse_code(spider.as_ref(), &request, response).await;
-            };
+            let snapshot = trace(&request)?.clone();
             let Some(config) = snapshot.dsl.as_ref() else {
                 return Self::parse_code(spider.as_ref(), &request, response).await;
             };
@@ -96,6 +91,12 @@ where
             .await
         }
     }
+}
+
+fn trace(request: &net::Request) -> Result<&Arc<crate::trace::Snapshot>, crate::Error> {
+    request.snapshot().ok_or_else(|| {
+        crate::Error::message(format!("request is missing Trace Snapshot: {}", request.id))
+    })
 }
 
 impl<P> Executor<P>

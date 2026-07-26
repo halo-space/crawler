@@ -14,7 +14,8 @@ async fn lifecycle_data_and_availability_failures_are_distinct() {
 
     let unopened = scheduler.trace("trace").await.unwrap_err();
     assert!(!unopened.is_transient());
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut connection = server.connection().await;
     redis::cmd("SET")
@@ -49,7 +50,8 @@ async fn malformed_records_do_not_discard_valid_claims_from_the_same_call() {
     };
     let namespace = server::namespace("malformed");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut broken_trace = request::for_trace(
         "broken-trace",
@@ -131,7 +133,8 @@ async fn failed_recovery_does_not_withhold_a_valid_claim() {
     };
     let namespace = server::namespace("failed-recovery-valid-claim");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut damaged = request::new("failed-recovery", "https://example.com/failed-recovery");
     damaged.priority = 20;
@@ -189,7 +192,8 @@ async fn push_rejects_a_trace_whose_snapshot_was_removed() {
     };
     let namespace = server::namespace("missing-trace");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
     scheduler
         .init(
             "missing-trace".to_string(),
@@ -236,7 +240,8 @@ async fn wrong_type_settlement_indices_do_not_partially_settle() {
     };
     let namespace = server::namespace("settlement-types");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     scheduler
         .push(payload::Payload::new().requests(vec![request::new(
@@ -383,7 +388,8 @@ async fn claim_recovery_uses_the_original_queue_token_not_the_stored_id() {
     };
     let namespace = server::namespace("claim-token");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut damaged = request::new("token-a", "https://example.com/token-a");
     damaged.priority = 20;
@@ -447,7 +453,8 @@ async fn corrupt_expired_lease_does_not_block_valid_claims() {
     };
     let namespace = server::namespace("corrupt-expired-lease");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut damaged = request::new("expired-damaged", "https://example.com/expired-damaged");
     damaged.priority = 20;
@@ -514,7 +521,8 @@ async fn corrupt_ready_members_are_quarantined_without_blocking_valid_claims() {
     };
     let namespace = server::namespace("corrupt-ready-member");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut damaged = request::new("ready-damaged", "https://example.com/ready-damaged");
     damaged.priority = 20;
@@ -591,7 +599,8 @@ async fn stray_delayed_members_preserve_their_valid_ready_request() {
     };
     let namespace = server::namespace("stray-delayed-member");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     scheduler
         .push(payload::Payload::new().requests(vec![request::new(
@@ -650,7 +659,8 @@ async fn corrupt_queue_pointers_cannot_remove_another_request() {
     };
     let namespace = server::namespace("corrupt-queue-pointer");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut damaged = request::new("pointer-a", "https://example.com/pointer-a");
     damaged.priority = 20;
@@ -705,7 +715,8 @@ async fn mismatched_processing_scores_are_repaired_without_blocking_work() {
     };
     let namespace = server::namespace("mismatched-lease-score");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut damaged = request::new("lease-damaged", "https://example.com/lease-damaged");
     damaged.priority = 20;
@@ -776,7 +787,8 @@ async fn malformed_future_delayed_members_do_not_keep_the_scheduler_pending() {
     };
     let namespace = server::namespace("malformed-future-delayed");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let delayed = format!("{namespace}:queue:http:delayed");
     let malformed = "zzzz-not-a-delayed-member";
@@ -822,7 +834,8 @@ async fn claim_bounds_expired_lease_recovery() {
     };
     let namespace = server::namespace("lease-recovery-bound");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let requests = (0..=RECOVERY_LIMIT)
         .map(|index| request::new(&format!("expired-{index}"), "https://example.com/expired"))

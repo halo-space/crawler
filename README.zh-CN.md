@@ -37,6 +37,10 @@ cargo run -p examples --bin basic
 `trace_id`、不可变 Trace Snapshot 和初始 Request。远程 Scheduler 可以声明只消费已有运行种子；在
 这条代码模式路径中，Engine 不会在 Worker 本地创建 Trace，也不会调用 `Spider.start()`。代码 Request
 只持久化稳定 node，Worker 通过本地 Spider node 注册表恢复处理函数，不保存 Rust 函数指针。
+`Request::follow()` 只负责构造 Request 规格，因此 `task_id / trace_id` 可以暂时为空，直到运行种子或
+当前 Tx 上下文完成绑定。`Scheduler::init` 与 `Scheduler::push` 一律拒绝未绑定 Request；进入队列后的
+Snapshot、领取、重试和恢复始终同时携带两者，并关联真实 Trace Snapshot。代码模式使用 `dsl` 为空的
+Trace Snapshot，不以缺少 Trace 表示代码模式。
 
 Rules 启动时先静态校验配置、冻结 Trace Snapshot、生成初始 Requests，再把两者直接交给
 `Scheduler::init` 原子发布。运行种子发布不执行 Worker Middleware、`before_scheduler` 或 Dedup；

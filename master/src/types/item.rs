@@ -10,9 +10,6 @@ pub(crate) struct Summary {
     pub task_id: String,
     pub trace_id: String,
     pub request_id: String,
-    pub persister_id: Option<String>,
-    pub config_version: Option<String>,
-    pub timezone: Option<String>,
     pub created_time: i64,
 }
 
@@ -51,6 +48,25 @@ pub(crate) struct Items {
 pub(crate) struct Item {
     pub id: String,
     pub data: Value,
+}
+
+impl Items {
+    pub(crate) fn validate_store(&self) -> Result<(), Error> {
+        if !self.items.is_empty() {
+            if self.context.task_id.is_empty() {
+                return Err(Error::Invalid("item payload requires task id".to_string()));
+            }
+            if self.context.trace_id.is_empty() {
+                return Err(Error::Invalid("item payload requires trace id".to_string()));
+            }
+        }
+        if self.items.iter().any(|item| item.id.is_empty()) {
+            return Err(Error::Invalid(
+                "every Item requires a non-empty framework Item ID".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl List {

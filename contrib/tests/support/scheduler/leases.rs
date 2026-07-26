@@ -1,21 +1,22 @@
 use std::time::Duration;
 
+use spider::scheduler::Init;
 use spider::{Scheduler, payload};
 
 use super::{
-    fixture::{HTTP, Timing, WORKER_A, WORKER_B, close, open},
+    fixture::{HTTP, Timing, WORKER_A, WORKER_B, close, open_run},
     payload::{processing, request, success},
     settlement::succeed,
 };
 
 pub(super) async fn contract<S>(scheduler: S, timing: Timing)
 where
-    S: Scheduler,
+    S: Scheduler + Init,
 {
     let lease = scheduler
         .lease()
         .expect("conformance fixture must expose a lease policy");
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     ack_does_not_extend_the_lease(&scheduler, lease.timeout(), timing).await;
     refresh_extends_the_active_lease(&scheduler, lease.timeout(), timing).await;
     unacknowledged_expiry_preserves_queue_retry(&scheduler, lease.timeout(), timing).await;

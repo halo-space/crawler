@@ -52,7 +52,7 @@ impl MySql {
                 "initial requests must belong to the initialized trace".to_string(),
             ));
         }
-        insert_requests(&mut tx, namespace, &body.requests, true).await?;
+        insert_requests(&mut tx, namespace, &body.requests).await?;
         operation::record(
             &mut tx,
             namespace,
@@ -73,24 +73,16 @@ impl MySql {
     ) -> Result<Option<spider::trace::Snapshot>, Error> {
         validate_namespace(namespace)?;
         identifier(trace_id, "trace_id")?;
-        let snapshot = sqlx::query_scalar::<_, Json<Value>>(
-            "SELECT snapshot FROM traces WHERE namespace = ? AND id = ?",
+        let stored = sqlx::query_as::<_, (String, Json<Value>)>(
+            "SELECT task_id, snapshot FROM traces WHERE namespace = ? AND id = ?",
         )
         .bind(namespace)
         .bind(trace_id)
         .fetch_optional(&self.pool)
         .await?;
-        snapshot
-            .map(|Json(value)| {
-                let snapshot: spider::trace::Snapshot =
-                    serde_json::from_value(value).map_err(|error| Error::InvalidTrace {
-                        id: trace_id.to_string(),
-                        message: error.to_string(),
-                    })?;
-                snapshot.validate().map_err(|message| Error::InvalidTrace {
-                    id: trace_id.to_string(),
-                    message,
-                })?;
+        stored
+            .map(|(task_id, Json(value))| {
+                let snapshot = decode(trace_id, &task_id, value)?;
                 if !fits(&snapshot, self.max_response_bytes)? {
                     return Err(Error::Invalid(format!(
                         "Trace Snapshot exceeds the configured {} byte API response limit",
@@ -149,21 +141,22 @@ pub(super) async fn load(
     tx: &mut Transaction<'_, SqlxMySql>,
     namespace: &str,
     trace_id: &str,
-) -> Result<Option<spider::trace::Snapshot>, Error> {
-    if trace_id.is_empty() {
-        return Ok(None);
-    }
+) -> Result<spider::trace::Snapshot, Error> {
     identifier(trace_id, "trace_id")?;
-    let value = sqlx::query_scalar::<_, Json<Value>>(
-        "SELECT snapshot FROM traces WHERE namespace = ? AND id = ?",
+    let (task_id, Json(value)) = sqlx::query_as::<_, (String, Json<Value>)>(
+        "SELECT task_id, snapshot FROM traces WHERE namespace = ? AND id = ?",
     )
     .bind(namespace)
     .bind(trace_id)
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| Error::TraceNotFound(trace_id.to_string()))?;
+    decode(trace_id, &task_id, value)
+}
+
+fn decode(trace_id: &str, task_id: &str, value: Value) -> Result<spider::trace::Snapshot, Error> {
     let trace: spider::trace::Snapshot =
-        serde_json::from_value(value.0).map_err(|error| Error::InvalidTrace {
+        serde_json::from_value(value).map_err(|error| Error::InvalidTrace {
             id: trace_id.to_string(),
             message: error.to_string(),
         })?;
@@ -171,16 +164,25 @@ pub(super) async fn load(
         id: trace_id.to_string(),
         message,
     })?;
-    Ok(Some(trace))
+    if trace.task_id != task_id {
+        return Err(Error::InvalidTrace {
+            id: trace_id.to_string(),
+            message: format!(
+                "stored task_id {task_id:?} does not match Trace Snapshot task_id {:?}",
+                trace.task_id
+            ),
+        });
+    }
+    Ok(trace)
 }
 
 pub(super) fn validate_snapshot(
     snapshot: &spider::net::request::Snapshot,
-    trace: Option<&spider::trace::Snapshot>,
+    trace: &spider::trace::Snapshot,
 ) -> Result<(), Error> {
     snapshot
         .clone()
-        .restore(trace.cloned().map(Arc::new))
+        .restore(Some(Arc::new(trace.clone())))
         .map(|_| ())
         .map_err(|message| Error::Invalid(format!("invalid Request Snapshot: {message}")))
 }

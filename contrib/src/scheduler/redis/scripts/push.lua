@@ -71,24 +71,26 @@ for _, request in ipairs(requests) do
     if not has_type(prefix .. 'queue:' .. request.mode .. ':delayed', 'zset') then
         return 'CORRUPT_DELAYED_QUEUE'
     end
-    if redis.call('EXISTS', key) == 1 then
-        if redis.call('HGET', key, 'digest') ~= request.digest then
-            return 'CONFLICT:' .. request.id
-        end
-    elseif request.trace_id ~= '' then
-        if redis.call('HEXISTS', KEYS[2], request.trace_id) == 0 then
-            return 'TRACE_NOT_FOUND:' .. request.trace_id
-        end
-        local owner = redis.call('HGET', KEYS[3], request.trace_id)
-        if not owner then
-            return 'TRACE_NOT_FOUND:' .. request.trace_id
-        end
-        if owner ~= request.task_id then
-            return 'TASK_ID_MISMATCH:' .. request.id
-        end
-        missing = missing + 1
-        request.sequence_index = missing
-    else
+    local exists = redis.call('EXISTS', key)
+    if exists == 1 and redis.call('HGET', key, 'digest') ~= request.digest then
+        return 'CONFLICT:' .. request.id
+    end
+end
+
+for _, request in ipairs(requests) do
+    local key = prefix .. 'request:' .. request.token
+    local exists = redis.call('EXISTS', key)
+    if redis.call('HEXISTS', KEYS[2], request.trace_id) == 0 then
+        return 'TRACE_NOT_FOUND:' .. request.trace_id
+    end
+    local owner = redis.call('HGET', KEYS[3], request.trace_id)
+    if not owner then
+        return 'TRACE_NOT_FOUND:' .. request.trace_id
+    end
+    if owner ~= request.task_id then
+        return 'TASK_ID_MISMATCH:' .. request.id
+    end
+    if exists == 0 then
         missing = missing + 1
         request.sequence_index = missing
     end

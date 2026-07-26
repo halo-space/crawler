@@ -130,11 +130,11 @@ impl Snapshot {
         if self.id.is_empty() {
             return Err("Request Snapshot id must not be empty".to_string());
         }
-        if self.task_id.is_empty() != self.trace_id.is_empty() {
-            return Err(
-                "Request Snapshot task_id and trace_id must both be set or both be empty"
-                    .to_string(),
-            );
+        if self.task_id.is_empty() {
+            return Err("Request Snapshot task_id must not be empty".to_string());
+        }
+        if self.trace_id.is_empty() {
+            return Err("Request Snapshot trace_id must not be empty".to_string());
         }
         if self.node.is_empty() {
             return Err("Request Snapshot node must not be empty".to_string());
@@ -214,27 +214,23 @@ impl Snapshot {
         trace: Option<std::sync::Arc<trace::Snapshot>>,
     ) -> Result<net::Request, String> {
         self.validate()?;
-        if !self.trace_id.is_empty() {
-            let Some(trace) = trace.as_ref() else {
-                return Err("Request Snapshot requires a Trace Snapshot".to_string());
-            };
-            if trace.task_id != self.task_id {
-                return Err("Request Snapshot task_id does not match Trace Snapshot".to_string());
-            }
-            if let Some(config) = trace.dsl.as_ref()
-                && !config.graph.nodes.contains_key(&self.node)
-            {
-                return Err(format!(
-                    "Request Snapshot node does not exist in Trace Snapshot: {}",
-                    self.node
-                ));
-            }
+        let Some(trace) = trace else {
+            return Err("Request Snapshot requires a Trace Snapshot".to_string());
+        };
+        if trace.task_id != self.task_id {
+            return Err("Request Snapshot task_id does not match Trace Snapshot".to_string());
+        }
+        if let Some(config) = trace.dsl.as_ref()
+            && !config.graph.nodes.contains_key(&self.node)
+        {
+            return Err(format!(
+                "Request Snapshot node does not exist in Trace Snapshot: {}",
+                self.node
+            ));
         }
 
         let mut request = self.into_request()?;
-        if let Some(trace) = trace {
-            request.set_snapshot(trace);
-        }
+        request.set_snapshot(trace);
         Ok(request)
     }
 
@@ -277,6 +273,17 @@ impl Snapshot {
 mod tests {
     use super::*;
 
+    fn request(url: &str) -> net::Request {
+        let mut request = net::Request::follow(url).unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
+        request
+    }
+
+    fn code_trace() -> std::sync::Arc<trace::Snapshot> {
+        std::sync::Arc::new(trace::Snapshot::code("task-1"))
+    }
+
     fn rules_trace() -> std::sync::Arc<trace::Snapshot> {
         let config = crate::config::Config::from_yaml(
             r#"
@@ -297,10 +304,8 @@ graph:
 
     #[test]
     fn rules_request_round_trip_preserves_executable_fields() {
-        let mut request = net::Request::follow("https://example.com/detail/1").unwrap();
+        let mut request = request("https://example.com/detail/1");
         request.id = "req-1".to_string();
-        request.task_id = "task-1".to_string();
-        request.trace_id = "trace-1".to_string();
         request.priority = 7;
         request.timeout = Some(3_000);
         request.max_body_bytes = Some(1_048_576);
@@ -360,9 +365,7 @@ graph:
 
     #[test]
     fn code_request_round_trip_contains_only_the_stable_node() {
-        let request = net::Request::follow("https://example.com/detail")
-            .unwrap()
-            .node("detail");
+        let request = request("https://example.com/detail").node("detail");
 
         let snapshot = Snapshot::try_from(request).unwrap();
         let encoded = serde_json::to_value(&snapshot).unwrap();
@@ -371,31 +374,48 @@ graph:
         assert!(encoded.get("handler").is_none());
         let restored = serde_json::from_value::<Snapshot>(encoded)
             .unwrap()
-            .restore(None)
+            .restore(Some(code_trace()))
             .unwrap();
         assert_eq!(restored.node_key(), "detail");
-        assert!(restored.snapshot().is_none());
+        assert!(restored.snapshot().is_some());
+    }
+
+    #[test]
+    fn rejects_missing_run_identity() {
+        let unbound = net::Request::follow("https://example.com").unwrap();
+
+        assert_eq!(
+            Snapshot::try_from(unbound).unwrap_err(),
+            "Request Snapshot task_id must not be empty"
+        );
+
+        let mut missing_trace = request("https://example.com");
+        missing_trace.trace_id.clear();
+        assert_eq!(
+            Snapshot::try_from(missing_trace).unwrap_err(),
+            "Request Snapshot trace_id must not be empty"
+        );
     }
 
     #[test]
     fn restore_rejects_invalid_runtime_state_and_failed_workers() {
-        let request = net::Request::follow("https://example.com").unwrap();
+        let request = request("https://example.com");
         let mut snapshot = Snapshot::try_from(request).unwrap();
         snapshot.state = net::State::Processing;
-        assert!(snapshot.clone().restore(None).is_err());
+        assert!(snapshot.clone().restore(Some(code_trace())).is_err());
 
         snapshot.state = net::State::Pending;
         snapshot.failed_workers = vec!["worker-1".to_string(), "worker-1".to_string()];
-        assert!(snapshot.restore(None).is_err());
+        assert!(snapshot.restore(Some(code_trace())).is_err());
     }
 
     #[test]
-    fn snapshot_enforces_the_retry_limit_boundary() {
-        let mut accepted = net::Request::follow("https://example.com/accepted").unwrap();
+    fn enforces_the_retry_limit_boundary() {
+        let mut accepted = request("https://example.com/accepted");
         accepted.max_retry_count = MAX_RETRY_COUNT;
         assert!(Snapshot::try_from(accepted).is_ok());
 
-        let mut rejected = net::Request::follow("https://example.com/rejected").unwrap();
+        let mut rejected = request("https://example.com/rejected");
         rejected.max_retry_count = MAX_RETRY_COUNT + 1;
         let error = Snapshot::try_from(rejected).unwrap_err();
 
@@ -403,25 +423,25 @@ graph:
     }
 
     #[test]
-    fn snapshot_rejects_a_zero_response_body_limit() {
-        let request = net::Request::follow("https://example.com").unwrap();
+    fn rejects_a_zero_response_body_limit() {
+        let request = request("https://example.com");
         let mut snapshot = Snapshot::try_from(request).unwrap();
         snapshot.max_body_bytes = Some(0);
 
-        let error = snapshot.restore(None).unwrap_err();
+        let error = snapshot.restore(Some(code_trace())).unwrap_err();
 
         assert!(error.contains("max_body_bytes must be positive"));
     }
 
     #[test]
     fn restore_rejects_an_unsupported_proxy_protocol() {
-        let request = net::Request::follow("https://example.com").unwrap();
+        let request = request("https://example.com");
         let mut snapshot = Snapshot::try_from(request).unwrap();
         snapshot.proxy = Some(net::ProxyConfig {
             url: "ftp://proxy.example.com".to_string(),
         });
 
-        let error = snapshot.restore(None).unwrap_err();
+        let error = snapshot.restore(Some(code_trace())).unwrap_err();
 
         assert!(error.contains("unsupported protocol: ftp"));
     }
@@ -437,8 +457,8 @@ graph:
     }
 
     #[test]
-    fn snapshot_rejects_an_opaque_request_header() {
-        let mut request = net::Request::follow("https://example.com").unwrap();
+    fn rejects_an_opaque_request_header() {
+        let mut request = request("https://example.com");
         let mut headers = http::HeaderMap::new();
         headers.insert(
             http::header::HeaderName::from_static("x-opaque"),
@@ -452,19 +472,19 @@ graph:
     }
 
     #[test]
-    fn snapshot_rejects_a_raw_cookie_header() {
-        let request = net::Request::follow("https://example.com").unwrap();
+    fn rejects_a_raw_cookie_header() {
+        let request = request("https://example.com");
         let mut snapshot = Snapshot::try_from(request).unwrap();
         snapshot.headers.try_set("Cookie", "sid=one").unwrap();
 
-        let error = snapshot.restore(None).unwrap_err();
+        let error = snapshot.restore(Some(code_trace())).unwrap_err();
 
         assert!(error.contains("Cookie header is reserved"));
     }
 
     #[test]
     fn cookie_scope_survives_snapshot_recovery() {
-        let mut request = net::Request::follow("https://www.example.com/admin/page").unwrap();
+        let mut request = request("https://www.example.com/admin/page");
         let origin = url::Url::parse(&request.url).unwrap();
         let mut headers = net::Headers::new();
         headers
@@ -484,7 +504,7 @@ graph:
         let encoded = serde_json::to_value(Snapshot::try_from(request).unwrap()).unwrap();
         let restored = serde_json::from_value::<Snapshot>(encoded)
             .unwrap()
-            .restore(None)
+            .restore(Some(code_trace()))
             .unwrap();
 
         let admin = url::Url::parse("https://www.example.com/admin/next").unwrap();
@@ -510,7 +530,7 @@ graph:
 
     #[test]
     fn unknown_fields_are_rejected() {
-        let request = net::Request::follow("https://example.com").unwrap();
+        let request = request("https://example.com");
         let mut encoded = serde_json::to_value(Snapshot::try_from(request).unwrap()).unwrap();
         encoded["kind"] = Value::from("code");
 
@@ -519,17 +539,15 @@ graph:
 
     #[test]
     fn debug_redacts_snapshot_content_and_url_credentials() {
-        let mut request = net::Request::follow(
-            "https://request-user:request-password@example.com/private?api_key=url-secret",
-        )
-        .unwrap()
-        .header("authorization", "header-secret")
-        .unwrap()
-        .cookie("session", "cookie-secret")
-        .unwrap()
-        .body(net::Body::Text("body-secret".to_string()))
-        .vals("token", "vals-secret")
-        .kwargs("api_key", "kwargs-secret");
+        let mut request =
+            request("https://request-user:request-password@example.com/private?api_key=url-secret")
+                .header("authorization", "header-secret")
+                .unwrap()
+                .cookie("session", "cookie-secret")
+                .unwrap()
+                .body(net::Body::Text("body-secret".to_string()))
+                .vals("token", "vals-secret")
+                .kwargs("api_key", "kwargs-secret");
         request.proxy = Some(net::ProxyConfig {
             url: "http://proxy-user:proxy-password@proxy.example:8080".to_string(),
         });

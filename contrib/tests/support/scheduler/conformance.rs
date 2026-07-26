@@ -21,8 +21,10 @@ where
     F: Fn() -> S,
 {
     initialization::lifecycle_and_trace(create(), initializes_run).await;
-    initialization::initialization_is_atomic(create()).await;
+    initialization::requests_are_atomic(create()).await;
+    initialization::unbound_requests_are_atomic(create()).await;
     replay::initial_request_validation_is_atomic(create()).await;
+    replay::unbound_push_is_atomic(create()).await;
     replay::request_replay_is_atomic(create()).await;
     initialization::trace_ownership_is_atomic(create()).await;
     rules::claimed_requests_preserve_trace(create()).await;
@@ -42,7 +44,7 @@ where
 /// Runs the lease-specific scenarios for a fixture that explicitly exposes a lease policy.
 pub async fn lease<S>(scheduler: S, timing: Timing)
 where
-    S: spider::Scheduler,
+    S: spider::Scheduler + spider::scheduler::Init,
 {
     leases::contract(scheduler, timing).await;
 }

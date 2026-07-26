@@ -236,10 +236,31 @@ impl ConsumeSpider {
     }
 }
 
+const FIXTURE_TASK: &str = "runtime-limits-fixture";
+const FIXTURE_TRACE: &str = "runtime-limits-trace";
+
+fn bound_request(url: impl Into<String>) -> net::Request {
+    let mut request = net::Request::follow(url).unwrap();
+    request.task_id = FIXTURE_TASK.to_string();
+    request.trace_id = FIXTURE_TRACE.to_string();
+    request
+}
+
 fn requests(count: usize) -> Vec<net::Request> {
     (0..count)
-        .map(|index| net::Request::follow(format!("https://example.com/{index}")).unwrap())
+        .map(|index| bound_request(format!("https://example.com/{index}")))
         .collect()
+}
+
+async fn init_run(scheduler: &impl Init) {
+    scheduler
+        .init(
+            FIXTURE_TRACE.to_string(),
+            spider::trace::Snapshot::code(FIXTURE_TASK),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
 }
 
 const REMOTE_AI_TRACE: &str = "remote-ai-trace";
@@ -292,6 +313,7 @@ fn ai_downloader() -> SlowDownload {
 #[tokio::test]
 async fn claim_limit_fills_concurrency_in_multiple_single_claims() {
     let scheduler = ClaimScheduler::new(0);
+    init_run(&scheduler).await;
     scheduler
         .push(payload::Payload::new().requests(requests(16)))
         .await
@@ -349,9 +371,8 @@ async fn claim_limit_fills_concurrency_in_multiple_single_claims() {
 #[tokio::test]
 async fn engine_forwards_worker_identity_and_modes_to_scheduler() {
     let scheduler = ClaimScheduler::new(0);
-    let request = net::Request::follow("https://example.com/browser")
-        .unwrap()
-        .mode(net::Mode::Browser);
+    init_run(&scheduler).await;
+    let request = bound_request("https://example.com/browser").mode(net::Mode::Browser);
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -425,6 +446,7 @@ graph:
 #[tokio::test]
 async fn transient_claim_failure_is_retried_without_losing_requests() {
     let scheduler = ClaimScheduler::new(1);
+    init_run(&scheduler).await;
     scheduler
         .push(payload::Payload::new().requests(requests(1)))
         .await
@@ -450,6 +472,7 @@ async fn transient_claim_failure_is_retried_without_losing_requests() {
 #[tokio::test]
 async fn pending_state_failure_drains_an_active_request_before_returning() {
     let scheduler = ClaimScheduler::new(0).with_pending_failures(3);
+    init_run(&scheduler).await;
     scheduler
         .push(payload::Payload::new().requests(requests(1)))
         .await
@@ -478,6 +501,7 @@ async fn pending_state_failure_drains_an_active_request_before_returning() {
 async fn request_concurrency_above_the_default_is_not_clamped() {
     let concurrency = engine::MAX_REQUEST_CONCURRENCY + 1;
     let scheduler = ClaimScheduler::new(0);
+    init_run(&scheduler).await;
     scheduler
         .push(payload::Payload::new().requests(requests(concurrency)))
         .await
@@ -501,6 +525,7 @@ async fn request_concurrency_above_the_default_is_not_clamped() {
 #[tokio::test]
 async fn remote_scheduler_consumes_existing_requests_without_creating_a_seed() {
     let scheduler = ClaimScheduler::remote();
+    init_run(&scheduler).await;
     scheduler
         .push(payload::Payload::new().requests(requests(1)))
         .await
@@ -518,7 +543,7 @@ async fn remote_scheduler_consumes_existing_requests_without_creating_a_seed() {
     runtime.start().await.unwrap();
 
     assert_eq!(starts.load(Ordering::SeqCst), 0);
-    assert_eq!(runtime.scheduler().inner.trace_len(), 0);
+    assert_eq!(runtime.scheduler().inner.trace_len(), 1);
     assert_eq!(runtime.scheduler().inner.done_len(), 1);
 }
 

@@ -106,8 +106,7 @@ async fn master_message_limit_is_applied_before_sending_requests() {
     )]);
     let api = Api::new(base_url, "token").unwrap();
     api.open().await.unwrap();
-    let request =
-        net::Request::follow(format!("https://example.com/{}", "segment".repeat(128))).unwrap();
+    let request = bound_request(format!("https://example.com/{}", "segment".repeat(128)));
 
     let result = api
         .push(payload::Payload::new().requests(vec![request]))

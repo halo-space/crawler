@@ -27,8 +27,8 @@ impl MySql {
         let filter = list.filter()?;
         let cursor = super::timed(list.cursor.as_deref(), namespace, ENDPOINT, &filter)?;
         let mut query = QueryBuilder::<SqlxMySql>::new(
-            "SELECT id, item_id, task_id, trace_id, request_id, persister_id, config_version, \
-             timezone, created_time FROM items WHERE namespace = ",
+            "SELECT id, item_id, task_id, trace_id, request_id, created_time \
+             FROM items WHERE namespace = ",
         );
         query.push_bind(namespace);
         if let Some(trace_id) = list.trace_id.as_deref() {
@@ -71,8 +71,8 @@ impl MySql {
         validate_namespace(namespace)?;
         identifier(id, "Item row id")?;
         let row = sqlx::query(
-            "SELECT id, item_id, task_id, trace_id, request_id, persister_id, config_version, \
-             timezone, created_time, data, updated_time FROM items \
+            "SELECT id, item_id, task_id, trace_id, request_id, created_time, data, updated_time \
+             FROM items \
              WHERE namespace = ? AND id = ?",
         )
         .bind(namespace)
@@ -98,9 +98,6 @@ fn summary(row: &MySqlRow) -> Result<item::Summary, Error> {
         task_id: row.try_get("task_id")?,
         trace_id: row.try_get("trace_id")?,
         request_id: row.try_get("request_id")?,
-        persister_id: row.try_get("persister_id")?,
-        config_version: row.try_get("config_version")?,
-        timezone: row.try_get("timezone")?,
         created_time: row.try_get("created_time")?,
     })
 }

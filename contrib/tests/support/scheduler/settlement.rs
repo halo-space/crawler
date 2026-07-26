@@ -2,7 +2,7 @@ use spider::scheduler::{Error, Init};
 use spider::{Scheduler, net, payload, trace};
 
 use super::{
-    fixture::{HTTP, WORKER_A, WORKER_B, close, open},
+    fixture::{HTTP, WORKER_A, WORKER_B, close, open, open_run},
     payload::{failure, owned_request, processing, request, success},
 };
 
@@ -116,9 +116,9 @@ where
 
 pub(super) async fn failure_owns_queue_retry<S>(scheduler: S)
 where
-    S: Scheduler,
+    S: Scheduler + Init,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     let mut original = request("failure", "https://example.com/failure");
     original.max_retry_count = 2;
     scheduler
@@ -170,9 +170,9 @@ where
 
 pub(super) async fn failed_worker_is_excluded<S>(scheduler: S)
 where
-    S: Scheduler,
+    S: Scheduler + Init,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     let mut original = request(
         "failed-worker-is-excluded",
         "https://example.com/failed-worker-is-excluded",
@@ -254,9 +254,9 @@ where
 
 pub(super) async fn release_before_ack_preserves_queue_retry<S>(scheduler: S)
 where
-    S: Scheduler,
+    S: Scheduler + Init,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     let original = request(
         "release-before-ack",
         "https://example.com/release-before-ack",

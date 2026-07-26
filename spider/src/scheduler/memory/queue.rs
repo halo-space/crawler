@@ -194,14 +194,21 @@ impl Ord for Delayed {
 mod tests {
     use super::*;
 
+    fn request(url: impl Into<String>) -> net::Request {
+        let mut request = net::Request::follow(url).unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
+        request
+    }
+
     #[test]
     fn ready_requests_use_priority_then_fifo() {
         let mut queue = Queue::default();
-        let mut low = net::Request::follow("https://example.com/low").unwrap();
+        let mut low = request("https://example.com/low");
         low.priority = 1;
-        let mut first = net::Request::follow("https://example.com/first").unwrap();
+        let mut first = request("https://example.com/first");
         first.priority = 10;
-        let mut second = net::Request::follow("https://example.com/second").unwrap();
+        let mut second = request("https://example.com/second");
         second.priority = 10;
         for request in [low, first, second] {
             queue.push(snapshot(request).unwrap(), 1);
@@ -230,7 +237,7 @@ mod tests {
     #[test]
     fn delayed_requests_are_promoted_by_time() {
         let mut queue = Queue::default();
-        let mut request = net::Request::follow("https://example.com/later").unwrap();
+        let mut request = request("https://example.com/later");
         request.next_time = 20;
         queue.push(snapshot(request).unwrap(), 10);
 
@@ -241,15 +248,13 @@ mod tests {
     #[test]
     fn capability_filter_preserves_incompatible_snapshots_and_order() {
         let mut queue = Queue::default();
-        let mut browser_first = net::Request::follow("https://example.com/browser-first")
-            .unwrap()
-            .mode(net::Mode::Browser);
+        let mut browser_first =
+            request("https://example.com/browser-first").mode(net::Mode::Browser);
         browser_first.priority = 10;
-        let mut browser_second = net::Request::follow("https://example.com/browser-second")
-            .unwrap()
-            .mode(net::Mode::Browser);
+        let mut browser_second =
+            request("https://example.com/browser-second").mode(net::Mode::Browser);
         browser_second.priority = 10;
-        let mut http = net::Request::follow("https://example.com/http").unwrap();
+        let mut http = request("https://example.com/http");
         http.priority = 1;
         for request in [browser_first, browser_second, http] {
             queue.push(snapshot(request).unwrap(), 1);
@@ -272,15 +277,13 @@ mod tests {
     fn claim_returns_multiple_eligible_requests_behind_incompatible_work() {
         let mut queue = Queue::default();
         for index in 0..4 {
-            let mut browser = net::Request::follow(format!("https://example.com/browser/{index}"))
-                .unwrap()
-                .mode(net::Mode::Browser);
+            let mut browser =
+                request(format!("https://example.com/browser/{index}")).mode(net::Mode::Browser);
             browser.priority = 10;
             queue.push(snapshot(browser).unwrap(), 1);
         }
         for index in 0..3 {
-            let mut http =
-                net::Request::follow(format!("https://example.com/http/{index}")).unwrap();
+            let mut http = request(format!("https://example.com/http/{index}"));
             http.priority = 1;
             queue.push(snapshot(http).unwrap(), 1);
         }
@@ -305,15 +308,12 @@ mod tests {
     #[test]
     fn supported_modes_share_global_priority_and_fifo_order() {
         let mut queue = Queue::default();
-        let mut http_first = net::Request::follow("https://example.com/http-first").unwrap();
+        let mut http_first = request("https://example.com/http-first");
         http_first.priority = 10;
-        let mut browser_second = net::Request::follow("https://example.com/browser-second")
-            .unwrap()
-            .mode(net::Mode::Browser);
+        let mut browser_second =
+            request("https://example.com/browser-second").mode(net::Mode::Browser);
         browser_second.priority = 10;
-        let mut browser_high = net::Request::follow("https://example.com/browser-high")
-            .unwrap()
-            .mode(net::Mode::Browser);
+        let mut browser_high = request("https://example.com/browser-high").mode(net::Mode::Browser);
         browser_high.priority = 20;
         for request in [http_first, browser_second, browser_high] {
             queue.push(snapshot(request).unwrap(), 1);
@@ -337,9 +337,7 @@ mod tests {
     #[test]
     fn delayed_incompatible_request_remains_unchanged() {
         let mut queue = Queue::default();
-        let mut browser = net::Request::follow("https://example.com/browser")
-            .unwrap()
-            .mode(net::Mode::Browser);
+        let mut browser = request("https://example.com/browser").mode(net::Mode::Browser);
         browser.next_time = 20;
         queue.push(snapshot(browser).unwrap(), 10);
 

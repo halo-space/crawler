@@ -146,11 +146,18 @@ The logical input of one run is:
 task_id + trace_id + immutable Trace Snapshot + initial Requests
 ```
 
+`Request::follow()` is a construction API, not a scheduling boundary. It may temporarily produce an
+unbound Request with empty `task_id / trace_id`; the run-seed or current Tx context must bind both
+before submission. `Scheduler::init` and `Scheduler::push` reject either identity when empty. From the
+queued Request Snapshot onward, both identities and the referenced Trace Snapshot are mandatory.
+Code mode is represented by a Trace Snapshot with no DSL, never by an absent Trace.
+
 A Trace Snapshot holds run-level configuration shared by Requests: `task_id`, parameters, optional attachment configuration, persistence target, and priority. It has no schema version, Task revision, or derived Request-mode collection. A Rules Snapshot additionally contains the complete DSL, including its optional non-empty `spider.version` and valid IANA `spider.timezone`; a code Snapshot has an empty `dsl`.
 
 A Request Snapshot stores its stable `node` and executable request fields. It never stores handlers, function pointers, closures, or process-local objects:
 
-- A Rules Request is restored by obtaining the Trace DSL through `trace_id` and validating its node against that DSL.
+- Every Request restore resolves and attaches its Trace Snapshot through `trace_id`.
+- A Rules Request additionally validates its node against the restored Trace DSL.
 - A code Request still contains only a node name after restoration. The current Worker resolves that node through its local `#[spider]` registry.
 - Claiming, retry, and recovery preserve the original Request `task_id / trace_id`; a Worker must not generate or overwrite them.
 
@@ -264,7 +271,7 @@ This prevents early termination while a list page is producing detail Requests, 
 - `initializes_run()`, which declares whether this Engine creates a local run;
 - `init(trace_id, snapshot, requests)`, which atomically stores a Trace Snapshot and its supplied initial Requests; an empty collection remains valid.
 
-`Payload` remains the single transport envelope and the design does not add parallel Batch or Receipt structures. It carries Request execution identity, state, error, timing, statistics, and the `requests / items` output collections. Scheduler methods never persist Items: `push` accepts Requests only, while ownership and settlement Payloads require both collections to be empty. The independent `item::Store::submit(&Payload)` accepts Item Payloads and rejects Request or completion fields.
+`Payload` remains the single transport envelope and the design does not add parallel Batch or Receipt structures. It carries Request execution identity, state, error, timing, statistics, and the `requests / items` output collections. Scheduler methods never persist Items: `push` accepts Requests only, while ownership and settlement Payloads require both collections to be empty. The independent `item::Store::submit(&Payload)` accepts Item Payloads and rejects Request or completion fields. A non-empty Item Payload always carries its run `task_id / trace_id`; a detached Tx may omit only Request execution identity.
 
 For `has_pending_requests`, `modes` defines the capability scope. A processing Request with a matching mode remains pending for every Worker with that capability, regardless of its current `leased_by` value. The `worker_id` identifies and validates the caller; it does not narrow the processing set to leases owned by that Worker. This conservative rule prevents a compatible Worker from exiting before lease recovery or before an in-flight Request can emit more compatible work.
 

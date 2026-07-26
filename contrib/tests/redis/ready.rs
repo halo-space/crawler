@@ -10,7 +10,8 @@ async fn ready_events_follow_release_retry_and_terminal_settlement() {
     };
     let namespace = server::namespace("ready-lifecycle");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     scheduler
         .push(payload::Payload::new().requests(vec![request::new(
@@ -76,7 +77,8 @@ async fn missing_request_removes_its_ready_member_and_event() {
     };
     let namespace = server::namespace("missing-ready-request");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     scheduler
         .push(
@@ -115,7 +117,8 @@ async fn malformed_ready_member_clears_its_referenced_event() {
     };
     let namespace = server::namespace("malformed-ready-member");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut damaged = request::new("damaged", "https://example.com/damaged");
     damaged.priority = 20;
@@ -181,7 +184,8 @@ async fn dangling_terminal_member_clears_exclusions_before_pending_is_reused() {
     };
     let namespace = server::namespace("terminal-ready-exclusion");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut stale = request::new("stale", "https://example.com/stale");
     stale.max_retry_count = 2;

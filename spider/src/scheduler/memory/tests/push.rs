@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn push_and_claim_moves_request_to_processing() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     let payload =
         payload::Payload::for_request(&request, "worker-1").requests(vec![request.clone()]);
 
@@ -17,11 +17,29 @@ async fn push_and_claim_moves_request_to_processing() {
 }
 
 #[tokio::test]
-async fn push_rejects_invalid_collection_without_partial_enqueue() {
+async fn push_rejects_an_unbound_follow_request() {
     let scheduler = Memory::new();
-    let mut valid = net::Request::follow("https://example.com/valid").unwrap();
+    let request = net::Request::follow("https://example.com").unwrap();
+
+    let error = scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("new Request task_id must not be empty")
+    );
+    assert_eq!(scheduler.queued_len(), 0);
+}
+
+#[tokio::test]
+async fn push_rejects_invalid_collection_without_partial_enqueue() {
+    let scheduler = memory();
+    let mut valid = request("https://example.com/valid");
     valid.task_id = "task-1".to_string();
-    let mut invalid = net::Request::follow("https://example.com/invalid").unwrap();
+    let mut invalid = request("https://example.com/invalid");
     invalid.task_id = "task-2".to_string();
 
     let result = scheduler
@@ -38,8 +56,8 @@ async fn push_rejects_invalid_collection_without_partial_enqueue() {
 
 #[tokio::test]
 async fn push_rejects_duplicate_request_ids_atomically() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     let result = scheduler
         .push(payload::Payload::new().requests(vec![request.clone(), request]))
         .await;
@@ -49,8 +67,8 @@ async fn push_rejects_duplicate_request_ids_atomically() {
 
 #[tokio::test]
 async fn push_is_idempotent_for_a_request_already_queued() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request.clone()]))
         .await
@@ -64,8 +82,8 @@ async fn push_is_idempotent_for_a_request_already_queued() {
 
 #[tokio::test]
 async fn push_compares_structured_snapshots_independent_of_map_insertion_order() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com/ordered").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com/ordered");
     request
         .vals
         .insert("first".to_string(), serde_json::json!(1));
@@ -97,8 +115,8 @@ async fn push_compares_structured_snapshots_independent_of_map_insertion_order()
 fn concurrent_identical_pushes_are_idempotent() {
     const THREADS: usize = 32;
 
-    let scheduler = Arc::new(Memory::new());
-    let request = net::Request::follow("https://example.com/concurrent").unwrap();
+    let scheduler = Arc::new(memory());
+    let request = request("https://example.com/concurrent");
     let barrier = Arc::new(std::sync::Barrier::new(THREADS));
     let handles = (0..THREADS)
         .map(|_| {
@@ -126,12 +144,12 @@ fn concurrent_identical_pushes_are_idempotent() {
 
 #[test]
 fn concurrent_conflict_does_not_partially_insert_missing_requests() {
-    let scheduler = Arc::new(Memory::new());
-    let existing = net::Request::follow("https://example.com/existing").unwrap();
+    let scheduler = Arc::new(memory());
+    let existing = request("https://example.com/existing");
     let mut conflict = existing.clone();
     conflict.priority = 10;
-    let rejected = net::Request::follow("https://example.com/rejected").unwrap();
-    let accepted = net::Request::follow("https://example.com/accepted").unwrap();
+    let rejected = request("https://example.com/rejected");
+    let accepted = request("https://example.com/accepted");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -186,8 +204,8 @@ fn concurrent_conflict_does_not_partially_insert_missing_requests() {
 
 #[tokio::test]
 async fn replay_remains_idempotent_after_a_cookie_expires() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com/cookies").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com/cookies");
     let origin = url::Url::parse(&request.url).unwrap();
     let mut headers = net::Headers::new();
     headers
@@ -212,8 +230,8 @@ async fn replay_remains_idempotent_after_a_cookie_expires() {
 
 #[tokio::test]
 async fn push_is_idempotent_while_a_request_is_processing_or_terminal() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request.clone()]))
         .await
@@ -247,9 +265,9 @@ async fn push_is_idempotent_while_a_request_is_processing_or_terminal() {
 
 #[tokio::test]
 async fn push_atomically_adds_missing_requests_when_existing_snapshots_match() {
-    let scheduler = Memory::new();
-    let existing = net::Request::follow("https://example.com/existing").unwrap();
-    let missing = net::Request::follow("https://example.com/missing").unwrap();
+    let scheduler = memory();
+    let existing = request("https://example.com/existing");
+    let missing = request("https://example.com/missing");
     scheduler
         .push(payload::Payload::new().requests(vec![existing.clone()]))
         .await
@@ -269,11 +287,11 @@ async fn push_atomically_adds_missing_requests_when_existing_snapshots_match() {
 
 #[tokio::test]
 async fn push_rejects_a_conflicting_snapshot_without_adding_missing_requests() {
-    let scheduler = Memory::new();
-    let existing = net::Request::follow("https://example.com/existing").unwrap();
+    let scheduler = memory();
+    let existing = request("https://example.com/existing");
     let mut conflict = existing.clone();
     conflict.priority = 10;
-    let missing = net::Request::follow("https://example.com/missing").unwrap();
+    let missing = request("https://example.com/missing");
     scheduler
         .push(payload::Payload::new().requests(vec![existing]))
         .await
@@ -295,7 +313,7 @@ async fn push_rejects_a_conflicting_snapshot_without_adding_missing_requests() {
 #[tokio::test]
 async fn push_rejects_missing_trace_snapshot_atomically() {
     let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let mut request = request("https://example.com");
     request.task_id = "task-1".to_string();
     request.trace_id = "trace-1".to_string();
 

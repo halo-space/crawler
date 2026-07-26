@@ -18,6 +18,8 @@ where
     D: downloader::Download + Sync,
     E: Execute + 'static,
 {
+    require_snapshot(claimed)?;
+
     let mut request = match registry
         .before_download(claimed.clone())
         .await
@@ -29,8 +31,9 @@ where
             return Ok(());
         }
     };
+    require_snapshot(&request)?;
 
-    let allowed_domains = executor.allowed_domains(&request).await;
+    let allowed_domains = executor.allowed_domains(&request).await?;
     request.set_allowed_domains(allowed_domains);
     if !is_allowed(&request) {
         stats.filter(claimed.node_key(), 1);
@@ -149,6 +152,16 @@ fn is_allowed(request: &net::Request) -> bool {
     request.allows(&url)
 }
 
+fn require_snapshot(request: &net::Request) -> Result<(), crate::Error> {
+    if request.snapshot().is_none() {
+        return Err(crate::Error::message(format!(
+            "Request is missing Trace Snapshot: {}",
+            request.id
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -209,9 +222,33 @@ mod tests {
         parses: AtomicUsize,
     }
 
+    struct ReplaceRequest;
+
+    impl middleware::Middleware for ReplaceRequest {
+        fn before_download<'a>(
+            &'a self,
+            request: net::Request,
+            _spec: &'a middleware::Spec,
+        ) -> middleware::BoxFuture<'a, middleware::Next<net::Request>> {
+            Box::pin(async move {
+                let node = request.node_key().to_string();
+                let mut replacement = net::Request::follow(request.url.clone())
+                    .unwrap()
+                    .with_id(request.id)
+                    .node(node);
+                replacement.task_id = request.task_id;
+                replacement.trace_id = request.trace_id;
+                Ok(middleware::Next::Continue(replacement))
+            })
+        }
+    }
+
     impl super::Execute for TypedErrorExecutor {
-        async fn allowed_domains(&self, _request: &net::Request) -> Vec<String> {
-            Vec::new()
+        async fn allowed_domains(
+            &self,
+            _request: &net::Request,
+        ) -> Result<Vec<String>, crate::Error> {
+            Ok(Vec::new())
         }
 
         fn validate(&self, _request: &net::Request) -> Result<(), crate::Error> {
@@ -233,8 +270,11 @@ mod tests {
     }
 
     impl super::Execute for Executor {
-        async fn allowed_domains(&self, _request: &net::Request) -> Vec<String> {
-            vec!["example.com".to_string()]
+        async fn allowed_domains(
+            &self,
+            _request: &net::Request,
+        ) -> Result<Vec<String>, crate::Error> {
+            Ok(vec!["example.com".to_string()])
         }
 
         fn validate(&self, _request: &net::Request) -> Result<(), crate::Error> {
@@ -260,11 +300,17 @@ mod tests {
         assert!(is_allowed(&request));
     }
 
+    fn claimed(url: &str) -> net::Request {
+        let mut request = net::Request::follow(url).unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
+        request.set_snapshot(Arc::new(crate::trace::Snapshot::code("task-1")));
+        request
+    }
+
     #[tokio::test]
     async fn disallowed_redirect_is_filtered_without_download_retry() {
-        let request = net::Request::follow("https://example.com")
-            .unwrap()
-            .with_retry(3, [0]);
+        let request = claimed("https://example.com").with_retry(3, [0]);
         let download = Arc::new(DisallowedDownload {
             calls: AtomicUsize::new(0),
         });
@@ -291,9 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn typed_parse_errors_retry_the_same_downloaded_response() {
-        let request = net::Request::follow("https://example.com")
-            .unwrap()
-            .with_retry(2, [0]);
+        let request = claimed("https://example.com").with_retry(2, [0]);
         let download = Arc::new(ResponseDownload {
             calls: AtomicUsize::new(0),
         });
@@ -313,5 +357,58 @@ mod tests {
 
         assert_eq!(download.calls.load(Ordering::SeqCst), 1);
         assert_eq!(executor.parses.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn missing_trace_snapshot_is_rejected_before_download() {
+        let request = net::Request::follow("https://example.com").unwrap();
+        let download = Arc::new(ResponseDownload {
+            calls: AtomicUsize::new(0),
+        });
+        let executor = Arc::new(Executor {
+            parses: AtomicUsize::new(0),
+        });
+
+        let error = execute(
+            &request,
+            download.clone(),
+            executor.clone(),
+            Arc::new(middleware::Registry::new()),
+            Arc::new(stats::Delta::default()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing Trace Snapshot"));
+        assert_eq!(download.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(executor.parses.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn middleware_cannot_replace_a_claimed_request_without_its_trace_snapshot() {
+        let request = claimed("https://example.com")
+            .with_middleware(middleware::Spec::new("replace").hook("before_download"));
+        let download = Arc::new(ResponseDownload {
+            calls: AtomicUsize::new(0),
+        });
+        let executor = Arc::new(Executor {
+            parses: AtomicUsize::new(0),
+        });
+        let registry = Arc::new(middleware::Registry::new());
+        registry.register("replace", ReplaceRequest);
+
+        let error = execute(
+            &request,
+            download.clone(),
+            executor.clone(),
+            registry,
+            Arc::new(stats::Delta::default()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing Trace Snapshot"));
+        assert_eq!(download.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(executor.parses.load(Ordering::SeqCst), 0);
     }
 }

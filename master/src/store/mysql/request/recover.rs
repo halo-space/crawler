@@ -132,7 +132,7 @@ pub(super) async fn expired(
             }
             Err(error) => return Err(error),
         };
-        if let Err(error) = trace::validate_snapshot(&request.snapshot, trace.as_ref()) {
+        if let Err(error) = trace::validate_snapshot(&request.snapshot, &trace) {
             reject(tx, namespace, &stored, now, &format!("{reason}: {error}")).await?;
             report.failed += 1;
             continue;

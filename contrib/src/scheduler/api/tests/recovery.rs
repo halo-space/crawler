@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn a_failed_restore_releases_the_entire_claimed_collection() {
-    let mut request = net::Request::follow("https://example.com/valid").unwrap();
+    let mut request = bound_request("https://example.com/valid");
     request.id = "valid-request".to_string();
     let valid = net::request::Snapshot::try_from(request).unwrap();
     let mut invalid = valid.clone();
@@ -49,7 +49,7 @@ async fn a_failed_restore_releases_the_entire_claimed_collection() {
 }
 #[tokio::test]
 async fn a_duplicate_claimed_request_is_rejected_and_released_once() {
-    let mut request = net::Request::follow("https://example.com/valid").unwrap();
+    let mut request = bound_request("https://example.com/valid");
     request.id = "request-1".to_string();
     let snapshot = net::request::Snapshot::try_from(request).unwrap();
     let (base_url, received, server) = server(vec![
@@ -92,7 +92,7 @@ async fn a_duplicate_claimed_request_is_rejected_and_released_once() {
 
 #[tokio::test]
 async fn a_release_failure_reports_both_errors_and_reuses_only_its_retry_key() {
-    let mut request = net::Request::follow("https://example.com/valid").unwrap();
+    let mut request = bound_request("https://example.com/valid");
     request.id = "valid-request".to_string();
     let valid = net::request::Snapshot::try_from(request).unwrap();
     let mut invalid = valid.clone();

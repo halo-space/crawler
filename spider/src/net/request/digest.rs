@@ -243,6 +243,8 @@ mod tests {
 
     fn snapshot(body: net::Body) -> net::request::Snapshot {
         let mut request = net::Request::follow("https://example.com").unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
         request.body = body;
         net::request::Snapshot::try_from(request).unwrap()
     }

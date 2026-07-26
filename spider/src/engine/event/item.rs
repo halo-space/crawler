@@ -41,13 +41,10 @@ where
         return Ok(());
     }
 
-    let mut payload = context
+    let payload = context
         .map(Context::payload)
         .unwrap_or_default()
         .items(ready);
-    if payload.task_id.is_empty() {
-        payload.task_id = "default".to_string();
-    }
     let retry = retry_policy(&payload, &registry)?;
     let mut attempt = 0;
     loop {

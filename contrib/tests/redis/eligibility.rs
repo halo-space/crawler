@@ -12,7 +12,8 @@ async fn worker_cursors_pass_excluded_pages_and_finish_when_none_are_eligible() 
     };
     let namespace = server::namespace("worker-cursors");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut requests = (0..EXCLUDED_READY)
         .map(|index| {
@@ -109,7 +110,8 @@ async fn a_new_high_priority_request_invalidates_an_exclusion_cursor() {
     };
     let namespace = server::namespace("cursor-priority");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let requests = (0..EXCLUDED_READY)
         .map(|index| {
@@ -174,7 +176,8 @@ async fn an_invalid_ready_event_resets_the_cursor_before_claiming() {
     };
     let namespace = server::namespace("invalid-ready-event");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let requests = excluded("invalid-event-excluded", EXCLUDED_READY, 10);
     scheduler
@@ -268,7 +271,8 @@ async fn an_unresolved_mode_cannot_be_skipped_for_a_lower_priority_mode() {
     };
     let namespace = server::namespace("cross-mode-priority");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut requests = (0..65)
         .map(|index| {
@@ -332,7 +336,8 @@ async fn low_priority_event_pages_do_not_starve_existing_work() {
     };
     let namespace = server::namespace("low-priority-event-pages");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut requests = excluded("event-excluded", EXCLUDED_READY, 10);
     requests.push(request::new(
@@ -394,7 +399,8 @@ async fn browser_events_do_not_reset_an_http_cursor() {
     };
     let namespace = server::namespace("cross-mode-events");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut requests = excluded("cross-mode-excluded", EXCLUDED_READY, 10);
     requests.push(request::new(
@@ -457,7 +463,8 @@ async fn delayed_promotion_crossing_an_event_page_preserves_priority() {
     };
     let namespace = server::namespace("promotion-event-page");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let due = now_millis() + 300;
     let mut requests = excluded("promotion-excluded", EXCLUDED_READY, 10);

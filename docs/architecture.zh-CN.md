@@ -145,11 +145,17 @@ flowchart LR
 task_id + trace_id + immutable Trace Snapshot + initial Requests
 ```
 
+`Request::follow()` 是构造入口，不是调度边界；它生成的 Request 可以暂时没有 `task_id / trace_id`，
+但运行种子或当前 Tx 上下文必须在提交前同时绑定两者。`Scheduler::init` 与 `Scheduler::push` 对任一空
+身份都直接拒绝。从进入队列的 Request Snapshot 开始，两项身份以及其引用的 Trace Snapshot 都是
+必需数据。代码模式由 `dsl` 为空的 Trace Snapshot 表示，不能用缺少 Trace 表示。
+
 Trace Snapshot 保存本轮 Request 共享的 `task_id`、参数、可选附件配置、持久化目标和优先级，不保存 schema 版本、Task revision 或静态推导的 Request mode 集合。Rules Snapshot 额外包含完整 DSL，其中可选的 `spider.version` 必须非空，`spider.timezone` 必须是有效 IANA 时区；代码 Snapshot 的 `dsl` 固定为空。
 
 Request Snapshot 保存稳定 `node` 和可执行请求字段，不保存 handler、函数指针、闭包或进程内对象：
 
-- Rules Request 恢复时，通过 `trace_id` 取得 Trace Snapshot 中的 DSL，再校验并恢复 node。
+- 所有 Request 恢复时都先通过 `trace_id` 取得并绑定对应 Trace Snapshot。
+- Rules Request 还需要使用恢复后的 Trace DSL 校验 node。
 - Code Request 恢复后仍只有 node 名称；当前 Worker 使用本地 `#[spider]` 注册表解析对应 handler。
 - Worker 在领取、重试或恢复时继承 Request 原有的 `task_id / trace_id`，不能生成或覆盖它们。
 
@@ -260,7 +266,7 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 - `initializes_run()`：当前 Engine 是否负责创建本地运行；
 - `init(trace_id, snapshot, requests)`：原子保存 Trace Snapshot 和传入的初始 Request 集合；空集合仍然合法。
 
-`Payload` 继续作为唯一传输信封，不增加 Batch、Receipt 或其他平行结构。它携带 Request 执行身份、状态、错误、时间、统计以及 `requests / items` 两个输出集合。Scheduler 不再持久化 Item：`push` 只允许 Requests，执行权和结算 Payload 的两个集合必须为空；独立的 `item::Store::submit(&Payload)` 只接受 Item Payload，并拒绝 Request 或结算字段。
+`Payload` 继续作为唯一传输信封，不增加 Batch、Receipt 或其他平行结构。它携带 Request 执行身份、状态、错误、时间、统计以及 `requests / items` 两个输出集合。Scheduler 不再持久化 Item：`push` 只允许 Requests，执行权和结算 Payload 的两个集合必须为空；独立的 `item::Store::submit(&Payload)` 只接受 Item Payload，并拒绝 Request 或结算字段。非空 Item Payload 必须始终携带本轮运行的 `task_id / trace_id`；detached Tx 只允许缺少 Request 执行身份。
 
 `has_pending_requests` 的能力范围由 `modes` 定义。只要 processing Request 的 mode 匹配，所有具备该能力的 Worker 都将其视为 pending，不按当前 `leased_by` 过滤。`worker_id` 用于标识并校验调用方，不把 processing 集合缩小为该 Worker 自己持有的租约。这个保守退出规则避免兼容 Worker 在租约恢复前，或执行中 Request 继续产生兼容任务前提前退出。
 

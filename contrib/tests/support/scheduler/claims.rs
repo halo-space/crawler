@@ -3,16 +3,16 @@ use std::sync::Arc;
 use spider::{Scheduler, net, payload};
 
 use super::{
-    fixture::{ALL, BROWSER, HTTP, Timing, WORKER_A, WORKER_B, close, open, race},
+    fixture::{ALL, BROWSER, HTTP, Timing, WORKER_A, WORKER_B, close, open_run, race},
     payload::request,
     settlement::succeed,
 };
 
 pub(super) async fn claims_are_capability_scoped<S>(scheduler: S)
 where
-    S: Scheduler,
+    S: Scheduler + spider::scheduler::Init,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     let mut low = request("http-low", "https://example.com/http/low");
     low.priority = 1;
     let mut first = request("http-first", "https://example.com/http/first");
@@ -117,9 +117,9 @@ where
 
 pub(super) async fn concurrent_capability_claims_are_atomic<S>(scheduler: S)
 where
-    S: Scheduler + 'static,
+    S: Scheduler + spider::scheduler::Init + 'static,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     let mut requests = Vec::with_capacity(32);
     for index in 0..32 {
         requests.push(request(
@@ -186,9 +186,9 @@ where
 
 pub(super) async fn delayed_requests_wait_for_next_time<S>(scheduler: S, timing: Timing)
 where
-    S: Scheduler,
+    S: Scheduler + spider::scheduler::Init,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     let mut delayed = request("delayed", "https://example.com/delayed");
     delayed.next_time = now_millis() + timing.delayed_request().as_millis() as i64;
     scheduler

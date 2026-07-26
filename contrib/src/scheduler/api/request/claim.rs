@@ -152,15 +152,13 @@ impl Api {
         }
 
         let trace_id = claimed.snapshot.trace_id.clone();
-        let trace = if trace_id.is_empty() {
-            if claimed.trace.is_some() {
-                return Err(scheduler::Error::InvalidRequest {
-                    id,
-                    message: "code Request must not include a Trace Snapshot".to_string(),
-                });
-            }
-            None
-        } else if let Some(snapshot) = claimed.trace.clone() {
+        if trace_id.is_empty() {
+            return Err(scheduler::Error::InvalidRequest {
+                id,
+                message: "claimed Request trace_id must not be empty".to_string(),
+            });
+        }
+        let trace = if let Some(snapshot) = claimed.trace.clone() {
             snapshot
                 .validate()
                 .map_err(|message| scheduler::Error::InvalidTrace {
@@ -174,24 +172,24 @@ impl Api {
                         .to_string(),
                 });
             }
-            Some(self.cache_trace(trace_id.clone(), snapshot).await?)
+            self.cache_trace(trace_id.clone(), snapshot).await?
         } else if let Some(snapshot) = self.cached_trace(&trace_id).await {
-            Some(snapshot)
+            snapshot
         } else {
-            Some(
-                self.load_trace(&trace_id)
-                    .await?
-                    .map(Arc::new)
-                    .ok_or_else(|| scheduler::Error::TraceNotFound(trace_id.clone()))?,
-            )
+            self.load_trace(&trace_id)
+                .await?
+                .map(Arc::new)
+                .ok_or_else(|| scheduler::Error::TraceNotFound(trace_id.clone()))?
         };
 
-        let mut request = claimed.snapshot.clone().restore(trace).map_err(|message| {
-            scheduler::Error::InvalidRequest {
+        let mut request = claimed
+            .snapshot
+            .clone()
+            .restore(Some(trace))
+            .map_err(|message| scheduler::Error::InvalidRequest {
                 id: claimed.snapshot.id.clone(),
                 message,
-            }
-        })?;
+            })?;
         request.state = net::State::Processing;
         request.version = claimed.execution.version;
         request.next_time = claimed.execution.next_time;
@@ -274,6 +272,8 @@ mod tests {
     fn claimed(mode: net::Mode) -> wire::Claimed {
         let mut request = net::Request::follow("https://example.com").unwrap();
         request.id = "request-1".to_string();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
         request.mode = mode;
         wire::Claimed {
             snapshot: net::request::Snapshot::try_from(request).unwrap(),
@@ -285,7 +285,7 @@ mod tests {
                 retry_count: 0,
                 failed_workers: Vec::new(),
             },
-            trace: None,
+            trace: Some(trace::Snapshot::code("task-1")),
         }
     }
 
@@ -337,5 +337,19 @@ mod tests {
                 .is_err()
         );
         assert!(api.cached_trace("trace-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_trace_is_rejected_before_caching() {
+        let api = Api::new("https://master.example.com", "token").unwrap();
+        let mut claimed = claimed(net::Mode::Http);
+        claimed.snapshot.trace_id.clear();
+
+        assert!(
+            api.restore(&claimed, "worker-1", &[net::Mode::Http])
+                .await
+                .is_err()
+        );
+        assert!(api.cached_trace("").await.is_none());
     }
 }

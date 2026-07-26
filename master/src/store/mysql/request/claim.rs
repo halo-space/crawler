@@ -20,7 +20,7 @@ const REJECTION_LIMIT: usize = 128;
 struct Candidate {
     request: State,
     version: i64,
-    trace: Option<Arc<spider::trace::Snapshot>>,
+    trace: Arc<spider::trace::Snapshot>,
 }
 
 enum InspectError {
@@ -32,7 +32,7 @@ async fn inspect(
     tx: &mut Transaction<'_, SqlxMySql>,
     namespace: &str,
     stored: &Stored,
-    traces: &mut HashMap<String, Option<Arc<spider::trace::Snapshot>>>,
+    traces: &mut HashMap<String, Arc<spider::trace::Snapshot>>,
 ) -> Result<Candidate, InspectError> {
     let request = match stored.pending() {
         Ok(request) => request,
@@ -46,7 +46,7 @@ async fn inspect(
     } else {
         match trace::load(tx, namespace, &request.trace_id).await {
             Ok(snapshot) => {
-                let snapshot = snapshot.map(Arc::new);
+                let snapshot = Arc::new(snapshot);
                 traces.insert(request.trace_id.clone(), snapshot.clone());
                 snapshot
             }
@@ -56,7 +56,7 @@ async fn inspect(
             Err(error) => return Err(InspectError::Storage(error)),
         }
     };
-    if let Err(error) = trace::validate_snapshot(&request.snapshot, snapshot.as_deref()) {
+    if let Err(error) = trace::validate_snapshot(&request.snapshot, &snapshot) {
         return Err(InspectError::Invalid(error.to_string()));
     }
     Ok(Candidate {
@@ -79,7 +79,7 @@ impl Candidate {
                 failed_workers: self.request.failed_workers.clone(),
             },
             trace: if include_trace {
-                self.trace.as_deref().cloned()
+                Some(self.trace.as_ref().clone())
             } else {
                 None
             },
@@ -186,7 +186,7 @@ impl Selection {
     }
 
     fn needs_trace(&self, trace_id: &str) -> bool {
-        !trace_id.is_empty() && !self.traces.contains(trace_id)
+        !self.traces.contains(trace_id)
     }
 
     fn include(
@@ -201,7 +201,7 @@ impl Selection {
             request.trace = None;
             capacity = self.measure(&request)?;
         }
-        if capacity == Capacity::Accepted && !request.snapshot.trace_id.is_empty() {
+        if capacity == Capacity::Accepted {
             self.traces.insert(request.snapshot.trace_id.clone());
         }
         Ok((capacity, request))
@@ -228,6 +228,7 @@ impl MySql {
         if let Some(previous) =
             operation::reserve::<types::Claims>(&mut tx, namespace, "claim", key, &digest).await?
         {
+            validate_response(&previous, self.max_response_bytes)?;
             self.ensure_worker(&mut tx, namespace, &body.worker_id, &modes)
                 .await?;
             tx.commit().await?;
@@ -256,7 +257,7 @@ impl MySql {
              AND JSON_CONTAINS(failed_workers, JSON_QUOTE(?)) = 0 \
              ORDER BY priority DESC, sequence ASC LIMIT ? FOR UPDATE SKIP LOCKED"
         );
-        let mut traces = HashMap::<String, Option<Arc<spider::trace::Snapshot>>>::new();
+        let mut traces = HashMap::<String, Arc<spider::trace::Snapshot>>::new();
         let mut selection = Selection::new(self.max_response_bytes)?;
         let mut claimed = Vec::new();
         let mut rejections = Rejections::default();
@@ -409,6 +410,13 @@ fn validate_limit(value: usize) -> Result<(), Error> {
     Ok(())
 }
 
+fn validate_response(response: &types::Claims, max: usize) -> Result<(), Error> {
+    if serde_json::to_vec(response)?.len() > max {
+        return Err(Error::ResponseTooLarge { max });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,10 +429,26 @@ mod tests {
     }
 
     #[test]
+    fn replay_uses_the_current_response_limit() {
+        let response = types::Claims {
+            requests: Vec::new(),
+        };
+        let exact = serde_json::to_vec(&response).unwrap().len();
+
+        validate_response(&response, exact).unwrap();
+        assert!(matches!(
+            validate_response(&response, exact - 1),
+            Err(Error::ResponseTooLarge { max }) if max == exact - 1
+        ));
+    }
+
+    #[test]
     fn limit_uses_the_exact_response_size() {
-        let request = spider::net::Request::follow("https://example.com/article")
+        let mut request = spider::net::Request::follow("https://example.com/article")
             .unwrap()
             .node("detail");
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
         let claimed = types::Claimed {
             snapshot: spider::net::request::Snapshot::try_from(request).unwrap(),
             execution: types::Execution {
@@ -457,9 +481,11 @@ mod tests {
 
     #[test]
     fn lease_size_estimate_covers_the_final_timestamp() {
-        let request = spider::net::Request::follow("https://example.com/article")
+        let mut request = spider::net::Request::follow("https://example.com/article")
             .unwrap()
             .node("detail");
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
         let mut claimed = types::Claimed {
             snapshot: spider::net::request::Snapshot::try_from(request).unwrap(),
             execution: types::Execution {

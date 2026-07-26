@@ -10,26 +10,21 @@ pub(super) fn request(
         retry(state, snapshot, worker_id, error);
         return None;
     }
-    let trace = if snapshot.trace_id.is_empty() {
-        None
-    } else {
-        let Some(trace) = state.trace_snapshots.get(&snapshot.trace_id) else {
-            retry(state, snapshot, worker_id, "Trace Snapshot not found");
-            return None;
-        };
-        if trace.task_id != snapshot.task_id {
-            retry(
-                state,
-                snapshot,
-                worker_id,
-                "Request Snapshot task_id does not match Trace Snapshot",
-            );
-            return None;
-        }
-        Some(trace.clone())
+    let Some(trace) = state.trace_snapshots.get(&snapshot.trace_id) else {
+        retry(state, snapshot, worker_id, "Trace Snapshot not found");
+        return None;
     };
+    if trace.task_id != snapshot.task_id {
+        retry(
+            state,
+            snapshot,
+            worker_id,
+            "Request Snapshot task_id does not match Trace Snapshot",
+        );
+        return None;
+    }
 
-    match snapshot.clone().restore(trace) {
+    match snapshot.clone().restore(Some(trace.clone())) {
         Ok(request) => Some(request),
         Err(error) => {
             retry(state, snapshot, worker_id, error);

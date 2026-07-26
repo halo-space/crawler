@@ -105,8 +105,13 @@ impl Payload {
 
     /// Validates the fields consumed by an Item Store.
     pub fn validate_store(&self) -> Result<(), &'static str> {
-        if !self.items.is_empty() && self.task_id.is_empty() {
-            return Err("item payload requires task id");
+        if !self.items.is_empty() {
+            if self.task_id.is_empty() {
+                return Err("item payload requires task id");
+            }
+            if self.trace_id.is_empty() {
+                return Err("item payload requires trace id");
+            }
         }
         if !self.requests.is_empty() || self.has_completion_fields() {
             return Err("item payload contains unrelated fields");
@@ -182,6 +187,12 @@ impl Payload {
     }
 
     pub fn validate_ownership(&self) -> Result<(), &'static str> {
+        if self.task_id.is_empty() {
+            return Err("payload requires task id");
+        }
+        if self.trace_id.is_empty() {
+            return Err("payload requires trace id");
+        }
         if self.id.is_empty() || self.worker_id.is_empty() || self.node.is_empty() {
             return Err("payload requires request id, worker id, and node");
         }
@@ -225,9 +236,16 @@ impl Payload {
 mod tests {
     use super::*;
 
+    fn request(url: &str) -> net::Request {
+        let mut request = net::Request::follow(url).unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
+        request
+    }
+
     #[test]
     fn completion_validation_rejects_contradictory_state_and_error() {
-        let mut request = net::Request::follow("https://example.com").unwrap();
+        let mut request = request("https://example.com");
         request.version = 1;
 
         let mut done = Payload::for_request(&request, "worker-1");
@@ -265,7 +283,7 @@ mod tests {
 
     #[test]
     fn completion_validation_accepts_valid_terminal_states() {
-        let mut request = net::Request::follow("https://example.com").unwrap();
+        let mut request = request("https://example.com");
         request.version = 1;
         let mut success = Payload::for_request(&request, "worker-1");
         success.start_time = Some(0);
@@ -280,7 +298,7 @@ mod tests {
 
     #[test]
     fn success_validation_rejects_invalid_completion_times() {
-        let mut request = net::Request::follow("https://example.com").unwrap();
+        let mut request = request("https://example.com");
         request.version = 1;
         let mut payload = Payload::for_request(&request, "worker-1");
 
@@ -297,7 +315,7 @@ mod tests {
 
     #[test]
     fn failure_validation_rejects_invalid_completion_times() {
-        let mut request = net::Request::follow("https://example.com").unwrap();
+        let mut request = request("https://example.com");
         request.version = 1;
         let mut payload = Payload::for_request(&request, "worker-1").failed("boom");
 
@@ -314,7 +332,7 @@ mod tests {
 
     #[test]
     fn refresh_lease_validation_accepts_only_processing_identity() {
-        let mut request = net::Request::follow("https://example.com").unwrap();
+        let mut request = request("https://example.com");
         request.version = 1;
         let mut refresh = Payload::for_request(&request, "worker-1");
         refresh.state = State::Processing;
@@ -329,7 +347,7 @@ mod tests {
 
     #[test]
     fn ownership_validation_requires_node_and_claimed_version() {
-        let request = net::Request::follow("https://example.com").unwrap();
+        let request = request("https://example.com");
         let mut payload = Payload::for_request(&request, "worker-1");
         assert_eq!(
             payload.validate_ownership(),
@@ -342,6 +360,79 @@ mod tests {
             payload.validate_ownership(),
             Err("payload requires request id, worker id, and node")
         );
+    }
+
+    #[test]
+    fn scheduler_operations_require_run_identity() {
+        type Validate = fn(&Payload) -> Result<(), &'static str>;
+
+        let mut request = request("https://example.com");
+        request.version = 1;
+
+        let operations: [(&str, Payload, Validate); 5] = [
+            (
+                "ack",
+                processing(&request),
+                Payload::validate_ack as Validate,
+            ),
+            (
+                "release",
+                processing(&request),
+                Payload::validate_release as Validate,
+            ),
+            (
+                "refresh_lease",
+                processing(&request),
+                Payload::validate_refresh_lease as Validate,
+            ),
+            (
+                "success",
+                success(&request),
+                Payload::validate_success as Validate,
+            ),
+            (
+                "failure",
+                failure(&request),
+                Payload::validate_failure as Validate,
+            ),
+        ];
+
+        for (operation, mut payload, validate) in operations {
+            payload.task_id.clear();
+            assert_eq!(
+                validate(&payload),
+                Err("payload requires task id"),
+                "operation: {operation}"
+            );
+
+            payload.task_id = "task-1".to_string();
+            payload.trace_id.clear();
+            assert_eq!(
+                validate(&payload),
+                Err("payload requires trace id"),
+                "operation: {operation}"
+            );
+        }
+    }
+
+    fn processing(request: &net::Request) -> Payload {
+        let mut payload = Payload::for_request(request, "worker-1");
+        payload.state = State::Processing;
+        payload
+    }
+
+    fn success(request: &net::Request) -> Payload {
+        let mut payload = Payload::for_request(request, "worker-1");
+        payload.start_time = Some(1);
+        payload.end_time = Some(2);
+        payload
+    }
+
+    fn failure(request: &net::Request) -> Payload {
+        let mut payload = Payload::for_request(request, "worker-1").failed("boom");
+        payload.start_time = Some(1);
+        payload.end_time = Some(2);
+        payload
     }
 
     #[test]
@@ -362,8 +453,28 @@ mod tests {
     }
 
     #[test]
+    fn item_store_validation_requires_run_identity() {
+        let mut item = crate::item::Map::new(Default::default());
+        *crate::item::Item::id_mut(&mut item) = "item-1".to_string();
+        let mut payload = Payload::new().items(vec![Box::new(item)]);
+        assert_eq!(
+            payload.validate_store(),
+            Err("item payload requires task id")
+        );
+
+        payload.task_id = "task-1".to_string();
+        assert_eq!(
+            payload.validate_store(),
+            Err("item payload requires trace id")
+        );
+
+        payload.trace_id = "trace-1".to_string();
+        assert!(payload.validate_store().is_ok());
+    }
+
+    #[test]
     fn push_validation_rejects_duplicate_request_ids() {
-        let request = net::Request::follow("https://example.com").unwrap();
+        let request = request("https://example.com");
         let id = request.id.clone();
         let payload = Payload::new().requests(vec![request.clone(), request]);
 
@@ -375,8 +486,8 @@ mod tests {
 
     #[test]
     fn push_validation_checks_every_request() {
-        let valid = net::Request::follow("https://example.com/valid").unwrap();
-        let mut invalid = net::Request::follow("https://example.com/invalid").unwrap();
+        let valid = request("https://example.com/valid");
+        let mut invalid = request("https://example.com/invalid");
         invalid.version = 1;
 
         assert_eq!(

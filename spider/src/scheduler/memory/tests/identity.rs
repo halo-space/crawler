@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn execution_operations_reject_identity_mismatch_without_mutation() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await

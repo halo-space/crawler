@@ -12,8 +12,10 @@ async fn separate_instances_coordinate_replay_and_concurrent_claims() {
     let namespace = server::namespace("multi-instance");
     let left = server.redis(&namespace);
     let right = server.redis(&namespace);
-    left.open().await.unwrap();
-    right.open().await.unwrap();
+    server::open(&left).await;
+    super::run::init(&left).await;
+    server::open(&right).await;
+    super::run::init(&right).await;
 
     let replay = request::new("replay", "https://example.com/replay");
     let (left_push, right_push) = tokio::join!(

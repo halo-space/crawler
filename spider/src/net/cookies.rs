@@ -491,6 +491,8 @@ mod tests {
     fn request_snapshot_preserves_expired_cookie_records_for_replay() {
         let origin = url("https://example.com/");
         let mut request = crate::net::Request::follow(origin.as_str()).unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
         request
             .cookies
             .store_response(&origin, &response_headers(&["sid=one; Max-Age=1; Path=/"]));

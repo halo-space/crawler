@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn ack_is_idempotent_for_the_same_execution() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -32,8 +32,8 @@ async fn ack_is_idempotent_for_the_same_execution() {
 
 #[tokio::test]
 async fn refresh_lease_updates_an_acknowledged_lease() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -68,8 +68,8 @@ async fn lease_refresh_prevents_reclaim_until_it_stops() {
         std::time::Duration::from_millis(10),
     )
     .unwrap();
-    let scheduler = Memory::new().with_lease(policy);
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory_with_lease(policy);
+    let mut request = request("https://example.com");
     request.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))

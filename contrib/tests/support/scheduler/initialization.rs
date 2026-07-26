@@ -111,7 +111,7 @@ graph:
     close(&scheduler).await;
 }
 
-pub(super) async fn initialization_is_atomic<S>(scheduler: S)
+pub(super) async fn requests_are_atomic<S>(scheduler: S)
 where
     S: Scheduler + Init,
 {
@@ -141,6 +141,57 @@ where
             .is_err()
     );
     assert!(scheduler.trace("trace-init").await.unwrap().is_none());
+    assert!(
+        scheduler
+            .next_requests(2, WORKER_A, HTTP)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    close(&scheduler).await;
+}
+
+pub(super) async fn unbound_requests_are_atomic<S>(scheduler: S)
+where
+    S: Scheduler + Init,
+{
+    open(&scheduler).await;
+
+    for (trace_id, field) in [
+        ("trace-empty-task", "task_id"),
+        ("trace-empty-identity", "trace_id"),
+    ] {
+        let task_id = format!("task-{trace_id}");
+        let valid = owned_request(
+            &format!("{trace_id}-valid"),
+            "https://example.com/init/valid",
+            &task_id,
+            trace_id,
+        );
+        let mut invalid = owned_request(
+            &format!("{trace_id}-invalid"),
+            "https://example.com/init/invalid",
+            &task_id,
+            trace_id,
+        );
+        if field == "task_id" {
+            invalid.task_id.clear();
+        } else {
+            invalid.trace_id.clear();
+        }
+
+        let error = scheduler
+            .init(
+                trace_id.to_string(),
+                trace::Snapshot::code(&task_id),
+                vec![valid, invalid],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(field));
+        assert!(scheduler.trace(trace_id).await.unwrap().is_none());
+    }
+
     assert!(
         scheduler
             .next_requests(2, WORKER_A, HTTP)

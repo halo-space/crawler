@@ -3,16 +3,16 @@ use std::sync::Arc;
 use spider::{Scheduler, payload};
 
 use super::{
-    fixture::{HTTP, WORKER_A, close, open, race},
+    fixture::{HTTP, WORKER_A, close, open_run, race},
     payload::{failure, processing, request},
     settlement::succeed,
 };
 
 pub(super) async fn initial_request_validation_is_atomic<S>(scheduler: S)
 where
-    S: Scheduler,
+    S: Scheduler + spider::scheduler::Init,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     let valid = request(
         "initial-validation-valid",
         "https://example.com/initial-validation/valid",
@@ -45,11 +45,46 @@ where
     close(&scheduler).await;
 }
 
+pub(super) async fn unbound_push_is_atomic<S>(scheduler: S)
+where
+    S: Scheduler + spider::scheduler::Init,
+{
+    open_run(&scheduler).await;
+
+    for (id, field) in [
+        ("push-empty-task", "task_id"),
+        ("push-empty-trace", "trace_id"),
+    ] {
+        let valid = request(&format!("{id}-valid"), "https://example.com/push/valid");
+        let mut invalid = request(id, "https://example.com/push/invalid");
+        if field == "task_id" {
+            invalid.task_id.clear();
+        } else {
+            invalid.trace_id.clear();
+        }
+
+        let error = scheduler
+            .push(payload::Payload::new().requests(vec![valid, invalid]))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(field));
+    }
+
+    assert!(
+        scheduler
+            .next_requests(2, WORKER_A, HTTP)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    close(&scheduler).await;
+}
+
 pub(super) async fn request_replay_is_atomic<S>(scheduler: S)
 where
-    S: Scheduler + 'static,
+    S: Scheduler + spider::scheduler::Init + 'static,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
     let original = request("replay", "https://example.com/replay");
     let first = payload::Payload::new().requests(vec![original.clone()]);
     let second = payload::Payload::new().requests(vec![original.clone()]);

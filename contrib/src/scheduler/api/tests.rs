@@ -19,6 +19,7 @@ mod recovery;
 mod transport;
 
 fn claimed(snapshot: net::request::Snapshot) -> serde_json::Value {
+    let trace = trace::Snapshot::code(&snapshot.task_id);
     json!({
         "snapshot": snapshot,
         "execution": {
@@ -29,8 +30,15 @@ fn claimed(snapshot: net::request::Snapshot) -> serde_json::Value {
             "retry_count": 0,
             "failed_workers": []
         },
-        "trace": null
+        "trace": trace
     })
+}
+
+fn bound_request(url: impl Into<String>) -> net::Request {
+    let mut request = net::Request::follow(url).unwrap();
+    request.task_id = "task-1".to_string();
+    request.trace_id = "trace-1".to_string();
+    request
 }
 
 fn unavailable(message: &str) -> Response {

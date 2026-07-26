@@ -1,6 +1,6 @@
 use spider::{Scheduler, payload};
 
-use super::{key, request, server, settlement, worker};
+use super::{key, request, run, server, settlement, worker};
 
 async fn replace_snapshot_url(
     connection: &mut redis::aio::MultiplexedConnection,
@@ -52,12 +52,13 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
     };
     let namespace = server::namespace("snapshot-integrity-terminal");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut tampered = request::new("tampered-terminal", "https://example.com/original");
     tampered.priority = 20;
     tampered.max_retry_count = 1;
-    let mut valid = request::new("valid-same-batch", "https://example.com/valid");
+    let mut valid = request::new("valid-alongside-tampered", "https://example.com/valid");
     valid.priority = 10;
     scheduler
         .push(payload::Payload::new().requests(vec![tampered, valid]))
@@ -78,7 +79,7 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
         .await
         .unwrap();
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].id, "valid-same-batch");
+    assert_eq!(claimed[0].id, "valid-alongside-tampered");
     settlement::succeed(&scheduler, &claimed[0]).await;
 
     let tampered_key = key::request(&namespace, "tampered-terminal");
@@ -121,7 +122,8 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
     };
     let namespace = server::namespace("snapshot-integrity-retry");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut tampered = request::new("tampered-retry", "https://example.com/original");
     tampered.max_retry_count = 2;
@@ -207,7 +209,8 @@ async fn mutable_hash_cannot_override_the_snapshot_retry_limit() {
     };
     let namespace = server::namespace("snapshot-retry-limit");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut request = request::new("retry-limit", "https://example.com/retry-limit");
     request.max_retry_count = 1;
@@ -266,7 +269,8 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
     };
     let namespace = server::namespace("cross-request-retry-limit");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     let mut target = request::new("retry-target", "https://example.com/retry-target");
     target.priority = 20;
@@ -315,6 +319,172 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
         .unwrap();
     assert_eq!(state, "failed");
     assert_eq!(max_retry_count, 1);
+
+    scheduler.close().await.unwrap();
+    server.clear(&namespace).await;
+}
+
+#[tokio::test]
+async fn replay_rejects_a_removed_trace_without_mutating_requests() {
+    let Some(server) = server::Handle::connect().await else {
+        return;
+    };
+    let namespace = server::namespace("missing-trace-replay");
+    let scheduler = server.redis(&namespace);
+    server::open(&scheduler).await;
+    run::init(&scheduler).await;
+
+    let replay = request::new(
+        "missing-trace-replay-request",
+        "https://example.com/missing-trace-replay",
+    );
+    scheduler
+        .push(payload::Payload::new().requests(vec![replay.clone()]))
+        .await
+        .unwrap();
+
+    let mut connection = server.connection().await;
+    let request_key = key::request(&namespace, "missing-trace-replay-request");
+    let before = redis::cmd("HGETALL")
+        .arg(&request_key)
+        .query_async::<std::collections::HashMap<String, String>>(&mut connection)
+        .await
+        .unwrap();
+    redis::cmd("HDEL")
+        .arg(format!("{namespace}:traces"))
+        .arg(run::TRACE_ID)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+
+    let missing = request::for_trace(
+        "missing-before-conflict",
+        "https://example.com/missing-before-conflict",
+        run::TASK_ID,
+        "missing-before-conflict-trace",
+    );
+    let conflict = request::new(
+        "missing-trace-replay-request",
+        "https://example.com/conflicting-snapshot",
+    );
+    let error = scheduler
+        .push(payload::Payload::new().requests(vec![missing, conflict]))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with existing Snapshot")
+    );
+    let missing_exists = redis::cmd("EXISTS")
+        .arg(key::request(&namespace, "missing-before-conflict"))
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(missing_exists, 0);
+
+    let new = request::new(
+        "missing-trace-replay-new",
+        "https://example.com/missing-trace-replay/new",
+    );
+    let error = scheduler
+        .push(payload::Payload::new().requests(vec![replay, new]))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        spider::scheduler::Error::TraceNotFound(id) if id == run::TRACE_ID
+    ));
+    let after = redis::cmd("HGETALL")
+        .arg(&request_key)
+        .query_async::<std::collections::HashMap<String, String>>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    let new_exists = redis::cmd("EXISTS")
+        .arg(key::request(&namespace, "missing-trace-replay-new"))
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(new_exists, 0);
+
+    scheduler.close().await.unwrap();
+    server.clear(&namespace).await;
+}
+
+#[tokio::test]
+async fn replay_rejects_a_missing_trace_task_owner() {
+    let Some(server) = server::Handle::connect().await else {
+        return;
+    };
+    let namespace = server::namespace("missing-trace-task-owner");
+    let scheduler = server.redis(&namespace);
+    server::open(&scheduler).await;
+    run::init(&scheduler).await;
+    let replay = request::new(
+        "missing-trace-task-owner-request",
+        "https://example.com/missing-trace-task-owner",
+    );
+    scheduler
+        .push(payload::Payload::new().requests(vec![replay.clone()]))
+        .await
+        .unwrap();
+
+    let mut connection = server.connection().await;
+    redis::cmd("HDEL")
+        .arg(format!("{namespace}:trace_tasks"))
+        .arg(run::TRACE_ID)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    let error = scheduler
+        .push(payload::Payload::new().requests(vec![replay]))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        spider::scheduler::Error::TraceNotFound(id) if id == run::TRACE_ID
+    ));
+
+    scheduler.close().await.unwrap();
+    server.clear(&namespace).await;
+}
+
+#[tokio::test]
+async fn replay_rejects_a_mismatched_trace_task_owner() {
+    let Some(server) = server::Handle::connect().await else {
+        return;
+    };
+    let namespace = server::namespace("mismatched-trace-task-owner");
+    let scheduler = server.redis(&namespace);
+    server::open(&scheduler).await;
+    run::init(&scheduler).await;
+    let replay = request::new(
+        "mismatched-trace-task-owner-request",
+        "https://example.com/mismatched-trace-task-owner",
+    );
+    scheduler
+        .push(payload::Payload::new().requests(vec![replay.clone()]))
+        .await
+        .unwrap();
+
+    let mut connection = server.connection().await;
+    redis::cmd("HSET")
+        .arg(format!("{namespace}:trace_tasks"))
+        .arg(run::TRACE_ID)
+        .arg("other-task")
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    let error = scheduler
+        .push(payload::Payload::new().requests(vec![replay]))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        spider::scheduler::Error::IdentityMismatch { id, field }
+            if id == "mismatched-trace-task-owner-request" && field == "task_id"
+    ));
 
     scheduler.close().await.unwrap();
     server.clear(&namespace).await;

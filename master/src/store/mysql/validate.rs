@@ -35,14 +35,7 @@ pub(super) fn identity(value: &types::Identity) -> Result<(), Error> {
     identifier(&value.id, "request id")?;
     worker_id(&value.worker_id)?;
     identifier(&value.node, "request node")?;
-    if value.task_id.is_empty() != value.trace_id.is_empty() {
-        return Err(Error::Invalid(
-            "request identity task_id and trace_id must both be set or both be empty".to_string(),
-        ));
-    }
-    if !value.task_id.is_empty() {
-        identifier(&value.task_id, "task_id")?;
-        identifier(&value.trace_id, "trace_id")?;
-    }
+    identifier(&value.task_id, "task_id")?;
+    identifier(&value.trace_id, "trace_id")?;
     Ok(())
 }

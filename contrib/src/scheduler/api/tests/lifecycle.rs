@@ -83,7 +83,7 @@ async fn close_waits_for_an_in_flight_trace_and_clears_its_cache() {
 
 #[tokio::test]
 async fn close_waits_for_an_in_flight_claim_and_blocks_later_claims() {
-    let mut request = net::Request::follow("https://example.com/article").unwrap();
+    let mut request = bound_request("https://example.com/article");
     request.id = "request-1".to_string();
     let snapshot = net::request::Snapshot::try_from(request).unwrap();
     let (reached, request_started) = std::sync::mpsc::channel();

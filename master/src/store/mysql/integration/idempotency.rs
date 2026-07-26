@@ -7,7 +7,7 @@ use super::{
     Database, Result, claim, completion, identity, init, init_body, require, require_one_conflict,
     snapshot,
 };
-use crate::types;
+use crate::{Error, types};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -98,14 +98,13 @@ async fn concurrent_items_are_written_once() -> Result<()> {
 }
 
 async fn exercise_items(database: &Database) -> Result<()> {
-    init(database, "items-init", "items-task", "items-trace", &[], 1).await?;
     let context = types::Identity {
-        id: String::new(),
+        id: "items-request".to_string(),
         task_id: "items-task".to_string(),
         trace_id: "items-trace".to_string(),
-        version: 0,
-        worker_id: String::new(),
-        node: String::new(),
+        version: 1,
+        worker_id: "items-worker".to_string(),
+        node: "detail".to_string(),
     };
     let body = types::Items {
         context: context.clone(),
@@ -161,6 +160,64 @@ async fn exercise_items(database: &Database) -> Result<()> {
     require(
         count(database, "items", "item_id IN ('item-left', 'item-right')").await? == 1,
         "different Item bodies both mutated storage",
+    )
+}
+
+#[tokio::test]
+async fn invalid_item_id_rejects_the_entire_submission() -> Result<()> {
+    let Some(database) = Database::connect(128).await? else {
+        return Ok(());
+    };
+    let result = exercise_invalid_item_id(&database).await;
+    database.teardown(result).await
+}
+
+async fn exercise_invalid_item_id(database: &Database) -> Result<()> {
+    let body = types::Items {
+        context: types::Identity {
+            id: String::new(),
+            task_id: "invalid-items-task".to_string(),
+            trace_id: "invalid-items-trace".to_string(),
+            version: 0,
+            worker_id: String::new(),
+            node: String::new(),
+        },
+        items: vec![
+            types::item::Item {
+                id: "valid-item".to_string(),
+                data: json!({"title": "valid"}),
+            },
+            types::item::Item {
+                id: String::new(),
+                data: json!({"title": "invalid"}),
+            },
+        ],
+    };
+
+    require(
+        matches!(
+            database
+                .store
+                .items(&database.namespace, "invalid-items", &body)
+                .await,
+            Err(crate::Error::Invalid(message))
+                if message == "every Item requires a non-empty framework Item ID"
+        ),
+        "empty framework Item ID did not return the store contract error",
+    )?;
+    require(
+        count(database, "items", "1 = 1").await? == 0,
+        "invalid Item submission partially mutated storage",
+    )?;
+    require(
+        count(
+            database,
+            "operations",
+            "kind = 'items' AND operation_key = 'invalid-items'",
+        )
+        .await?
+            == 0,
+        "invalid Item submission reserved an idempotency operation",
     )
 }
 
@@ -242,6 +299,67 @@ async fn exercise_claim(database: &Database) -> Result<()> {
 }
 
 #[tokio::test]
+async fn claim_replay_respects_the_current_response_limit() -> Result<()> {
+    let Some(database) = Database::connect(128).await? else {
+        return Ok(());
+    };
+    let result = exercise_claim_replay_limit(&database).await;
+    database.teardown(result).await
+}
+
+async fn exercise_claim_replay_limit(database: &Database) -> Result<()> {
+    let mut request = snapshot(
+        "claim-replay-limit-request",
+        "claim-replay-limit-task",
+        "claim-replay-limit-trace",
+        1,
+    );
+    request.vals.insert(
+        "content".to_string(),
+        serde_json::Value::String("x".repeat(2048)),
+    );
+    database
+        .store
+        .init(
+            &database.namespace,
+            "claim-replay-limit-init",
+            &init_body(
+                "claim-replay-limit-task",
+                "claim-replay-limit-trace",
+                vec![request],
+            ),
+        )
+        .await?;
+    let body = types::Claim {
+        limit: 1,
+        worker_id: "claim-replay-limit-worker".to_string(),
+        modes: vec![spider::net::Mode::Http],
+    };
+    let first = database
+        .store
+        .claim(&database.namespace, "claim-replay-limit", &body)
+        .await?;
+    let bytes = serde_json::to_vec(&first)?.len();
+    require(
+        bytes > 1024,
+        "claim replay fixture did not exceed the minimum API limit",
+    )?;
+
+    let mut restricted = database.store.clone();
+    restricted.max_response_bytes = bytes - 1;
+    let replay = restricted
+        .claim(&database.namespace, "claim-replay-limit", &body)
+        .await;
+    require(
+        matches!(
+            replay,
+            Err(Error::ResponseTooLarge { max }) if max == bytes - 1
+        ),
+        "claim replay bypassed the current API response limit",
+    )
+}
+
+#[tokio::test]
 async fn concurrent_release_replays_one_transition() -> Result<()> {
     let Some(database) = Database::connect(128).await? else {
         return Ok(());
@@ -302,6 +420,94 @@ async fn exercise_release(database: &Database) -> Result<()> {
         count(database, "requests", "state = 0").await? == 2
             && count(database, "requests", "state = 1").await? == 1,
         "different release bodies both transitioned Requests",
+    )
+}
+
+#[tokio::test]
+async fn request_push_replay_survives_parent_completion() -> Result<()> {
+    let Some(database) = Database::connect(128).await? else {
+        return Ok(());
+    };
+    let result = exercise_request_push_replay(&database).await;
+    database.teardown(result).await
+}
+
+async fn exercise_request_push_replay(database: &Database) -> Result<()> {
+    init(
+        database,
+        "push-replay-init",
+        "push-replay-task",
+        "push-replay-trace",
+        &["push-replay-parent"],
+        1,
+    )
+    .await?;
+    let parent = claim(database, "push-replay-claim", "push-replay-worker", 1)
+        .await?
+        .pop()
+        .ok_or_else(|| std::io::Error::other("push replay fixture did not claim its parent"))?;
+    let identity = identity(&parent, "push-replay-worker");
+    let child = snapshot(
+        "push-replay-child",
+        "push-replay-task",
+        "push-replay-trace",
+        1,
+    );
+    let body = types::Push {
+        context: identity.clone(),
+        requests: vec![child.clone()],
+    };
+
+    require(
+        matches!(
+            database.store.push(&database.namespace, &body).await,
+            Err(Error::NotAcknowledged(id)) if id == identity.id
+        ),
+        "an unacknowledged parent published a child Request",
+    )?;
+    require(
+        count(database, "requests", "id = 'push-replay-child'").await? == 0,
+        "failed child publication partially mutated storage",
+    )?;
+
+    database.store.ack(&database.namespace, &identity).await?;
+    database.store.push(&database.namespace, &body).await?;
+    database
+        .store
+        .success(
+            &database.namespace,
+            &completion(identity, Default::default(), None),
+        )
+        .await?;
+
+    database.store.push(&database.namespace, &body).await?;
+    require(
+        count(database, "requests", "id = 'push-replay-child'").await? == 1,
+        "push replay duplicated the child Request",
+    )?;
+
+    let mixed = types::Push {
+        context: body.context.clone(),
+        requests: vec![
+            child,
+            snapshot(
+                "push-replay-new-child",
+                "push-replay-task",
+                "push-replay-trace",
+                1,
+            ),
+        ],
+    };
+    require(
+        matches!(
+            database.store.push(&database.namespace, &mixed).await,
+            Err(Error::Lease(id)) if id == body.context.id
+        ),
+        "a completed parent did not return the expected lease error for a new child Request",
+    )?;
+    require(
+        count(database, "requests", "id = 'push-replay-new-child'").await? == 0,
+        "mixed replay partially inserted its new child Request",
     )
 }
 

@@ -8,9 +8,6 @@ pub(super) fn ownership<'a>(
     for snapshot in snapshots {
         let request_id = snapshot.id.clone();
         let (task_id, trace_id) = (&snapshot.task_id, &snapshot.trace_id);
-        if trace_id.is_empty() {
-            continue;
-        }
         let trace = state
             .trace_snapshots
             .get(trace_id)

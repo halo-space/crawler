@@ -1,16 +1,16 @@
 use spider::{Scheduler, payload};
 
 use super::{
-    fixture::{HTTP, WORKER_A, close, open},
+    fixture::{HTTP, WORKER_A, close, open_run},
     payload::request,
     settlement::succeed,
 };
 
 pub(super) async fn request_retry_limit_is_enforced<S>(scheduler: S)
 where
-    S: Scheduler,
+    S: Scheduler + spider::scheduler::Init,
 {
-    open(&scheduler).await;
+    open_run(&scheduler).await;
 
     let mut accepted = request("retry-limit", "https://example.com/retry-limit");
     accepted.max_retry_count = spider::net::request::MAX_RETRY_COUNT;

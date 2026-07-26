@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn expired_acknowledged_request_is_reclaimed_with_a_new_version() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com");
     request.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -56,8 +56,8 @@ async fn expired_acknowledged_request_is_reclaimed_with_a_new_version() {
 
 #[tokio::test]
 async fn expired_unacknowledged_claim_does_not_consume_an_attempt() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com");
     request.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -90,8 +90,8 @@ async fn expired_unacknowledged_claim_does_not_consume_an_attempt() {
 
 #[tokio::test]
 async fn release_requeues_without_consuming_retry_budget() {
-    let scheduler = Memory::new();
-    let mut request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let mut request = request("https://example.com");
     request.max_retry_count = 3;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
@@ -124,8 +124,8 @@ async fn release_requeues_without_consuming_retry_budget() {
 
 #[tokio::test]
 async fn release_defers_version_advance_until_the_next_claim() {
-    let scheduler = Memory::new();
-    let request = net::Request::follow("https://example.com").unwrap();
+    let scheduler = memory();
+    let request = request("https://example.com");
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -172,7 +172,7 @@ async fn release_defers_version_advance_until_the_next_claim() {
 
 #[tokio::test]
 async fn release_conversion_failure_records_a_terminal_error() {
-    let scheduler = Memory::new();
+    let scheduler = memory();
     let config = rules_config("broken", "index");
     let request = config
         .initial_requests("broken", "trace-broken", HashMap::new())
@@ -218,10 +218,8 @@ async fn release_conversion_failure_records_a_terminal_error() {
 
 #[tokio::test]
 async fn expired_lease_recovery_preserves_browser_mode_eligibility() {
-    let scheduler = Memory::new();
-    let mut browser = net::Request::follow("https://example.com/browser")
-        .unwrap()
-        .mode(net::Mode::Browser);
+    let scheduler = memory();
+    let mut browser = request("https://example.com/browser").mode(net::Mode::Browser);
     browser.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![browser]))
@@ -258,10 +256,8 @@ async fn expired_lease_recovery_preserves_browser_mode_eligibility() {
 
 #[tokio::test]
 async fn release_preserves_browser_mode_and_pending_state() {
-    let scheduler = Memory::new();
-    let browser = net::Request::follow("https://example.com/browser")
-        .unwrap()
-        .mode(net::Mode::Browser);
+    let scheduler = memory();
+    let browser = request("https://example.com/browser").mode(net::Mode::Browser);
     scheduler
         .push(payload::Payload::new().requests(vec![browser]))
         .await
@@ -299,10 +295,8 @@ async fn release_preserves_browser_mode_and_pending_state() {
 
 #[tokio::test]
 async fn expired_unacknowledged_browser_claim_remains_pending() {
-    let scheduler = Memory::new();
-    let browser = net::Request::follow("https://example.com/browser")
-        .unwrap()
-        .mode(net::Mode::Browser);
+    let scheduler = memory();
+    let browser = request("https://example.com/browser").mode(net::Mode::Browser);
     scheduler
         .push(payload::Payload::new().requests(vec![browser]))
         .await

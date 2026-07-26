@@ -10,7 +10,8 @@ async fn close_preserves_data_for_a_new_scheduler_instance() {
     };
     let namespace = server::namespace("restart");
     let first = server.redis(&namespace);
-    first.open().await.unwrap();
+    server::open(&first).await;
+    super::run::init(&first).await;
 
     let initial = request::for_trace(
         "restart-request",
@@ -35,7 +36,8 @@ async fn close_preserves_data_for_a_new_scheduler_instance() {
     );
 
     let second = server.redis(&namespace);
-    second.open().await.unwrap();
+    server::open(&second).await;
+    super::run::init(&second).await;
     assert_eq!(
         second
             .trace("restart-trace")
@@ -66,8 +68,10 @@ async fn namespaces_isolate_identical_request_ids() {
     let right_namespace = server::namespace("right");
     let left = server.redis(&left_namespace);
     let right = server.redis(&right_namespace);
-    left.open().await.unwrap();
-    right.open().await.unwrap();
+    server::open(&left).await;
+    super::run::init(&left).await;
+    server::open(&right).await;
+    super::run::init(&right).await;
 
     left.push(payload::Payload::new().requests(vec![request::new(
         "shared-id",
@@ -119,7 +123,8 @@ async fn terminal_settlement_clears_lease_and_queue_fields() {
     };
     let namespace = server::namespace("terminal-fields");
     let scheduler = server.redis(&namespace);
-    scheduler.open().await.unwrap();
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
 
     scheduler
         .push(payload::Payload::new().requests(vec![request::new(

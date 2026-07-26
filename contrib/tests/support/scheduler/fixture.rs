@@ -2,7 +2,10 @@ use std::future::Future;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use spider::{Scheduler, net};
+use spider::scheduler::Init;
+use spider::{Scheduler, net, trace};
+
+use super::payload::{TASK_ID, TRACE_ID};
 
 pub(crate) const WORKER_A: &str = "worker-a";
 pub(crate) const WORKER_B: &str = "worker-b";
@@ -76,6 +79,21 @@ where
     S: Scheduler,
 {
     scheduler.open().await.unwrap();
+}
+
+pub(super) async fn open_run<S>(scheduler: &S)
+where
+    S: Scheduler + Init,
+{
+    open(scheduler).await;
+    scheduler
+        .init(
+            TRACE_ID.to_string(),
+            trace::Snapshot::code(TASK_ID),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
 }
 
 pub(super) async fn close<S>(scheduler: &S)

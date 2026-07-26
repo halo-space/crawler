@@ -186,7 +186,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::scheduler::Scheduler;
+    use crate::scheduler::{Init, Scheduler};
 
     struct PanickingDownload;
 
@@ -234,8 +234,11 @@ mod tests {
     struct Executor;
 
     impl engine::contract::Execute for Executor {
-        async fn allowed_domains(&self, _request: &crate::net::Request) -> Vec<String> {
-            Vec::new()
+        async fn allowed_domains(
+            &self,
+            _request: &crate::net::Request,
+        ) -> Result<Vec<String>, crate::Error> {
+            Ok(Vec::new())
         }
 
         fn validate(&self, _request: &crate::net::Request) -> Result<(), crate::Error> {
@@ -254,10 +257,20 @@ mod tests {
     #[tokio::test]
     async fn request_panic_is_settled_as_failure() {
         let scheduler = Arc::new(scheduler::Memory::new());
-        let request = crate::net::Request::follow(
+        scheduler
+            .init(
+                "trace-1".to_string(),
+                crate::trace::Snapshot::code("task-1"),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let mut request = crate::net::Request::follow(
             "https://user:password@example.com/private?api_key=url-secret",
         )
         .unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
         scheduler
             .push(payload::Payload::new().requests(vec![request]))
             .await
@@ -302,7 +315,17 @@ mod tests {
         let lease =
             scheduler::Lease::new(Duration::from_millis(10), Duration::from_millis(1)).unwrap();
         let scheduler = Arc::new(scheduler::Memory::new().with_lease(lease));
-        let request = crate::net::Request::follow("https://example.com").unwrap();
+        scheduler
+            .init(
+                "trace-1".to_string(),
+                crate::trace::Snapshot::code("task-1"),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let mut request = crate::net::Request::follow("https://example.com").unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
         let request_id = request.id.clone();
         scheduler
             .push(payload::Payload::new().requests(vec![request]))

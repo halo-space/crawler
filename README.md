@@ -30,6 +30,10 @@ For code mode with the default Memory Scheduler, each start creates one run seed
 Scheduler can declare that it consumes an existing run; in that code-mode path Engine neither
 creates a local Trace nor calls `Spider.start()`. Persisted code Requests contain only the stable
 node name, and the Worker resolves that node through its local Spider registry.
+`Request::follow()` only constructs a Request specification, so its `task_id / trace_id` remain empty
+until a run seed or current Tx context binds them. `Scheduler::init` and `Scheduler::push` reject an
+unbound Request; queued Snapshots, claims, retries, and recovery always carry both identities and a
+real Trace Snapshot. Code mode uses a Trace Snapshot whose `dsl` is empty rather than omitting Trace.
 
 Rules startup statically validates the configuration, freezes the Trace Snapshot, materializes the
 initial Requests, and passes both directly to atomic `Scheduler::init`. Publishing a run seed never

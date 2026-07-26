@@ -15,6 +15,7 @@ pub trait Scheduler: Send + Sync {
     fn close(&self) -> impl Future<Output = Result<(), crate::scheduler::Error>> + Send;
 
     /// 提交本轮解析产生的 Request，只消费 `payload.requests`。
+    /// 每个 Request 必须已经绑定非空的 `task_id` 和 `trace_id`。
     /// 相同 ID 与初始 Snapshot 的重放是 no-op；任一 Snapshot 冲突必须整批失败。
     fn push(
         &self,
