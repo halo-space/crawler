@@ -125,7 +125,7 @@ objects, or arrays:
 
 ```rust
 let document: serde_json::Value = response.json()?;
-let codes = spider::selector::json::select(&document, "$.data.diff[*].f12")?;
+let stock_codes = spider::selector::json::select(&document, "$.data.diff[*].f12")?;
 ```
 
 Rules mode uses the same selector directly. This is a complete configuration for the EastMoney test
@@ -156,12 +156,30 @@ graph:
             extractors:
               - kind: json
                 expr: $.data.total
-  edges: []
+  edges:
+    - from: index
+      kind: item
+      fn: save
+      vals:
+        quotes: {from: $fields.quotes}
+        stock_codes: {from: $fields.stock_codes}
+        total: {from: $fields.total}
+
+item:
+  schema:
+    fields:
+      quotes: {type: array}
+      stock_codes: {type: array}
+      total: {type: int}
 ```
 
 `quotes`, `stock_codes`, and `total` are application-defined output field names, not JSON extractor
 keywords. Later Rules expressions can reference them as `$fields.quotes`, `$fields.stock_codes`, and
 `$fields.total`. Only `kind: json` and the RFC 9535 JSONPath `expr` are fixed parts of the extractor.
+
+The Item edge passes the parsed values to the Rust Spider Item handler registered as `save`. When
+`fn` is omitted, the framework calls the handler named `item`. `item.schema` remains the per-Rules
+field-validation contract.
 
 For example, `$.data.diff[*].f12` selects security codes from the EastMoney quote response. A valid miss
 continues to the next extractor. One match remains its JSON value and multiple matches become an

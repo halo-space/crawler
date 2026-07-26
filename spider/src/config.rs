@@ -342,14 +342,39 @@ graph:
     index:
       parse:
         fields:
-          codes:
+          quotes:
+            required: true
+            extractors:
+              - kind: json
+                expr: $.data.diff[*]
+          stock_codes:
             extractors:
               - kind: json
                 expr: $.data.diff[*].f12
-  edges: []
+          total:
+            extractors:
+              - kind: json
+                expr: $.data.total
+  edges:
+    - from: index
+      kind: item
+      fn: save
+      vals:
+        quotes: {from: $fields.quotes}
+        stock_codes: {from: $fields.stock_codes}
+        total: {from: $fields.total}
+item:
+  schema:
+    fields:
+      quotes: {type: array}
+      stock_codes: {type: array}
+      total: {type: int}
 "#;
 
-        assert!(Config::from_yaml(rules).is_ok());
+        let config = Config::from_yaml(rules).unwrap();
+        assert_eq!(config.graph.edges.len(), 1);
+        assert_eq!(config.graph.edges[0].kind, graph::edge::Kind::Item);
+        assert_eq!(config.graph.edges[0].function.as_deref(), Some("save"));
 
         let invalid = rules.replace("$.data.diff[*].f12", "$.data[");
         let error = Config::from_yaml(&invalid).unwrap_err();
