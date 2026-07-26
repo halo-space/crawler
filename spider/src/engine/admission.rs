@@ -107,12 +107,8 @@ mod tests {
             middleware::Spec::new("dedup")
                 .hook("before_scheduler")
                 .args(serde_json::json!({
-                    "rules": {
-                        "url": {
-                            "key": ["$request.url"],
-                            "ttl": -1
-                        }
-                    }
+                    "key": ["$request.url"],
+                    "ttl": -1
                 })),
         );
         let mut wrong_owner = request.clone();
@@ -166,12 +162,8 @@ mod tests {
         let dedup = Spec::new("dedup")
             .hook("before_scheduler")
             .args(serde_json::json!({
-                "rules": {
-                    "url": {
-                        "key": ["$request.url"],
-                        "ttl": -1
-                    }
-                }
+                "key": ["$request.url"],
+                "ttl": -1
             }));
         let mut request = net::Request::follow("https://example.com/article").unwrap();
         request.task_id = "task-1".to_string();
@@ -207,12 +199,8 @@ mod tests {
             Spec::new("dedup")
                 .hook("before_scheduler")
                 .args(serde_json::json!({
-                    "rules": {
-                        "url": {
-                            "key": ["$request.url"],
-                            "ttl": -1
-                        }
-                    }
+                    "key": ["$request.url"],
+                    "ttl": -1
                 })),
         ];
         let error = apply(vec![changed_trace], Some(&context), &registry)
@@ -235,12 +223,8 @@ mod tests {
         let dedup = Spec::new("dedup")
             .hook("before_scheduler")
             .args(serde_json::json!({
-                "rules": {
-                    "url": {
-                        "key": ["$request.url"],
-                        "ttl": -1
-                    }
-                }
+                "key": ["$request.url"],
+                "ttl": -1
             }));
         let mut request = net::Request::follow("https://example.com/article").unwrap();
         request.task_id = "task-1".to_string();

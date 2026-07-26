@@ -209,21 +209,9 @@ struct LifecycleMiddleware {
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
-struct SkipInitialRequest;
+struct RejectSeedAdmission;
 
-impl Middleware for SkipInitialRequest {
-    fn before_scheduler<'a>(
-        &'a self,
-        _request: net::Request,
-        _spec: &'a Spec,
-    ) -> BoxFuture<'a, Next<net::Request>> {
-        Box::pin(async { Ok(Next::Skip) })
-    }
-}
-
-struct RejectInitialRequest;
-
-impl Middleware for RejectInitialRequest {
+impl Middleware for RejectSeedAdmission {
     fn before_scheduler<'a>(
         &'a self,
         _request: net::Request,
@@ -231,23 +219,8 @@ impl Middleware for RejectInitialRequest {
     ) -> BoxFuture<'a, Next<net::Request>> {
         Box::pin(async {
             Err(spider::middleware::Error::Message(
-                "initial Request rejected".to_string(),
+                "Rules seed admission must not run".to_string(),
             ))
-        })
-    }
-}
-
-struct RewriteInitialRequest;
-
-impl Middleware for RewriteInitialRequest {
-    fn before_scheduler<'a>(
-        &'a self,
-        mut request: net::Request,
-        _spec: &'a Spec,
-    ) -> BoxFuture<'a, Next<net::Request>> {
-        Box::pin(async move {
-            request.url = "https://example.com/fail".to_string();
-            Ok(Next::Continue(request))
         })
     }
 }
@@ -508,11 +481,11 @@ graph:
 }
 
 #[tokio::test]
-async fn rules_initial_requests_run_dedup_before_atomic_init() {
+async fn rules_seeds_bypass_admission_but_runtime_requests_use_dedup() {
     let config = spider::config::Config::from_yaml(
         r#"
 spider:
-  name: rules-initial-dedup
+  name: rules-seed-publication
   start:
     - node: index
       url: https://example.com/article
@@ -520,25 +493,40 @@ spider:
         - name: dedup
           hook: before_scheduler
           args:
-            rules:
-              url: {key: ["$request.url"], ttl: -1}
+            key: ["$request.url"]
+            ttl: -1
+        - name: reject-seed-admission
+          hook: before_scheduler
     - node: index
       url: https://example.com/article
       middlewares:
         - name: dedup
           hook: before_scheduler
           args:
-            rules:
-              url: {key: ["$request.url"], ttl: -1}
+            key: ["$request.url"]
+            ttl: -1
 graph:
   nodes:
     index: {}
-  edges: []
+    detail: {}
+  edges:
+    - from: index
+      kind: request
+      request:
+        node: detail
+        url: {from: $response.url}
+        middlewares:
+          - name: dedup
+            hook: before_scheduler
+            args:
+              key: ["$request.url"]
+              ttl: -1
 "#,
     )
     .unwrap();
     let mut engine = engine::Builder::new()
         .with_rules(config)
+        .with_middleware("reject-seed-admission", RejectSeedAdmission)
         .with_spider(RulesSpider::new())
         .with_downloader(TestDownload)
         .build();
@@ -546,105 +534,10 @@ graph:
     engine.start().await.unwrap();
 
     assert_eq!(engine.scheduler().trace_len(), 1);
-    assert_eq!(engine.scheduler().done_len(), 1);
+    assert_eq!(engine.scheduler().done_len(), 3);
     assert_eq!(engine.scheduler().failed_len(), 0);
-}
-
-#[tokio::test]
-async fn rules_initial_requests_may_all_be_filtered() {
-    let config = spider::config::Config::from_yaml(
-        r#"
-spider:
-  name: rules-empty-run
-  start:
-    - node: index
-      url: https://example.com/article
-      middlewares:
-        - {name: skip-initial, hook: before_scheduler}
-graph:
-  nodes:
-    index: {}
-  edges: []
-"#,
-    )
-    .unwrap();
-    let mut engine = engine::Builder::new()
-        .with_rules(config)
-        .with_middleware("skip-initial", SkipInitialRequest)
-        .with_spider(RulesSpider::new())
-        .with_downloader(TestDownload)
-        .build();
-
-    engine.start().await.unwrap();
-
-    assert_eq!(engine.scheduler().trace_len(), 1);
-    assert_eq!(engine.scheduler().queued_len(), 0);
-    assert_eq!(engine.scheduler().done_len(), 0);
-    assert_eq!(engine.scheduler().failed_len(), 0);
-}
-
-#[tokio::test]
-async fn rules_initial_request_error_does_not_create_a_partial_run() {
-    let config = spider::config::Config::from_yaml(
-        r#"
-spider:
-  name: rules-rejected-run
-  start:
-    - node: index
-      url: https://example.com/article
-      middlewares:
-        - {name: reject-initial, hook: before_scheduler}
-graph:
-  nodes:
-    index: {}
-  edges: []
-"#,
-    )
-    .unwrap();
-    let mut engine = engine::Builder::new()
-        .with_rules(config)
-        .with_middleware("reject-initial", RejectInitialRequest)
-        .with_spider(RulesSpider::new())
-        .with_downloader(TestDownload)
-        .build();
-
-    let error = engine.start().await.unwrap_err();
-
-    assert!(error.to_string().contains("initial Request rejected"));
-    assert_eq!(engine.scheduler().trace_len(), 0);
-    assert_eq!(engine.scheduler().queued_len(), 0);
-    assert_eq!(engine.scheduler().processing_len(), 0);
-}
-
-#[tokio::test]
-async fn rules_initial_request_uses_middleware_changes() {
-    let config = spider::config::Config::from_yaml(
-        r#"
-spider:
-  name: rules-rewritten-run
-  start:
-    - node: index
-      url: https://example.com/original
-      middlewares:
-        - {name: rewrite-initial, hook: before_scheduler}
-graph:
-  nodes:
-    index: {}
-  edges: []
-"#,
-    )
-    .unwrap();
-    let mut engine = engine::Builder::new()
-        .with_rules(config)
-        .with_middleware("rewrite-initial", RewriteInitialRequest)
-        .with_spider(RulesSpider::new())
-        .with_downloader(TestDownload)
-        .build();
-
-    engine.start().await.unwrap();
-
-    assert_eq!(engine.scheduler().done_len(), 0);
-    assert_eq!(engine.scheduler().failed_len(), 1);
+    let trace_id = engine.scheduler().trace_ids().pop().unwrap();
+    assert_eq!(engine.scheduler().trace_stats(&trace_id)["detail"].dedup, 1);
 }
 
 struct RulesDownload;

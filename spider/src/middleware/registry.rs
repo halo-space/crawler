@@ -42,6 +42,7 @@ impl Registry {
         let id = request.id.clone();
         let task_id = request.task_id.clone();
         let trace_id = request.trace_id.clone();
+        let node = request.node_key().to_string();
         for bind in self.resolve(&request.middlewares, "before_scheduler", true)? {
             request = match bind
                 .middleware
@@ -61,6 +62,7 @@ impl Registry {
                     ("id", request.id == id),
                     ("task_id", request.task_id == task_id),
                     ("trace_id", request.trace_id == trace_id),
+                    ("node", request.node_key() == node),
                 ],
             )?;
         }
@@ -319,10 +321,10 @@ impl Registry {
             "validate",
             crate::middleware::validate::Validate::new(schemas),
         );
-        registry.register("dedup", crate::middleware::dedup::Dedup::default());
+        registry.register("dedup", crate::middleware::dedup::Memory::default());
         registry.register(
             "rate_limit",
-            crate::middleware::rate_limit::RateLimit::default(),
+            crate::middleware::rate_limit::Memory::default(),
         );
         registry.register("retry", crate::middleware::retry::Retry);
         registry
@@ -643,11 +645,11 @@ mod tests {
             100
         );
         assert_eq!(
-            crate::middleware::dedup::Dedup::default().order("before_scheduler"),
+            crate::middleware::dedup::Memory::default().order("before_scheduler"),
             400
         );
         assert_eq!(
-            crate::middleware::rate_limit::RateLimit::default().order("before_download"),
+            crate::middleware::rate_limit::Memory::default().order("before_download"),
             200
         );
         assert_eq!(crate::middleware::retry::Retry.order("error_download"), 100);

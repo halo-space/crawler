@@ -267,13 +267,9 @@ impl Request {
             middleware::Spec::new("dedup")
                 .hook("before_scheduler")
                 .args(serde_json::json!({
-                    "rules": {
-                        "request": {
-                            "key": key.into_iter().map(Into::into).collect::<Vec<String>>(),
-                            "normalize": {"enabled": true},
-                            "ttl": ttl,
-                        }
-                    }
+                    "key": key.into_iter().map(Into::into).collect::<Vec<String>>(),
+                    "normalize": {"enabled": true},
+                    "ttl": ttl,
                 })),
         )
     }
@@ -408,7 +404,7 @@ mod tests {
         assert_eq!(request.middlewares[0].args["count"], 2);
         assert_eq!(request.middlewares[1].args["group"], "example");
         assert_eq!(
-            request.middlewares[2].args["rules"]["request"]["key"],
+            request.middlewares[2].args["key"],
             serde_json::json!(["$request.url"])
         );
     }

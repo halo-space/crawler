@@ -31,7 +31,7 @@ The workspace contains five crates:
 | Regex and JSON | Implemented | Regex selection and code-mode `Response::json<T>()` |
 | AI Selector | Implemented | Explicit OpenAI-compatible JSON-object extraction, independent of CSS Healing |
 | AI runtime configuration | Implemented | One reusable Worker-local `ai::OpenAI` provider is injected with `Engine::with_ai`; provider configuration does not enter Rules or Trace snapshots |
-| Middleware | Implemented | Lifecycle Registry plus built-in validate, dedup, rate limit, and retry capabilities |
+| Middleware | Implemented | Lifecycle Registry, Worker-local Memory implementations, and optional RedisBloom Dedup/shared Redis RateLimit implementations |
 | Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots; attachment download is planned for v5 |
 | Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
 | Redis Scheduler | Implemented | Redis 7+ standalone only; namespaced complete Scheduler/Init contract, Lua-atomic transitions, and Redis Stream Item output |
@@ -165,14 +165,20 @@ flowchart TB
     F --> H
 
     I["Rules Engine starts"] --> J["Validate and freeze the full DSL"]
-    J --> L["Run before_scheduler<br/>for every initial Request"]
-    L --> K["Atomically initialize Trace Snapshot<br/>and accepted Requests"]
+    J --> L["Materialize initial Requests"]
+    L --> K["Atomically initialize Trace Snapshot<br/>and initial Requests"]
     K --> H
 ```
 
 `scheduler::Init::initializes_run()` currently controls code-mode local initialization. Memory returns `true`. A remote Scheduler defaults to `false`, so a code Worker can consume a run already published by an external task source without creating a local Trace or calling `Spider.start()`.
 
-Rules mode treats the loaded YAML as the definition of this run. Before claiming starts, every generated initial Request passes through the same `before_scheduler` admission path used by Tx output, then `rules::Init` atomically stores the Trace Snapshot and accepted Requests. If every Request is filtered, the empty run still stores its Trace Snapshot and finishes normally. A future externally dispatched Rules worker must preserve this snapshot contract instead of introducing a second identity model in the Worker.
+Rules mode treats the loaded YAML as the definition of this run. `rules::Init` validates and freezes
+the configuration, materializes its initial Requests, and atomically stores them with the Trace
+Snapshot. Run publication never executes Worker Middleware, `before_scheduler`, or Dedup. Middleware
+stored on an initial Request remains available to its later lifecycle stages, but its
+`before_scheduler` hook is not retroactively executed. Tx-produced Requests continue through the
+normal admission path before `Scheduler::push`. External publishers preserve the same snapshot and
+initial-Request contract without depending on Worker-local code.
 
 ## 5. Engine Actor
 
@@ -255,7 +261,7 @@ This prevents early termination while a list page is producing detail Requests, 
 `scheduler::Init` adds:
 
 - `initializes_run()`, which declares whether this Engine creates a local run;
-- `init(trace_id, snapshot, requests)`, which atomically stores a Trace Snapshot and its accepted initial Requests; an empty collection is valid after admission filtering.
+- `init(trace_id, snapshot, requests)`, which atomically stores a Trace Snapshot and its supplied initial Requests; an empty collection remains valid.
 
 `Payload` is the single transport envelope shared by these methods; the design does not add parallel Batch or Receipt structures. It carries Request execution identity, state, error, timing, statistics, and the `requests / items` output collections. Every Scheduler method rejects fields unrelated to its own semantics: `push` accepts Requests only, `push_items` accepts Items only, and settlement Payloads require both collections to be empty.
 
@@ -793,7 +799,7 @@ after_spider
 `Middleware::Next<T>` contains only `Continue(T)` and `Skip`. `Skip` is normal filtering and does not invoke the corresponding error hook. The Registry merges default Specs with object-local Specs, then orders them by `order` and declaration sequence.
 
 Request middleware may change only fields owned by its stage. `before_scheduler` must preserve
-`id / task_id / trace_id`; after a Request is claimed, `before_download` must also preserve `node` so
+`id / task_id / trace_id / node`; after a Request is claimed, `before_download` must also preserve `node` so
 execution and lease settlement cannot refer to different work. `before_download` may still change
 transport fields such as URL and headers.
 
@@ -802,8 +808,8 @@ Built-in implementations:
 | Middleware | Hook area | Semantics |
 | --- | --- | --- |
 | `validate` | Default normal hooks | Validate Request/Response invariants and validate Items through validator using `SchemaKey` |
-| `dedup` | `before_scheduler` | Build Request fingerprints from configured fields; omitted or `-1` TTL never expires |
-| `rate_limit` | `before_download` | Limit downloads by group and QPS |
+| `dedup` | `before_scheduler` | Scope Request membership by `task_id + node` and hash only explicitly configured ordered values |
+| `rate_limit` | `before_download` | Limit downloads by one total QPS schedule per group |
 | `retry` | Error configuration | Provide Worker-local retry policies for download, parse, and Item submission |
 
 `Builder::with_middleware(name, value)` registers a capability; it does not attach it to every object. Request, Response, Item, and Spider lifecycle Specs opt into capabilities explicitly. Only validate Specs for the normal stages are Registry defaults.
@@ -813,12 +819,36 @@ Downloader Response must have an absolute HTTP(S) URL with a host and a valid HT
 `after_download` validates that structure, while `before_parse` retains the separate policy of skipping
 non-success responses.
 
-Default Dedup handles only Request fingerprints built from explicitly configured keys; it never deduplicates Items or adds an implicit URL key. Both Rules initial Requests and Tx output pass through `before_scheduler`. Fingerprints are observed and inserted there, so a later `Scheduler::push` or run-seed `init` failure does not roll them back. SHA-256 hashes a structured tuple of `task_id`, Middleware key, rule name, and ordered values rather than an ad hoc concatenated namespace. URL normalization stably sorts query pairs only by key, preserving the original order of repeated keys. All active rules are checked and inserted under one lock after every finite TTL deadline has been validated, so a TTL error cannot partially mutate the store. A rule with `ttl: 0` neither checks nor stores its fingerprint; omitted TTL or `-1` remains for the process lifetime without capacity eviction. The exact in-memory store uses a `HashMap` plus an expiry heap and lazily removes only expired heap-head entries.
+One effective Dedup Spec defines one rule with flat `args.key / normalize / ttl`; nested
+`args.rules` is rejected. The bucket is `(task_id, node)`, and the item is
+`sha256(canonical_json(ordered configured values))`. Canonicalization recursively sorts object keys
+while preserving array order, path order, JSON types, and duplicate values. `trace_id`, Middleware
+name, `Spec.key`, Rules names, and an implicit URL are excluded. `Spec.key` remains only a Registry
+merge/skip identity. `dont_filter` bypasses configuration evaluation and storage.
+
+The default `dedup::Memory` is an exact Worker-local store. It calculates any finite deadline before
+locking, then atomically checks and inserts one structured `(task_id, node, item)` key. Omitted TTL
+or `-1` lasts for the process lifetime, `0` bypasses lookup and write, and a positive integer is
+milliseconds. Runtime Tx Request output runs this admission before `Scheduler::push`; Rules run seeds
+are published directly through `Scheduler::init` and never consume Dedup membership.
+
+`contrib::middleware::dedup::Redis` uses one RedisBloom filter per encoded `task_id + node` bucket.
+Its synchronous constructor validates the Redis URL and the implementation creates its
+`ConnectionManager` lazily. Each check uses
+`BF.INSERT ... ERROR ... CAPACITY ... ITEMS` to atomically create or reuse the filter and add the
+canonical item; `capacity` must be positive and `0.0 < error_rate < 1.0`. False positives are
+accepted. The key has no configurable namespace. RedisBloom supports permanent membership and the
+`ttl: 0` bypass; a positive finite TTL is rejected rather than emulated with an exact Set or rotating
+time buckets. The first Worker that creates a bucket fixes the filter's actual options, so every
+Worker sharing that `task_id + node` bucket must use equivalent options.
 
 Each RateLimit group fixes one interval while it is active. A later Spec using the same group with a
 different QPS fails immediately as invalid configuration rather than waiting behind the group's delay.
-The group can be removed lazily only when no caller retains it and its next permitted instant has
-passed; cleanup needs no background task or hot-reload behavior.
+The default `rate_limit::Memory` owns a Worker-local schedule and removes an inactive group lazily.
+`contrib::middleware::rate_limit::Redis` instead uses Redis server time and one atomic shared
+reservation schedule per group across Workers. The Redis key derives only from the explicit group or,
+when omitted, the Request URL host; it never includes task or Worker identity. Different intervals are
+rejected while future reservations remain and may replace the schedule only after it has elapsed.
 
 ## 11. Items, Validation, and Local Persistence
 
@@ -926,6 +956,8 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/ai/transport.rs` | Execute one provider request and bound its HTTP-decoded body before dependency buffering |
 | `spider/src/error/ai.rs` | AI provider construction and call errors |
 | `spider/src/selector/ai.rs` | Build prompts from Responses and enforce the JSON-object extraction contract |
+| `spider/src/middleware/dedup/{config,fingerprint,memory}.rs` | Parse flat Dedup configuration, derive canonical bucket/items, and maintain exact Worker-local membership |
+| `spider/src/middleware/rate_limit/{config,memory}.rs` | Parse group/QPS configuration and maintain Worker-local schedules |
 | `macros/src/spider/expand.rs` | Expand the user Spider struct into its factory |
 | `macros/src/spider/check.rs` | Validate macro input constraints |
 | `macros/src/spider/bind.rs` | Generate node registration and handler bindings |
@@ -934,6 +966,9 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `contrib/src/scheduler/redis/settle.rs` | Redis acknowledgement, release, refresh, success, and failure transitions |
 | `contrib/src/scheduler/redis/item.rs` | Redis Stream Item submission and Trace metadata projection |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | Key isolation, Lua loading, boundary validation, and error mapping |
+| `contrib/src/middleware/connection.rs` | Lazily establish and share one Redis ConnectionManager per Middleware instance |
+| `contrib/src/middleware/dedup.rs` | RedisBloom options, bucket keys, and atomic `BF.INSERT` Dedup |
+| `contrib/src/middleware/rate_limit.rs` and `rate_limit/reserve.lua` | Redis server-time shared group reservations and idle cleanup |
 | `contrib/src/scheduler/api/{contract,client,request,item,settle,worker,state,wire}.rs` | Worker-side API Scheduler contract mapping, lifecycle, bounded HTTP transport, Trace cache, heartbeat, and wire data |
 | `contrib/src/scheduler/api/client/response.rs` | Bound streamed Master responses and map transport-size failures |
 | `contrib/src/scheduler/api/request/{claim,init,trace}.rs` | Map claims, run initialization, and immutable Trace reads to the Worker API |
@@ -958,7 +993,7 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 ### Release Boundaries
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
-- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, Engine-level Worker-local `ai::OpenAI` provider injection, Worker-side API Scheduler, and Axum/MySQL Master control plane are implemented. A direct MySQL Scheduler, auditable Item snapshot replay, and `fasttrace` runtime tracing remain separate work. The API Scheduler and Master depend on the core Scheduler contract, not on Browser delivery.
+- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, RedisBloom Dedup, shared Redis RateLimit, Engine-level Worker-local `ai::OpenAI` provider injection, Worker-side API Scheduler, and Axum/MySQL Master control plane are implemented. A direct MySQL Scheduler and `fasttrace` runtime tracing remain separate work. The API Scheduler and Master depend on the core Scheduler contract, not on Browser delivery.
 - v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance, and a separate Item attachment downloader. Attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:

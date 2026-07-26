@@ -38,9 +38,9 @@ cargo run -p examples --bin basic
 这条代码模式路径中，Engine 不会在 Worker 本地创建 Trace，也不会调用 `Spider.start()`。代码 Request
 只持久化稳定 node，Worker 通过本地 Spider node 注册表恢复处理函数，不保存 Rust 函数指针。
 
-Rules 启动时，每条初始 Request 都先经过 `before_scheduler`，再把 Trace Snapshot 与准入后的
-Requests 原子写入 Scheduler。所有初始 Request 都被过滤仍是一轮有效运行：Trace Snapshot 会被
-保存，Engine 正常结束。
+Rules 启动时先静态校验配置、冻结 Trace Snapshot、生成初始 Requests，再把两者直接交给
+`Scheduler::init` 原子发布。运行种子发布不执行 Worker Middleware、`before_scheduler` 或 Dedup；
+后续通过 `Tx` 产生的 Request 仍在 `Scheduler::push` 前经过正常准入链路。
 
 ## Redis Scheduler
 
@@ -323,12 +323,19 @@ Request 并发数、单次领取上限和 Event 容量是三个独立且只在�
 `with_concurrency`、`with_claim_limit` 和 `with_event_limit` 设置。
 Actor 开始处理 Event 时即释放 Event 容量，但 Tx 调用仍会等待对应 Scheduler 与 Middleware 工作完成。
 
-Dedup 只处理配置 key 生成的 Request 指纹。它在 `before_scheduler` 观察到 Request 时写入指纹，
-后续 `Scheduler::push` 或运行种子 `init` 失败都不会回滚。SHA-256 输入使用 `task_id`、
-Middleware key、rule name 和有序字段值组成的结构化元组，namespace 不会因字符串拼接发生碰撞。
-URL 归一化只按 query key 稳定排序，同名 key 的原始顺序不变。所有启用规则在同一临界区内检查并
-原子写入；TTL 省略或
-`-1` 表示进程生命周期内永久保留，某条规则配置 `0` 时既不查询也不保存该规则的指纹。
+Dedup 只处理 Request。每一条生效的 `dedup` Spec 就是一条规则，参数固定为扁平的
+`args.key / normalize / ttl`，旧 `args.rules` 配置非法。成员桶固定为 `task_id + node`，SHA-256
+只计算配置明确选择的有序值的规范 JSON；`trace_id`、Middleware name、`Spec.key`、Rules 名称和
+隐式 URL 都不参与。对象 key 递归排序，数组顺序、配置路径顺序、JSON 类型和重复值保持有效；
+`before_scheduler` 不允许改写 node。
+
+默认 `middleware::dedup::Memory` 原子检查并写入一条精确成员。TTL 省略或 `-1` 表示进程生命周期内
+永久保留，`0` 表示跳过查询和写入，正整数按毫秒过期。运行期 `Tx` 输出在 `Scheduler::push` 前执行
+Dedup；Rules 运行种子不经过准入，因此不会提前消耗去重状态。
+`contrib::middleware::dedup::Redis` 使用 RedisBloom，注册时显式提供 `capacity / error_rate`，接受
+Bloom 误判，不增加可配置 namespace；正数有限 TTL 会被拒绝，不使用 Set 或时间桶模拟成员过期。
+第一个创建 `task_id + node` filter 的 Worker 会固定其实际 Options，共享该桶的所有 Worker 必须使用
+等价 Options。
 
 HTTP Downloader 按 Request 应用 proxy 和 TLS 配置。只有 proxy URL 与
 `accept_invalid_certs` 完全相同的请求才复用 Client；默认最多保留 64 个空闲 Client，
@@ -356,7 +363,10 @@ Max-Age 和 Expires 规则应用所有响应 Cookie，后代 Request 通过 Snap
 HostOnly。原始 `Cookie` header 不作为第二套会话来源，代码与 Rules 必须使用 Request cookie API。
 
 每个 `rate_limit` group 在活跃期间固定一个 interval，同组使用冲突 QPS 会返回非法配置错误。
-只有当该 group 无持有者且下一次允许时间已过，后续查找才会惰性清理它。
+只有当该 group 无持有者且下一次允许时间已过，后续查找才会惰性清理它。默认
+`middleware::rate_limit::Memory` 只在当前 Worker 内限速；
+`contrib::middleware::rate_limit::Redis` 使用 Redis 服务端时间，让多个 Worker 共享同一个 group 的
+总 QPS。Redis key 只来自显式 group；未配置时使用 Request URL host，不加入 `task_id` 或 Worker 身份。
 
 v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符转码前的 Downloader 交付 bytes，
 并把字符解码统一放在 `Response::text()`。编码优先级固定为 BOM、合法的 `Content-Type` charset、HTML 或缺失 MIME 时前
@@ -378,8 +388,8 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 
 Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker ID 和支持的下载模式，能力筛选
 必须和领取原子完成。Redis 与 Worker 侧 API Scheduler 是当前可用的持久化 Scheduler 实现；Master
-是 API Scheduler 背后的独立 Axum/MySQL 控制面，不是另一个 Scheduler 实现。直接 MySQL Scheduler、
-Item 回放和 `fasttrace` 运行期链路追踪仍是独立工作；真实 Browser Downloader 与 HTTP/browser 混合
+是 API Scheduler 背后的独立 Axum/MySQL 控制面，不是另一个 Scheduler 实现。直接 MySQL Scheduler
+和 `fasttrace` 运行期链路追踪仍是独立工作；真实 Browser Downloader 与 HTTP/browser 混合
 端到端执行属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个
 可复用的 `ai::OpenAI` provider，Rules 只保留提示词。Redis 已通过共享 Scheduler 一致性测试。
 Engine 默认使用 `worker-1` 和 HTTP 模式；`with_worker_id(...)` 与 `with_modes(...)` 可替换这些启动时冻结的值，

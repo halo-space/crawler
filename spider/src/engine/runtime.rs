@@ -169,10 +169,7 @@ where
             return Err(crate::Error::message("engine already started"));
         };
         events.set_limit(self.event_limit);
-        let init = self
-            .init
-            .init(self.scheduler.clone(), self.registry.clone())
-            .await?;
+        let init = self.init.init(self.scheduler.clone()).await?;
         let actor = engine::actor::Engine::new(
             self.scheduler.clone(),
             self.downloader.clone(),

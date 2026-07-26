@@ -57,7 +57,9 @@ impl RecordingScheduler {
     }
 
     fn trace_stats(&self) -> HashMap<String, spider::stats::Counter> {
-        self.inner.trace_stats("")
+        let trace_ids = self.inner.trace_ids();
+        assert_eq!(trace_ids.len(), 1);
+        self.inner.trace_stats(&trace_ids[0])
     }
 }
 
@@ -308,6 +310,12 @@ struct DedupSpider;
 impl DedupSpider {
     fn name(&self) -> &str {
         "dedup"
+    }
+
+    async fn start(&self) -> Result<(), spider::Error> {
+        let request = net::Request::follow("https://example.com/list")
+            .map_err(|error| spider::Error::Message(error.to_string()))?;
+        self.tx.request(vec![request]).await
     }
 
     async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
@@ -676,12 +684,6 @@ async fn final_download_failure_records_download_stats() {
 async fn dedup_skips_duplicate_request_and_memory_accumulates_stats() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records);
-    scheduler
-        .push(payload::Payload::new().requests(vec![
-            net::Request::follow("https://example.com/list").unwrap(),
-        ]))
-        .await
-        .unwrap();
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 200 })

@@ -31,9 +31,10 @@ Scheduler can declare that it consumes an existing run; in that code-mode path E
 creates a local Trace nor calls `Spider.start()`. Persisted code Requests contain only the stable
 node name, and the Worker resolves that node through its local Spider registry.
 
-Rules startup runs every generated initial Request through `before_scheduler`, then atomically stores
-the Trace Snapshot with the accepted Requests. A run whose initial Requests are all filtered remains
-valid: its Trace Snapshot is stored and the Engine exits normally.
+Rules startup statically validates the configuration, freezes the Trace Snapshot, materializes the
+initial Requests, and passes both directly to atomic `Scheduler::init`. Publishing a run seed never
+executes Worker Middleware, `before_scheduler`, or Dedup. Requests emitted later through `Tx` still
+use the normal admission path before `Scheduler::push`.
 
 ## Redis Scheduler
 
@@ -322,14 +323,22 @@ settings exposed by `with_concurrency`, `with_claim_limit`, and `with_event_limi
 Event capacity is released when the Actor starts handling an Event, while the Tx call continues waiting
 for the corresponding Scheduler and Middleware work to finish.
 
-Dedup is Request-only and uses explicitly configured keys. It records fingerprints when
-`before_scheduler` observes a Request; a later `Scheduler::push` or run-seed `init` failure does not
-roll them back.
-The SHA-256 input is a structured tuple of `task_id`, middleware key, rule name, and ordered values,
-so namespace parts cannot collide. URL normalization stably sorts query pairs by key while preserving
-the original order of repeated keys. All active rules are checked and inserted atomically; omitted TTL
-or `-1` lasts for the process lifetime, while a rule with TTL `0` neither checks nor stores a
-fingerprint.
+Dedup is Request-only. One effective `dedup` Spec defines one rule with flat
+`args.key / normalize / ttl`; the old nested `args.rules` shape is invalid. Membership is scoped by
+`task_id + node`, while SHA-256 hashes only the canonical JSON representation of the explicitly
+configured ordered values. `trace_id`, Middleware name, `Spec.key`, Rules names, and an implicit URL
+do not participate. Object keys are sorted recursively; array order, configured path order, JSON
+types, and duplicate values remain significant. `before_scheduler` may not rewrite the node.
+
+The default `middleware::dedup::Memory` implementation records one exact membership atomically.
+Omitted TTL or `-1` lasts for the process lifetime, `0` bypasses lookup and storage, and a positive
+integer expires after that many milliseconds. Runtime Tx Request output is observed before
+`Scheduler::push`; Rules run seeds bypass admission and therefore never consume Dedup membership.
+`contrib::middleware::dedup::Redis` uses RedisBloom with explicit `capacity / error_rate` options,
+accepts Bloom false positives, has no configurable namespace, and rejects positive finite TTL rather
+than emulating member expiry with Sets or rotating buckets. The first Worker that creates a
+`task_id + node` filter fixes its actual options; every Worker sharing that bucket must use equivalent
+options.
 
 The HTTP downloader applies proxy and TLS settings per Request. It reuses clients only for the same
 proxy URL and `accept_invalid_certs` setting, retains at most 64 idle clients by default, lazily
@@ -365,7 +374,10 @@ must use the Request cookie API.
 
 Each `rate_limit` group fixes its interval while active. Reusing the group with a conflicting QPS is
 invalid configuration; an inactive group is removed lazily only after its next permitted instant has
-passed.
+passed. The default `middleware::rate_limit::Memory` is Worker-local.
+`contrib::middleware::rate_limit::Redis` uses Redis server time to reserve one shared schedule per
+group across Workers; it derives the key only from the explicit group or, when omitted, the Request
+URL host, never from `task_id` or Worker identity.
 
 The v3 response-text contract keeps `Response.body` as the Downloader-delivered bytes after HTTP
 content decoding and before character transcoding, and centralizes character decoding in
@@ -387,7 +399,7 @@ The Scheduler contract receives the Engine-owned Worker ID and supported downloa
 `next_requests` and pending-work checks; filtering must be atomic with claim. Redis and the
 Worker-side API Scheduler are available persistent Scheduler implementations. Master is the separate
 Axum/MySQL control plane behind the API Scheduler, not another Scheduler implementation. A direct
-MySQL Scheduler, Item replay, and `fasttrace` runtime tracing remain separate work; a real Browser
+MySQL Scheduler and `fasttrace` runtime tracing remain separate work; a real Browser
 Downloader and mixed HTTP/browser end-to-end execution remain v5 work. AI provider configuration is
 already Worker-local: one reusable `ai::OpenAI` provider is injected through `Engine::with_ai`, while
 Rules retain only the prompt. Redis is covered by the shared Scheduler conformance suite.

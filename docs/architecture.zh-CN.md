@@ -31,7 +31,7 @@
 | Regex 与 JSON | 已实现 | Regex 选择器，以及代码模式的 `Response::json<T>()` |
 | AI Selector | 已实现 | 独立的 OpenAI-compatible JSON 对象提取，不属于 CSS Healing fallback |
 | AI 运行时配置 | 已实现 | 通过 `Engine::with_ai` 注入一个 Worker 本地可复用的 `ai::OpenAI` provider；provider 配置不进入 Rules 或 Trace Snapshot |
-| Middleware | 已实现 | 生命周期 Registry，以及 validate、dedup、rate limit、retry 内置能力 |
+| Middleware | 已实现 | 生命周期 Registry、Worker 本地 Memory 实现，以及可选 RedisBloom Dedup 和共享 Redis RateLimit |
 | Item 输出 | 已实现 | Schema 校验、媒体规范化、JSONL 输出和提交失败快照；附件下载计划在 v5 实现 |
 | Worker 能力领取 | 已实现 | Memory 只在当前 Worker 配置的 Request mode 范围内领取并判断待处理工作 |
 | Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；按 namespace 隔离，完整实现 Scheduler/Init 合同、Lua 原子转换与 Redis Stream Item 输出 |
@@ -164,14 +164,18 @@ flowchart TB
     F --> H
 
     I["Rules 模式 Engine 启动"] --> J["校验并冻结完整 DSL"]
-    J --> L["每条初始 Request 执行<br/>before_scheduler"]
-    L --> K["原子 init Trace Snapshot<br/>和准入 Requests"]
+    J --> L["生成初始 Requests"]
+    L --> K["原子 init Trace Snapshot<br/>和初始 Requests"]
     K --> H
 ```
 
 `scheduler::Init::initializes_run()` 当前控制代码模式是否创建本地运行。Memory 返回 `true`；远程 Scheduler 默认返回 `false`，因此代码 Worker 可以只消费外部任务源已经发布的运行。
 
-Rules 模式把加载的 YAML 视为本次运行定义。开始领取前，每条初始 Request 都先经过与 Tx 输出相同的 `before_scheduler` 准入链路，再由 `rules::Init` 原子写入 Trace Snapshot 和准入后的 Requests。即使所有 Request 都被过滤，空运行仍保存 Trace Snapshot 并正常结束。未来由外部控制面派发的 Rules Worker 需要沿用同一快照合同，而不是在 Worker 内重新解释出另一套身份。
+Rules 模式把加载的 YAML 视为本次运行定义。`rules::Init` 校验并冻结配置，生成初始 Requests，再与
+Trace Snapshot 原子保存。运行发布不执行 Worker Middleware、`before_scheduler` 或 Dedup。初始
+Request 上保存的 Middleware 仍可用于后续生命周期，但其中的 `before_scheduler` 不会被补执行。
+通过 Tx 产生的 Request 仍在 `Scheduler::push` 前经过正常准入。外部发布器也遵守相同的 Snapshot 与
+初始 Request 合同，不依赖 Worker 本地代码。
 
 ## 5. Engine Actor
 
@@ -253,7 +257,7 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 `scheduler::Init` 在此基础上增加：
 
 - `initializes_run()`：当前 Engine 是否负责创建本地运行；
-- `init(trace_id, snapshot, requests)`：原子保存 Trace Snapshot 和准入后的初始 Request 集合；过滤后的空集合合法。
+- `init(trace_id, snapshot, requests)`：原子保存 Trace Snapshot 和传入的初始 Request 集合；空集合仍然合法。
 
 `Payload` 是这些方法共用的唯一传输信封，不增加 Batch、Receipt 或其他平行结构。它携带 Request 执行身份、状态、错误、时间、统计以及 `requests / items` 两个输出集合；每个 Scheduler 方法会拒绝与自身语义无关的字段。例如 `push` 只允许 Requests，`push_items` 只允许 Items，结算 Payload 的两个集合必须为空。
 
@@ -722,7 +726,7 @@ after_spider
 `Middleware::Next<T>` 只有 `Continue(T)` 与 `Skip`。`Skip` 是正常过滤，不进入对应 error hook。Registry 合并默认 Spec 与对象局部 Spec，再按 `order` 和声明顺序执行。
 
 Request Middleware 只能修改当前阶段拥有的字段。`before_scheduler` 不得修改
-`id / task_id / trace_id`；Request 领取后，`before_download` 还不得修改 `node`，避免实际执行
+`id / task_id / trace_id / node`；Request 领取后，`before_download` 还不得修改 `node`，避免实际执行
 与租约结算指向不同任务。`before_download` 仍可修改 URL、headers 等运输字段。
 
 内置实现：
@@ -730,8 +734,8 @@ Request Middleware 只能修改当前阶段拥有的字段。`before_scheduler` 
 | Middleware | 作用位置 | 语义 |
 | --- | --- | --- |
 | `validate` | 默认接入多个正常 hook | 校验 Request/Response 基本约束，并通过 `SchemaKey` 调用 validator 校验 Item |
-| `dedup` | `before_scheduler` | 按配置字段计算 Request 指纹；缺省或 `-1` TTL 永不过期 |
-| `rate_limit` | `before_download` | 按 group 和 QPS 控制下载速率 |
+| `dedup` | `before_scheduler` | 按 `task_id + node` 隔离 Request 成员，只计算显式配置的有序值 |
+| `rate_limit` | `before_download` | 按 group 的总 QPS 调度下载 |
 | `retry` | error 配置 | 为 download、parse、Item 提交提供 Worker 本地重试策略 |
 
 `Builder::with_middleware(name, value)` 注册能力，不表示自动挂载到所有对象。Request、Response、Item 和 Spider 生命周期通过各自的 `middleware::Spec` 显式选择能力。只有 validate 的正常阶段 Spec 是 Registry 默认配置。
@@ -740,11 +744,30 @@ Request Middleware 只能修改当前阶段拥有的字段。`before_scheduler` 
 必须具有带 host 的绝对 HTTP(S) URL 和合法 HTTP 状态码；`after_download` 负责结构校验，
 `before_parse` 仍单独负责跳过非成功响应。
 
-默认 Dedup 只处理配置 key 生成的 Request fingerprint，不处理 Item，也不增加隐式 URL key。Rules 初始 Request 与 Tx 输出都经过 `before_scheduler`；指纹在这里检查并写入，因此后续 `Scheduler::push` 或运行种子 `init` 失败都不会回滚。SHA-256 输入是 `task_id`、Middleware key、rule name 与有序字段值组成的结构化元组，不使用可能碰撞的字符串 namespace 拼接。URL 归一化只按 query key 稳定排序，同名 key 保持原始顺序。所有启用规则先完成有限 TTL deadline 校验，再在同一把锁内统一检查并写入；任一 TTL 错误都不会留下部分指纹。某条规则的 `ttl: 0` 表示既不查询也不保存该规则指纹；省略或 `-1` 在进程生命周期内永久保留且不做容量淘汰。精确存储使用 `HashMap` 和过期时间堆，只从堆头惰性清理到期项。
+每一条生效的 Dedup Spec 就是一条规则，参数固定为扁平的 `args.key / normalize / ttl`；嵌套
+`args.rules` 非法。成员桶是 `(task_id, node)`，成员值是
+`sha256(canonical_json(配置选择的有序值))`。规范化会递归排序对象 key，同时保留数组顺序、路径顺序、
+JSON 类型和重复值。`trace_id`、Middleware name、`Spec.key`、Rules 名称和隐式 URL 都不参与；
+`Spec.key` 只保留 Registry 合并与跳过实例的职责。`dont_filter` 会在配置解析和存储访问前直接绕过。
+
+默认 `dedup::Memory` 是 Worker 本地精确存储。它在加锁前计算有限过期时间，再在同一把锁内原子检查并
+写入一条 `(task_id, node, item)`。TTL 省略或 `-1` 表示进程生命周期内永久保留，`0` 跳过查询和
+写入，正整数表示毫秒。运行期 Tx Request 输出在 `Scheduler::push` 前执行准入；Rules 运行种子直接由
+`Scheduler::init` 发布，不会消耗 Dedup 成员。
+
+`contrib::middleware::dedup::Redis` 为每个编码后的 `task_id + node` 桶使用一个 RedisBloom filter。
+构造函数同步校验 Redis URL，内部按需建立 `ConnectionManager`。每次检查使用
+`BF.INSERT ... ERROR ... CAPACITY ... ITEMS` 原子创建或复用 filter 并加入规范成员；`capacity` 必须为
+正数，`error_rate` 必须满足 `0.0 < error_rate < 1.0`。Bloom 误判属于已接受语义，key 不增加可配置
+namespace。RedisBloom 支持永久成员与 `ttl: 0` 绕过；正数有限 TTL 直接拒绝，不使用精确 Set 或
+轮转时间桶模拟。第一个创建桶的 Worker 会固定 filter 的实际 Options，因此共享同一个
+`task_id + node` 桶的所有 Worker 必须使用等价 Options。
 
 每个 RateLimit group 在活跃期间固定一个 interval。后续 Spec 以不同 QPS 复用同组时立即返回非法配置错误，
-不等待该组延迟。只有当 group 没有调用方持有且下一次允许时刻已过，才能在后续查找中惰性移除；
-不需要后台任务或热更新语义。
+不等待该组延迟。默认 `rate_limit::Memory` 保存 Worker 本地调度，并惰性清理失活 group。
+`contrib::middleware::rate_limit::Redis` 使用 Redis 服务端时间，让多个 Worker 原子共享一个 group 的预约
+序列。Redis key 只来自显式 group；未配置时使用 Request URL host，不加入 task 或 Worker 身份。
+只要未来预约仍存在，冲突 interval 就会被拒绝；原调度完全结束后才允许替换。
 
 ## 11. Item、校验与本地持久化
 
@@ -851,6 +874,8 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/ai/transport.rs` | 执行单次 provider 请求，并在依赖缓冲前限制 HTTP 解码后的正文 |
 | `spider/src/error/ai.rs` | AI provider 构造与调用错误 |
 | `spider/src/selector/ai.rs` | 从 Response 构造 prompt，并执行 JSON 对象提取合同 |
+| `spider/src/middleware/dedup/{config,fingerprint,memory}.rs` | 解析扁平 Dedup 配置、生成规范桶/成员并维护 Worker 本地精确成员 |
+| `spider/src/middleware/rate_limit/{config,memory}.rs` | 解析 group/QPS 配置并维护 Worker 本地调度 |
 | `macros/src/spider/expand.rs` | 将用户 Spider 结构展开为工厂实现 |
 | `macros/src/spider/check.rs` | 宏输入约束校验 |
 | `macros/src/spider/bind.rs` | 生成 node 注册与 handler 绑定代码 |
@@ -859,6 +884,9 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `contrib/src/scheduler/redis/settle.rs` | Redis ack、release、续租、success 与 failure 转换 |
 | `contrib/src/scheduler/redis/item.rs` | Redis Stream Item 提交与 Trace 元数据投影 |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | key 隔离、Lua 加载、边界校验和错误映射 |
+| `contrib/src/middleware/connection.rs` | 为每个 Middleware 实例按需建立并共享一个 Redis ConnectionManager |
+| `contrib/src/middleware/dedup.rs` | RedisBloom Options、桶 key 和原子 `BF.INSERT` 去重 |
+| `contrib/src/middleware/rate_limit.rs` 与 `rate_limit/reserve.lua` | Redis 服务端时间的共享 group 预约和失活清理 |
 | `contrib/src/scheduler/api/{contract,client,request,item,settle,worker,state,wire}.rs` | Worker 侧 API Scheduler 的合同映射、生命周期、有界 HTTP 传输、Trace cache、心跳和 wire 数据 |
 | `contrib/src/scheduler/api/client/response.rs` | 流式限制 Master 响应并映射传输大小错误 |
 | `contrib/src/scheduler/api/request/{claim,init,trace}.rs` | 将领取、运行初始化与不可变 Trace 读取映射到 Worker API |
@@ -883,7 +911,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 ### 版本边界
 
 - v3：按 Worker 能力范围原子领取 Request；确定性响应字符集解码，以及基于 fixture 的更完整页面回归。这些合同均已实现。
-- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler、Engine 级 Worker 本地 `ai::OpenAI` provider 注入、Worker 侧 API Scheduler，以及 Axum/MySQL Master 控制面均已实现。直接 MySQL Scheduler、可审计 Item 快照回放和 `fasttrace` 运行期链路追踪仍是独立工作。API Scheduler 与 Master 依赖核心 Scheduler 合同，不依赖 Browser 交付。
+- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler、RedisBloom Dedup、共享 Redis RateLimit、Engine 级 Worker 本地 `ai::OpenAI` provider 注入、Worker 侧 API Scheduler，以及 Axum/MySQL Master 控制面均已实现。直接 MySQL Scheduler 和 `fasttrace` 运行期链路追踪仍是独立工作。API Scheduler 与 Master 依赖核心 Scheduler 合同，不依赖 Browser 交付。
 - v5：真实 Browser Downloader、HTTP/browser 混合端到端 Engine 验收，以及独立的 Item 附件下载。附件下载和 Browser 下载是互不依赖的两个交付项；按能力领取的语义仍属于 v3 合同。
 
 这些能力必须沿用当前核心合同：

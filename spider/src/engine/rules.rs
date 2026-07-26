@@ -188,11 +188,7 @@ impl<S> super::init::Init<S> for Init
 where
     S: scheduler::Scheduler + scheduler::Init + 'static,
 {
-    async fn init(
-        &self,
-        scheduler: Arc<S>,
-        registry: Arc<middleware::Registry>,
-    ) -> Result<super::init::Output, crate::Error> {
+    async fn init(&self, scheduler: Arc<S>) -> Result<super::init::Output, crate::Error> {
         if let Some(item) = &self.config.item {
             self.schemas
                 .register(&item.schema)
@@ -210,9 +206,6 @@ where
                 Default::default(),
             )
             .map_err(crate::Error::Config)?;
-        let context = tx::Context::trace(self.config.spider.name.clone(), self.trace_id.clone());
-        let requests = super::admission::apply(requests, Some(&context), registry.as_ref()).await?;
-
         scheduler
             .init(self.trace_id.clone(), snapshot, requests)
             .await

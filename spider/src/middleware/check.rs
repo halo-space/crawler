@@ -53,7 +53,8 @@ mod tests {
     #[test]
     fn validates_builtin_specs_for_api_callers() {
         check(&Spec::new("dedup").args(serde_json::json!({
-            "rules": {"url": {"key": ["$request.url"], "ttl": -1}}
+            "key": ["$request.url"],
+            "ttl": -1
         })))
         .unwrap();
         check(&Spec::new("rate_limit").args(serde_json::json!({"qps": 2.5}))).unwrap();
@@ -68,7 +69,7 @@ mod tests {
     fn rejects_invalid_builtin_specs() {
         assert!(check(&Spec::new("retry").args(serde_json::json!({"count": "2"}))).is_err());
         assert!(check(&Spec::new("rate_limit").args(serde_json::json!({"qps": 0}))).is_err());
-        assert!(check(&Spec::new("dedup").args(serde_json::json!({"rules": {}}))).is_err());
+        assert!(check(&Spec::new("dedup").args(serde_json::json!({"key": []}))).is_err());
     }
 
     #[test]
@@ -82,11 +83,14 @@ mod tests {
 
     #[test]
     fn skip_spec_still_requires_a_supported_builtin_hook() {
-        let mut spec = Spec::new("validate").hook("error_parse");
-        spec.skip = true;
-
-        let error = check(&spec).unwrap_err();
-
-        assert!(error.to_string().contains("hook must be"));
+        for mut spec in [
+            Spec::new("validate").hook("error_parse"),
+            Spec::new("dedup").hook("before_download"),
+            Spec::new("rate_limit").hook("before_scheduler"),
+        ] {
+            spec.skip = true;
+            let error = check(&spec).unwrap_err();
+            assert!(error.to_string().contains("hook must be"));
+        }
     }
 }

@@ -49,14 +49,11 @@ mod tests {
         let mut request = crate::net::Request::follow("https://example.com/article").unwrap();
         request.middlewares.push(
             crate::middleware::Spec::new("dedup").args(serde_json::json!({
-                "rules": {
-                    "url": {
-                        "key": ["$request.url"],
-                        "ttl": -1
-                    }
-                }
+                "key": ["$request.url"],
+                "ttl": -1
             })),
         );
+        request.task_id = "task".to_string();
         request.version = 1;
 
         let error = handle(
