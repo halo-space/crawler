@@ -3,7 +3,7 @@ use std::{collections::HashMap, io::Read as _, io::Write as _, sync::Arc};
 
 use serde_json::json;
 use spider::scheduler::Init as _;
-use spider::{Scheduler as _, item, net, payload, scheduler, trace};
+use spider::{Scheduler as _, net, payload, scheduler, trace};
 
 use super::Api;
 use super::client;
@@ -31,14 +31,6 @@ fn claimed(snapshot: net::request::Snapshot) -> serde_json::Value {
         },
         "trace": null
     })
-}
-
-fn item_payload(value: &str) -> payload::Payload {
-    let mut payload = payload::Payload::new().items(vec![Box::new(item::Map::new(
-        item::Values::from([("value".to_string(), value.into())]),
-    ))]);
-    payload.task_id = "task-1".to_string();
-    payload
 }
 
 fn unavailable(message: &str) -> Response {

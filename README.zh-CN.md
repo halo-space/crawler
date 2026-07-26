@@ -65,10 +65,9 @@ engine.start().await?;
 ```
 
 所有 Redis key 都按 namespace 隔离；正常 `close()` 只释放客户端资源，不会删除排队数据。Redis 保存
-Trace Snapshot、Request 状态、按 mode 分域的 processing 租约、结算、统计和 Item。每个
+Trace Snapshot、Request 状态、按 mode 分域的 processing 租约、结算和统计。每个
 `processing:<mode>` ZSET 是唯一的活动执行权/租约投影，score 使用 `lease_time`；Request Hash 仍是状态
-事实来源。每个已接受的非空 Item `Payload` 都写成一条 Redis Stream entry，保持 at-least-once 语义，
-不做业务 Item 去重。
+事实来源。Item 持久化属于独立的 `item::Store` 依赖，不进入 Redis Scheduler。
 
 Redis 会限制每次领取的重复维护工作：一次 `next_requests` 每个 mode 最多回收 64 条过期租约，并在两个 mode 合计巡检
 128 条 processing 记录；对传入的每个
@@ -91,11 +90,10 @@ mode 的 ready 写入不会丢失已有进度。选择不会越过尚未确认�
 本版本只支持 Redis 7+ 单实例 primary，不支持 Redis Cluster。多 key Lua 状态转换依赖单实例原子性，
 Cluster 将作为独立 Scheduler 设计。需要可恢复持久化时，必须启用 AOF（`appendonly yes`）并配置
 `maxmemory-policy noeviction`。`appendfsync` 是运维侧在更强持久性与写入吞吐/延迟之间的选择
-（例如 `always` 与 `everysec`）。应监控 Stream 增长并配置明确的外部保留策略；Scheduler 不会自动
-trim Item 输出。
+（例如 `always` 与 `everysec`）。
 
 在处理函数中通过 `self.tx.request(...)` 提交的新请求会进入同一个 Scheduler 队列；通过
-`self.tx.item(...)` 提交的数据经过 Item 中间件后由 Scheduler 提交。
+`self.tx.item(...)` 提交的数据经过 Item 中间件后交给独立的 Item Store。
 
 Rules 模式中，extractor 表达式直接决定结果数量：零个匹配为 `null`，一个匹配为标量或节点对象，
 多个匹配为数组，不再提供额外的 `select`。媒体字段通过
@@ -282,20 +280,30 @@ Request 与 bind 模板只解析一次源字符串；动态值中带入的花括
 ## Item 与输出
 
 框架在 `Tx.item(...)` 提交数据时为没有 ID 的 Item 生成 UUID v7。这个 ID 只标识当前数据实例，
-不参与业务去重。内置去重只作用于进入 Scheduler 前的 Request；Item 业务去重应由下游或自定义
-Scheduler 实现处理。
+不参与业务去重。内置去重只作用于进入 Scheduler 前的 Request；Item 业务去重属于下游业务逻辑，
+不属于 Store 合同。
 
-默认 Memory Scheduler 将每条数据保存为一行 JSON：
+Engine 默认使用 `item::Jsonl` 作为 Item Store，并将每条数据保存为一行 JSON：
 
 ```text
 ./data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
-普通 JSONL 只包含业务字段。最终提交失败时，本地快照会额外保存 Item ID 和业务数据，便于恢复和
-排查。失败快照位于 `./data/items/snapshots/`。Item 提交采用 at-least-once 语义；替换
-Scheduler 时由新实现完整实现相同的 Request 与 Item 提交合同。
-Memory 在同一次追加锁内逐条序列化并写入 Item；任一 Item 失败会回滚本次完整追加。失败快照先写入
-临时文件，完整 flush 后再原子 rename，不会发布半截 JSON。
+每行格式固定为 `{"id":"...","data":{...}}`，框架 Item ID 与业务数据分开保存。
+`self.tx.request(...)` 把 Request 提交给 Scheduler；`self.tx.item(...)` 则把只包含 Item 的 `Payload`
+交给 `Store::submit(&Payload)`。两者可以独立替换：`.with_scheduler(...)` 只替换 Request 调度，
+`.with_store(...)` 只替换 Item 持久化。
+
+`Jsonl::with_dir(path)` 可修改输出根目录。Jsonl 会先序列化完整 Payload，再持有小时文件的追加锁写入并
+flush 完整字节序列；写入或 flush 失败时记录并返回错误，不执行事务或文件回滚，底层已经写入的字节可能
+保留。打开文件缓存有固定上限，所有缓存槽都在使用时，额外路径使用不进入缓存的临时句柄。提交失败快照由
+Jsonl 自己管理，位于
+`<dir>/data/items/snapshots/`：先完整写入临时文件并 flush，再原子 rename；同一个不可变 Payload 投影后续重试成功后
+删除，重试耗尽则保留供人工处理。完全相同的不可变 Payload 投影可以共用这份恢复快照，但每次 `submit`
+仍会执行输出，不会形成持久化回放索引或 Item 去重。Item 提交采用 at-least-once 语义，业务 Item 去重属于
+Store 合同之外的下游业务逻辑。
+每个 Store 实现都必须在修改后端前调用 `Payload::validate_store()` 校验完整 Payload。Store 重试耗尽后，
+`error_item` 只作为逐个 Item 的 best-effort 通知：回调失败记录日志，当前 Request 仍保留原始 Store 错误。
 `Scheduler::push` 对相同 Request ID 与初始 Snapshot 的重放执行幂等 no-op，只原子补写缺失
 Request；任一已有 ID 的 Snapshot 冲突时整批失败。
 当前 Request 执行中直接等待的 `Tx.request` 会使用父 Request ID、规范化后的子 Request 初始规格，

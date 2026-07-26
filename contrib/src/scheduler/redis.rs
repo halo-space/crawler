@@ -1,6 +1,5 @@
 mod contract;
 mod error;
-mod item;
 mod key;
 mod request;
 mod script;

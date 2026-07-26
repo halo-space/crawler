@@ -7,21 +7,22 @@ mod item;
 mod request;
 
 /// 处理 Spider Tx 发出的 Request 或 Item。
-pub(crate) async fn handle<S>(
+pub(crate) async fn handle<S, O>(
     event: Kind,
     scheduler: Arc<S>,
+    store: Arc<O>,
     registry: Arc<middleware::Registry>,
-    snapshots: Option<Arc<crate::item::snapshot::Store>>,
 ) -> Result<(), crate::Error>
 where
     S: scheduler::Scheduler + Send,
+    O: crate::item::Store + Send,
 {
     match event {
         Kind::Requests { requests, context } => {
             request::handle(requests, context.as_ref(), scheduler, registry).await
         }
         Kind::Items { items, context } => {
-            item::handle(items, context.as_ref(), scheduler, registry, snapshots).await
+            item::handle(items, context.as_ref(), store, registry).await
         }
     }
 }

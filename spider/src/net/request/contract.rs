@@ -273,6 +273,46 @@ impl Request {
                 })),
         )
     }
+
+    /// Validates the execution fields required for a newly scheduled Request.
+    pub fn validate_initial(&self) -> Result<(), String> {
+        if self.id.is_empty() {
+            return Err("new Request id must not be empty".to_string());
+        }
+        if self.task_id.is_empty() != self.trace_id.is_empty() {
+            return Err(
+                "new Request task_id and trace_id must both be set or both be empty".to_string(),
+            );
+        }
+        if self.version != 0 {
+            return Err("new Request version must be 0".to_string());
+        }
+        if self.state != State::Pending {
+            return Err("new Request state must be pending".to_string());
+        }
+        if !self.leased_by.is_empty() || self.lease_time != 0 {
+            return Err("new Request must not have a lease".to_string());
+        }
+        if !self.failed_workers.is_empty() {
+            return Err("new Request failed_workers must be empty".to_string());
+        }
+        if self.next_time < 0 {
+            return Err("new Request next_time must not be negative".to_string());
+        }
+        if self.retry_count != 0
+            || !(1..=super::snapshot::MAX_RETRY_COUNT).contains(&self.max_retry_count)
+        {
+            return Err(format!(
+                "new Request requires retry_count 0 and max_retry_count between 1 and {}",
+                super::snapshot::MAX_RETRY_COUNT
+            ));
+        }
+        for spec in &self.middlewares {
+            middleware::check(spec)
+                .map_err(|error| format!("new Request has invalid middleware: {error}"))?;
+        }
+        Ok(())
+    }
 }
 
 fn next_id() -> String {
@@ -407,6 +447,118 @@ mod tests {
             request.middlewares[2].args["key"],
             serde_json::json!(["$request.url"])
         );
+    }
+
+    #[test]
+    fn initial_validation_accepts_the_complete_boundary() {
+        let mut request = Request::follow("https://example.com").unwrap();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
+        request.max_retry_count = crate::net::request::MAX_RETRY_COUNT;
+        request.middlewares.push(
+            middleware::Spec::new("retry")
+                .hook("error_parse")
+                .args(serde_json::json!({"count": 1, "backoff": [0]})),
+        );
+
+        assert!(request.validate_initial().is_ok());
+    }
+
+    #[test]
+    fn initial_validation_rejects_every_non_initial_execution_field() {
+        type Mutate = fn(&mut Request);
+        let cases: &[(&str, Mutate, &str)] = &[
+            (
+                "empty id",
+                |request| request.id.clear(),
+                "new Request id must not be empty",
+            ),
+            (
+                "task without trace",
+                |request| request.task_id = "task-1".to_string(),
+                "new Request task_id and trace_id must both be set or both be empty",
+            ),
+            (
+                "trace without task",
+                |request| request.trace_id = "trace-1".to_string(),
+                "new Request task_id and trace_id must both be set or both be empty",
+            ),
+            (
+                "positive version",
+                |request| request.version = 1,
+                "new Request version must be 0",
+            ),
+            (
+                "negative version",
+                |request| request.version = -1,
+                "new Request version must be 0",
+            ),
+            (
+                "processing state",
+                |request| request.state = State::Processing,
+                "new Request state must be pending",
+            ),
+            (
+                "leased worker",
+                |request| request.leased_by = "worker-1".to_string(),
+                "new Request must not have a lease",
+            ),
+            (
+                "lease time",
+                |request| request.lease_time = 1,
+                "new Request must not have a lease",
+            ),
+            (
+                "failed worker history",
+                |request| request.failed_workers.push("worker-1".to_string()),
+                "new Request failed_workers must be empty",
+            ),
+            (
+                "negative next time",
+                |request| request.next_time = -1,
+                "new Request next_time must not be negative",
+            ),
+            (
+                "retry count",
+                |request| {
+                    request.retry_count = 1;
+                    request.max_retry_count = 2;
+                },
+                "new Request requires retry_count 0 and max_retry_count between",
+            ),
+            (
+                "zero retry limit",
+                |request| request.max_retry_count = 0,
+                "new Request requires retry_count 0 and max_retry_count between",
+            ),
+            (
+                "retry limit overflow",
+                |request| {
+                    request.max_retry_count = crate::net::request::MAX_RETRY_COUNT + 1;
+                },
+                "new Request requires retry_count 0 and max_retry_count between",
+            ),
+            (
+                "invalid middleware",
+                |request| {
+                    request
+                        .middlewares
+                        .push(middleware::Spec::new("retry").hook("before_download"));
+                },
+                "new Request has invalid middleware",
+            ),
+        ];
+
+        for (name, mutate, expected) in cases {
+            let mut request = Request::follow("https://example.com").unwrap();
+            mutate(&mut request);
+
+            let error = request.validate_initial().expect_err(name);
+            assert!(
+                error.contains(expected),
+                "{name} returned the wrong error: {error}"
+            );
+        }
     }
 
     #[test]

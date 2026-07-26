@@ -79,44 +79,6 @@ async fn claim_reuses_a_key_only_for_automatic_http_retries() {
 }
 
 #[tokio::test]
-async fn item_retry_reuses_the_unresolved_logical_operation_key() {
-    let mut responses = vec![Response::json(
-        "200 OK",
-        json!({
-            "lease_timeout_ms": 30000,
-            "lease_interval_ms": 10000,
-            "heartbeat_interval_ms": 10000,
-            "max_response_bytes": 67108864
-        }),
-    )];
-    responses.extend((0..3).map(|_| unavailable("items unavailable")));
-    responses.push(Response::empty("204 No Content"));
-    let (base_url, received, server) = server(responses);
-    let api = Arc::new(Api::new(base_url, "token").unwrap());
-    api.open().await.unwrap();
-    let payload = item_payload("same");
-
-    let retrying = {
-        let api = api.clone();
-        tokio::spawn(async move {
-            assert!(matches!(
-                api.push_items(&payload).await,
-                Err(scheduler::Error::Unavailable(_))
-            ));
-            api.push_items(&payload).await.unwrap();
-        })
-    };
-    retrying.await.unwrap();
-    api.close().await.unwrap();
-
-    let received = received.recv().unwrap();
-    server.join().unwrap();
-    let keys = operation_keys(&received, "/v1/worker/items");
-    assert_eq!(keys.len(), 4);
-    assert!(keys.iter().all(|key| key == &keys[0]));
-}
-
-#[tokio::test]
 async fn init_retry_reuses_the_unresolved_logical_operation_key() {
     let mut responses = vec![Response::json(
         "200 OK",
@@ -161,43 +123,6 @@ async fn init_retry_reuses_the_unresolved_logical_operation_key() {
     let keys = operation_keys(&received, "/v1/worker/runs/init");
     assert_eq!(keys.len(), 4);
     assert!(keys.iter().all(|key| key == &keys[0]));
-}
-
-#[tokio::test]
-async fn independent_item_invocations_use_fresh_keys() {
-    let (base_url, received, server) = server(vec![
-        Response::json(
-            "200 OK",
-            json!({
-                "lease_timeout_ms": 30000,
-                "lease_interval_ms": 10000,
-                "heartbeat_interval_ms": 10000,
-                "max_response_bytes": 67108864
-            }),
-        ),
-        Response::empty("204 No Content"),
-        Response::empty("204 No Content"),
-    ]);
-    let api = Arc::new(Api::new(base_url, "token").unwrap());
-    api.open().await.unwrap();
-
-    let first = {
-        let api = api.clone();
-        tokio::spawn(async move { api.push_items(&item_payload("same")).await })
-    };
-    let second = {
-        let api = api.clone();
-        tokio::spawn(async move { api.push_items(&item_payload("same")).await })
-    };
-    first.await.unwrap().unwrap();
-    second.await.unwrap().unwrap();
-    api.close().await.unwrap();
-
-    let received = received.recv().unwrap();
-    server.join().unwrap();
-    let keys = operation_keys(&received, "/v1/worker/items");
-    assert_eq!(keys.len(), 2);
-    assert_ne!(keys[0], keys[1]);
 }
 
 #[tokio::test]

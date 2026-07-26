@@ -1,7 +1,6 @@
 mod client;
 mod contract;
 pub mod error;
-mod item;
 mod request;
 mod settle;
 mod state;

@@ -24,14 +24,15 @@ pub(super) struct Done {
     result: Result<Output, crate::Error>,
 }
 
-pub(super) fn spawn<S, D, E>(
-    engine: &mut Engine<S, D, E>,
-    actor_ref: ActorRef<Engine<S, D, E>>,
+pub(super) fn spawn<S, D, E, O>(
+    engine: &mut Engine<S, D, E, O>,
+    actor_ref: ActorRef<Engine<S, D, E, O>>,
     limit: usize,
 ) where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     engine.claim_stale = false;
     let scheduler = engine.scheduler.clone();
@@ -107,11 +108,12 @@ where
     unreachable!()
 }
 
-impl<S, D, E> Message<Done> for Engine<S, D, E>
+impl<S, D, E, O> Message<Done> for Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     type Reply = ();
 
@@ -188,10 +190,6 @@ mod tests {
         }
 
         async fn push(&self, _payload: payload::Payload) -> Result<(), scheduler::Error> {
-            Ok(())
-        }
-
-        async fn push_items(&self, _payload: &payload::Payload) -> Result<(), scheduler::Error> {
             Ok(())
         }
 

@@ -1,4 +1,4 @@
-use spider::{net, scheduler, trace};
+use spider::{net, payload, scheduler, trace};
 
 use super::super::{Api, state::Action, wire};
 
@@ -34,7 +34,9 @@ impl Api {
                 "all initial requests must reference the Trace Snapshot task_id".to_string(),
             ));
         }
-        super::validate_new_requests(&requests)?;
+        let payload = payload::Payload::new().requests(requests);
+        payload.validate_push().map_err(scheduler::Error::Message)?;
+        let requests = payload.requests;
         let requests = requests
             .into_iter()
             .map(net::request::Snapshot::try_from)

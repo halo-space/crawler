@@ -32,10 +32,10 @@ The workspace contains five crates:
 | AI Selector | Implemented | Explicit OpenAI-compatible JSON-object extraction, independent of CSS Healing |
 | AI runtime configuration | Implemented | One reusable Worker-local `ai::OpenAI` provider is injected with `Engine::with_ai`; provider configuration does not enter Rules or Trace snapshots |
 | Middleware | Implemented | Lifecycle Registry, Worker-local Memory implementations, and optional RedisBloom Dedup/shared Redis RateLimit implementations |
-| Item output | Implemented | Schema validation, media normalization, JSONL output, and submission-failure snapshots; attachment download is planned for v5 |
+| Item Store | Implemented | Independent `open / close / submit(&Payload)` persistence contract; default JSONL output and Jsonl-owned failure snapshots; attachment download is planned for v5 |
 | Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
-| Redis Scheduler | Implemented | Redis 7+ standalone only; namespaced complete Scheduler/Init contract, Lua-atomic transitions, and Redis Stream Item output |
-| API Scheduler | Implemented | `contrib::scheduler::api::Api` is the Worker-side HTTP Scheduler implementation; it preserves the complete Scheduler/Init contract through Master |
+| Redis Scheduler | Implemented | Redis 7+ standalone only; namespaced complete Request Scheduler/Init contract and Lua-atomic transitions |
+| API Scheduler | Implemented | `contrib::scheduler::api::Api` is the Worker-side HTTP Request Scheduler implementation; it preserves the complete Scheduler/Init contract through Master |
 | Master control plane | Implemented | Separate Axum service with private MySQL 8.0.19+ storage, Task dispatch, and recovery; it does not implement Scheduler |
 | Direct MySQL Scheduler | Out of scope | MySQL is Master-private control-plane storage; Workers use `Api`, never a direct MySQL Scheduler |
 | Runtime tracing | Planned | v4 will use `fasttrace`; this is separate from the business `trace_id` |
@@ -45,12 +45,13 @@ XPath has been removed from the roadmap. CSS is the sole HTML selector path; the
 ## 2. Core Design Principles
 
 1. **One runtime:** Code mode and Rules mode use one Executor. Trace Snapshot data selects the code handler or Rules interpretation path; only run-seed initialization differs.
-2. **Scheduler as the distribution boundary:** Switching away from Memory changes only `.with_scheduler(...)` at assembly time. A replacement must implement the complete scheduling semantics, not merely wrap a storage client.
-3. **Immediate output:** Requests and Items emitted by parsing enter the Engine through `Tx` immediately. They are not held until a Trace or request graph finishes.
-4. **Identity is separate from execution ownership:** Request ID survives retry and recovery; `version`, `leased_by`, and `lease_time` describe one execution right.
-5. **Immutable run snapshots:** Each Trace has one immutable Trace Snapshot. Rules snapshots contain the complete DSL; code snapshots never persist Rust handlers.
-6. **Explicit recovery semantics:** Lease refresh, release, success, and failure use separate methods. There is no overloaded `finish` operation.
-7. **Single-purpose modules:** The Actor coordinates, startup-frozen Worker state owns identity and capabilities, a Request task owns one execution right, an Executor parses, and a Scheduler implements scheduling and submission contracts.
+2. **Scheduler as the Request distribution boundary:** Switching away from Memory changes only `.with_scheduler(...)` at assembly time. A replacement must implement the complete Request scheduling semantics, not merely wrap a storage client.
+3. **Store as the Item persistence boundary:** `.with_store(...)` independently replaces Item persistence. A Store never claims, leases, or settles Requests.
+4. **Immediate output:** Requests and Items emitted by parsing enter the Engine through `Tx` immediately. Request Payloads go to the Scheduler and Item Payloads go to the Store; neither waits for a Trace or request graph to finish.
+5. **Identity is separate from execution ownership:** Request ID survives retry and recovery; `version`, `leased_by`, and `lease_time` describe one execution right.
+6. **Immutable run snapshots:** Each Trace has one immutable Trace Snapshot. Rules snapshots contain the complete DSL; code snapshots never persist Rust handlers.
+7. **Explicit recovery semantics:** Lease refresh, release, success, and failure use separate methods. There is no overloaded `finish` operation.
+8. **Single-purpose modules:** The Actor coordinates, startup-frozen Worker state owns identity and capabilities, a Request task owns one execution right, an Executor parses, a Scheduler owns Request scheduling, and a Store owns Item persistence.
 
 ## 3. System Overview
 
@@ -72,10 +73,11 @@ flowchart LR
     D["Downloader"]
     H["HTTP"]
     E["Unified Executor"]
-    O["Request / Item output tasks"]
+    O["Tx output tasks"]
+    IS["item::Store contract"]
+    J["item::Jsonl"]
     P["JSONL Item output"]
-    I["Redis Stream Item output"]
-    F["Item failure snapshots"]
+    F["Jsonl failure snapshots"]
 
     C --> X
     R --> X
@@ -94,10 +96,11 @@ flowchart LR
     E --> T
     T --> A
     A --> O
-    O --> S
-    M --> P
-    Z --> I
-    O -. on submission failure .-> F
+    O -->|Request Payload| S
+    O -->|Item Payload| IS
+    IS --> J
+    J --> P
+    J -. on append failure .-> F
 ```
 
 The Engine uses one private Kameo Actor as its message-driven coordinator, but it does not force the Scheduler, Downloader, Executor, or AI selector into Actor types. Components retain method-based contracts. The Actor directly owns runtime state and dependencies; Request and output work still runs in independent Tokio tasks so no long I/O blocks message handling.
@@ -186,12 +189,12 @@ The outer `Runtime::start()` order is fixed:
 
 ```text
 validate runtime limits
--> open Scheduler / Downloader / local snapshot directory
+-> open Scheduler / Downloader / Item Store
 -> before_spider
 -> initialize or attach to a run
 -> spawn and drain the Engine Actor
 -> after_spider
--> close Downloader / Scheduler
+-> close Downloader / Item Store / Scheduler
 ```
 
 `Engine` in `engine/actor.rs` is the sole coordinator. It is a real Kameo Actor and owns:
@@ -201,7 +204,7 @@ validate runtime limits
 - the set of active Request tasks;
 - the set of active Tx output tasks;
 - Tx Event capacity, producer activity, and the first terminal error;
-- shared Scheduler, Downloader, Executor, Middleware Registry, and optional Item snapshot store references.
+- shared Scheduler, Item Store, Downloader, Executor, and Middleware Registry references.
 
 Startup, claim, Request, output, poll, and producer-idle completions return as separate Actor messages. Every spawned task catches panic and reports completion. An accepted output failure normally returns to its waiting `Tx` caller; if that caller has been cancelled, the output completion reports the undelivered error to the Engine instead of silently succeeding. Kameo's mailbox is unbounded for internal messages; the explicit Event capacity controls only external `Tx` output and therefore remains independent from internal completion traffic.
 
@@ -244,11 +247,9 @@ This prevents early termination while a list page is producing detail Requests, 
 
 | Method | Single responsibility |
 | --- | --- |
-| `dir` | Return an optional Worker-local directory used for framework Item failure snapshots |
 | `lease` | Return optional lease timeout and refresh interval settings |
 | `open / close` | Open and close Scheduler-owned resources |
 | `push` | Consume only `Payload.requests`; skip identical replays, atomically insert missing Requests, and reject a conflicting collection |
-| `push_items` | Consume only `Payload.items` and submit Items |
 | `trace` | Read an immutable Trace Snapshot by `trace_id` |
 | `next_requests(limit, worker_id, modes)` | Atomically claim and restore at most `limit` Requests for the supplied Worker identity and modes |
 | `has_pending_requests(worker_id, modes)` | Report whether the supplied Worker capability scope still has queued or processing Requests |
@@ -263,7 +264,7 @@ This prevents early termination while a list page is producing detail Requests, 
 - `initializes_run()`, which declares whether this Engine creates a local run;
 - `init(trace_id, snapshot, requests)`, which atomically stores a Trace Snapshot and its supplied initial Requests; an empty collection remains valid.
 
-`Payload` is the single transport envelope shared by these methods; the design does not add parallel Batch or Receipt structures. It carries Request execution identity, state, error, timing, statistics, and the `requests / items` output collections. Every Scheduler method rejects fields unrelated to its own semantics: `push` accepts Requests only, `push_items` accepts Items only, and settlement Payloads require both collections to be empty.
+`Payload` remains the single transport envelope and the design does not add parallel Batch or Receipt structures. It carries Request execution identity, state, error, timing, statistics, and the `requests / items` output collections. Scheduler methods never persist Items: `push` accepts Requests only, while ownership and settlement Payloads require both collections to be empty. The independent `item::Store::submit(&Payload)` accepts Item Payloads and rejects Request or completion fields.
 
 For `has_pending_requests`, `modes` defines the capability scope. A processing Request with a matching mode remains pending for every Worker with that capability, regardless of its current `leased_by` value. The `worker_id` identifies and validates the caller; it does not narrow the processing set to leases owned by that Worker. This conservative rule prevents a compatible Worker from exiting before lease recovery or before an in-flight Request can emit more compatible work.
 
@@ -316,8 +317,8 @@ the current implementation does not write local Request files under `data/reques
 `contrib::scheduler::redis::Redis` is a complete persistent implementation of the same `Scheduler`
 and `Init` contract. It is not a Redis client wrapped by Engine: Redis itself owns immutable Trace
 Snapshots, canonical Request replay identity, capability-scoped queue ordering, leases, acknowledgements,
-release, refresh, settlement, retry, terminal records, statistics, and Item submission. The Engine only
-switches its assembly dependency:
+release, refresh, settlement, retry, terminal records, and statistics. The Engine only switches its
+Request scheduling dependency:
 
 ```rust
 let scheduler = contrib::scheduler::redis::Redis::new("redis://127.0.0.1:6379")?
@@ -382,25 +383,19 @@ record remains processing for normal lease-timeout recovery. Every Request Snaps
 history, while the mutable Hash cannot expand it. The current internal key layout does not migrate older
 Redis namespaces.
 
-`push_items` serializes the full collection before mutation and appends one Redis Stream entry for
-each accepted non-empty Item Payload. The entry preserves the Payload identity, framework Item IDs, business
-Item JSON, and available Trace metadata. Submission is at-least-once: retrying the same Payload
-creates another complete Stream entry, and Redis does not provide business Item deduplication. Item
-Stream retention and replay are independent concerns; this Scheduler does not trim the Stream.
-
 The implementation targets one Redis 7+ standalone primary. It intentionally does not support
 Redis Cluster, because its namespace spans several keys and its Lua transitions rely on
 single-instance atomicity. Cluster is a future separate Scheduler design, not a connection flag.
 Durable deployments must enable AOF (`appendonly yes`) and set `maxmemory-policy noeviction`.
 `appendfsync` is deliberately an operator choice: `always` trades throughput and latency for a
 smaller persistence window, while `everysec` commonly offers higher throughput with up to roughly
-one second of acknowledged-write exposure. Operators must also monitor Redis capacity and choose an
-explicit Item Stream retention policy.
+one second of acknowledged-write exposure. Operators must monitor Redis capacity independently of
+the configured Item Store.
 
 ### 6.4 API Scheduler and Master Control Plane
 
 `contrib::scheduler::api::Api` is a complete Worker-side implementation of `Scheduler` and `Init`.
-It translates `open / close / push / push_items / trace / next_requests / has_pending_requests / ack /
+It translates `open / close / push / trace / next_requests / has_pending_requests / ack /
 release / refresh_lease / success / failure` to the Master Worker API, preserving the core Payload,
 identity, capability, lease, retry, and terminal-state semantics. It owns an HTTP client, bounded
 response reads, bounded outbound JSON serialization, operation keys where the remote operation
@@ -420,8 +415,13 @@ The two API surfaces use separate bearer credentials and require the configured 
 
 | Surface | Credential | Responsibility |
 | --- | --- | --- |
-| Worker API | Worker token | Scheduler operations, Trace reads, claims, acknowledgements, lease refresh, settlement, Item submission, and heartbeat |
+| Worker API | Worker token | Scheduler operations, Trace reads, claims, acknowledgements, lease refresh, settlement, heartbeat, and the independent Item ingestion endpoint |
 | Control API | Control token | Task publication plus read-only Task, Trace, Request, Worker, and Item observation |
+
+Master retains `POST /v1/worker/items` as an independent Item ingestion endpoint. The API Scheduler
+does not call or implement that endpoint; a separately configured Store or client may target it
+without changing Request scheduling. Keeping this endpoint does not make Master an Item-aware
+Scheduler.
 
 A Worker token cannot publish Tasks; a control token is not a Worker Scheduler credential. Credentials
 and Master database URLs are Worker-local or control-plane deployment configuration and never enter
@@ -448,13 +448,12 @@ and clears Worker-local operation-key and Trace caches. The immutable Trace cach
 128 entries and 64 MiB.
 
 Claim and release create a fresh idempotency key for every public invocation; only HTTP retries inside
-that invocation reuse it. Init and Item submission retain one unresolved logical-operation key across
-the Engine's outer retry in the same task, because an ambiguous committed Item response must not
-duplicate output. Definite success or a deterministic error clears that key; an unresolved key expires
+that invocation reuse it. Init retains one unresolved logical-operation key across the Engine's outer
+retry in the same task. Definite success or a deterministic error clears that key; an unresolved key expires
 exactly five minutes after its first creation rather than sliding on reuse, and the local store refuses
 new keys at its 4096-entry bound instead of evicting a live operation. Master requires
 `history.ttl >= max(lease_timeout, 5m30s)`, preserving persistent operation and completion
-replay records beyond that client window. Without a current Tokio task identity, each Init/Item call
+replay records beyond that client window. Without a current Tokio task identity, each Init call
 uses a fresh key instead of entering this unresolved-operation store. If a successful `POST` response
 exceeds the client bound, the result remains `Unavailable` rather than becoming a deterministic
 failure; calls carrying an operation key retain it for replay.
@@ -531,6 +530,7 @@ sequenceDiagram
     participant D as Downloader
     participant E as Executor
     participant T as Tx / Event
+    participant I as Item Store
 
     A->>S: next_requests(n, worker_id, modes)
     S-->>A: Requests in processing with lease
@@ -546,7 +546,11 @@ sequenceDiagram
         M->>E: parse(request, response)
         E->>T: request([...]) / item([...])
         T->>A: Event with completion reply
-        A->>S: push(payload) / push_items(&payload)
+        alt Request output
+            A->>S: push(payload)
+        else Item output
+            A->>I: submit(&payload)
+        end
         A-->>T: handled
     end
     alt execution succeeded
@@ -570,7 +574,7 @@ The important semantics are:
 - After execution produces an immutable final Payload, `success / failure` is authoritative. A concurrent refresh error stops further refreshes but cannot cancel settlement; transient settlement errors retry the same Payload without executing the Request again.
 - Middleware Retry is a local Worker retry for downloading, parsing, or Item submission.
 - Scheduler `failure` is the only queue-level Request retry. The Worker submits it only after local execution retries are exhausted.
-- `Tx.request` and `Tx.item` wait for actual Event handling, so parsing cannot report success before the Scheduler accepts its output.
+- `Tx.request` and `Tx.item` wait for actual Event handling, so parsing cannot report success before the Scheduler or Item Store accepts the corresponding output.
 - exhausted Item submission returns into the current parser call and causes the current Request to settle as failed.
 - current-Request `Tx.request` output uses a fresh occurrence allocator for each parse attempt. The canonical output includes scheduling intent such as `next_time` and uses a time-stable Cookie view. Parse and queue retries reproduce the same IDs for the same canonical output, while identical outputs within one attempt remain distinct. Detached Tx output has no parent Request identity and retains at-least-once delivery.
 - every emitted Request is checked as one collection against its Tx `task_id / trace_id` before any `before_scheduler` Middleware runs; a Middleware is not allowed to rewrite `id`, `task_id`, or `trace_id`. Because the replay-stable ID is derived before this hook, any hook that changes the remaining Request specification must be deterministic for the same input; time-, random-, or external-state-dependent changes intentionally surface as a Snapshot conflict on replay.
@@ -850,7 +854,7 @@ reservation schedule per group across Workers. The Redis key derives only from t
 when omitted, the Request URL host; it never includes task or Worker identity. Different intervals are
 rejected while future reservations remain and may replace the schedule only after it has elapsed.
 
-## 11. Items, Validation, and Local Persistence
+## 11. Items, Validation, and Persistence
 
 The Item path is fixed:
 
@@ -858,9 +862,9 @@ The Item path is fixed:
 Tx.item
 -> generate UUID v7 when ID is empty
 -> before_item
--> Scheduler.push_items(&Payload)
+-> item::Store::submit(&Payload)
 -> success, or retry according to error_item policy
--> on exhaustion call error_item and fail the current Request
+-> on exhaustion notify every Item through best-effort error_item and fail the current Request with the original Store error
 ```
 
 Every concrete Item owns one explicit `#[serde(skip)] item::State`, rejects unknown serde fields, and derives
@@ -871,37 +875,54 @@ function before runtime initialization. The Schema Store computes a stable SHA-2
 `validator::Validator`, and validates the serialized Item. Item ID is outside the schema and does not participate
 in business deduplication.
 
-Memory uses the current working directory by default. `Memory::with_dir(path)` changes the root of both normal output and failure snapshots.
+`item::Store` has exactly three responsibilities:
 
-Normal Item output:
+| Method | Single responsibility |
+| --- | --- |
+| `open` | Open Store-owned resources before Engine execution |
+| `close` | Flush and close Store-owned resources during Engine shutdown |
+| `submit(&Payload)` | Validate and persist one complete Item Payload; reject Request or settlement fields before backend mutation |
+
+Engine uses `item::Jsonl::new()` by default. `.with_store(store)` replaces only Item persistence, while
+`.with_scheduler(scheduler)` independently replaces Request scheduling. A Store receives the existing
+Payload, including its task, trace, Request, and Worker identity, and may choose its own storage model;
+it never reads, claims, leases, or settles Scheduler work.
+
+`Jsonl::new()` uses the current working directory. `Jsonl::with_dir(path)` changes its output root:
 
 ```text
 <dir>/data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
-Each Item is one JSON line containing only its business serialization. Concurrent writes to the same hourly file are serialized. A Payload is serialized and written one Item at a time without materializing the whole collection; every complete append is flushed immediately. Any serialization, write, or flush failure attempts to truncate the file back to its pre-Payload length, and `close()` flushes all open files again.
+Each Item is one JSON line with the stable shape `{"id":"...","data":{...}}`. The framework Item ID is
+stored beside, not injected into, the business serialization. Jsonl serializes the complete Payload before
+taking the hourly file's append lock. Concurrent submissions to that file are serialized; a successful append
+is flushed immediately. A write or flush failure is logged and returned without a transaction or file rollback;
+complete or partial bytes already written by the backend may remain, and Engine retries the unchanged Payload
+under at-least-once semantics. `close()` flushes all open files again. The file cache holds at most 64 paths.
+When every cached handle is currently in use, another path is opened for that submission without entering the
+cache. A separate fixed set of path-sharded locks preserves same-path write serialization regardless of cache state.
 
-`version / timezone` are Trace-level runtime metadata. A persistent Scheduler may read the
-corresponding Trace Snapshot through `payload.trace_id` during `push_items` and denormalize
-them into its own Item record. The column names are `config_version` and `timezone`; plain
-`version` remains reserved for Request execution ownership. These fields are not automatically
-injected into business Item JSON or copied into every Request Snapshot, and the default Memory
-JSONL does not store them.
-
-Submission-failure snapshots:
+Jsonl owns its submission-failure snapshots:
 
 ```text
-<dir>/data/items/snapshots/<task_id>/<yyyy-mm-dd-HH>/<uuid-v7>.json
+<dir>/data/items/snapshots/<task_id>/<yyyy-mm-dd-HH>/<content-sha256>-<submission-sha256>.json
 ```
 
-- the first `push_items` failure attempts to create a snapshot before continuing configured retries;
-- a snapshot is streamed to a uniquely named temporary file and atomically renamed only after the complete document is flushed; failure removes the temporary file and publishes no partial snapshot;
-- snapshot-write failure does not prevent Scheduler retries;
-- a later successful retry removes the snapshot, while cleanup failure does not change Item success;
+- an append failure attempts to create one snapshot for that complete Item Payload before returning the original error to Engine retry;
+- the snapshot includes Payload identity, the `id / data` records, the Store error, and failure time;
+- a uniquely named temporary file is flushed and atomically renamed, so a failed snapshot write publishes no partial file;
+- snapshot-write failure is logged and does not replace the original submission failure;
+- the snapshot hour is frozen for one successful `Jsonl::open()` lifecycle, so retries crossing a wall-clock hour still address the original path;
+- canonical Payload content and a random Jsonl open-session identity form the filename; a restart cannot treat an old filename as a live association;
+- equal immutable Payload projections inside one open lifecycle may share only this recovery snapshot because their manual-recovery data is identical; every Store call still reaches output and no Item deduplication occurs;
+- bounded sharded locks order output, snapshot publication, and cleanup for the same process-local projection;
+- a later successful retry of the same immutable Payload projection removes the snapshot, while cleanup failure does not change Item success;
 - an exhausted snapshot remains for manual handling; automatic replay is not currently implemented;
-- another Scheduler enables framework-local snapshots only when its `dir()` returns a local path.
+- a custom Store owns its own failure persistence and does not receive framework snapshots from the Scheduler.
 
-Item submission is at-least-once. Business Item deduplication belongs downstream or in a custom Scheduler's Item submission implementation.
+Item submission is at-least-once. Business Item deduplication is downstream business logic outside
+the Store contract.
 
 ## 12. Source Responsibilities
 
@@ -921,7 +942,7 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/engine/admission.rs` | Apply `before_scheduler` to Request output before it enters the Scheduler |
 | `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse lifecycle for one claimed Request |
 | `spider/src/engine/event/request.rs` | Handle Request output emitted by Tx |
-| `spider/src/engine/event/item.rs` | Handle Items, submission retries, and failure snapshots |
+| `spider/src/engine/event/item.rs` | Run Item middleware, Store retries, and `error_item` orchestration |
 | `spider/src/spider/tx/identity.rs` | Derive replay-stable IDs for current-Request output |
 | `spider/src/engine/executor.rs` | Select Code/Rules from Trace Snapshot and invoke the shared Spider |
 | `spider/src/engine/code.rs` | Code-mode local run-seed initialization |
@@ -936,7 +957,11 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `spider/src/downloader/http.rs` | Execute HTTP requests, redirects, headers, cookies, and response conversion |
 | `spider/src/downloader/http/pool.rs` | Key, reuse, expire, and close proxy/TLS-specific HTTP clients |
 | `spider/src/net/request/contract.rs` | Public Request, mode, state, proxy, and TLS contract |
-| `spider/src/payload/contract.rs` | Scheduler operation Payload and its structural validation |
+| `spider/src/payload/contract.rs` | Unified transport Payload and operation-specific structural validation |
+| `spider/src/item/store.rs` | Public Item persistence contract |
+| `spider/src/item/jsonl.rs` | Default Jsonl Store lifecycle and submission flow |
+| `spider/src/item/jsonl/output.rs` | Hourly JSONL files, bounded handle cache, serialized appends, flush, and error logging |
+| `spider/src/item/jsonl/snapshot.rs` | Process-local failure-snapshot projection, ordered publication, and cleanup |
 | `spider/src/scheduler/contract.rs` | Public Scheduler contract |
 | `spider/src/scheduler/init.rs` | Run-seed initialization contract |
 | `spider/src/scheduler/memory.rs` | Public Memory implementation and submodule composition |
@@ -964,12 +989,11 @@ Item submission is at-least-once. Business Item deduplication belongs downstream
 | `contrib/src/scheduler/redis/contract.rs` | Redis public type, lifecycle, and Scheduler/Init contract wiring |
 | `contrib/src/scheduler/redis/request.rs` | Redis Trace/Request storage, claim, restore, and lease recovery |
 | `contrib/src/scheduler/redis/settle.rs` | Redis acknowledgement, release, refresh, success, and failure transitions |
-| `contrib/src/scheduler/redis/item.rs` | Redis Stream Item submission and Trace metadata projection |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | Key isolation, Lua loading, boundary validation, and error mapping |
 | `contrib/src/middleware/connection.rs` | Lazily establish and share one Redis ConnectionManager per Middleware instance |
 | `contrib/src/middleware/dedup.rs` | RedisBloom options, bucket keys, and atomic `BF.INSERT` Dedup |
 | `contrib/src/middleware/rate_limit.rs` and `rate_limit/reserve.lua` | Redis server-time shared group reservations and idle cleanup |
-| `contrib/src/scheduler/api/{contract,client,request,item,settle,worker,state,wire}.rs` | Worker-side API Scheduler contract mapping, lifecycle, bounded HTTP transport, Trace cache, heartbeat, and wire data |
+| `contrib/src/scheduler/api/{contract,client,request,settle,worker,state,wire}.rs` | Worker-side API Scheduler contract mapping, lifecycle, bounded HTTP transport, Trace cache, heartbeat, and wire data |
 | `contrib/src/scheduler/api/client/response.rs` | Bound streamed Master responses and map transport-size failures |
 | `contrib/src/scheduler/api/request/{claim,init,trace}.rs` | Map claims, run initialization, and immutable Trace reads to the Worker API |
 | `master/src/server.rs` | Own the Axum server lifecycle and start/stop Cron with the service |
@@ -999,7 +1023,8 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 These capabilities must preserve the existing core contracts:
 
 - replacing the Scheduler must not change the business shape of Engine, Spider, Downloader, Middleware, Request, Response, or Item;
-- Redis and API Scheduler implementations must provide atomic claims, leases, lease refresh, version validation, retry, terminal states, Trace reads, and Item submission themselves; every lease-backed implementation must recover expired leases even while the Worker is online, while offline-Worker recovery can only trigger that transition earlier;
+- Redis and API Scheduler implementations must provide atomic claims, leases, lease refresh, version validation, retry, terminal states, and Trace reads themselves; every lease-backed implementation must recover expired leases even while the Worker is online, while offline-Worker recovery can only trigger that transition earlier;
+- replacing the Item Store must not change Request scheduling, leasing, or settlement, and replacing the Scheduler must not replace or reconfigure the Store;
 - Master is a control plane, not a Scheduler: only `Api` crosses the Engine Scheduler boundary, Worker and control credentials remain distinct, and Master-private MySQL is never exposed to Workers;
 - Worker capability filtering must be atomic with the Scheduler claim, rather than claiming an incompatible Request and dropping it in the Downloader;
 - Browser must implement the existing `Download` contract and produce the same `Response` model;

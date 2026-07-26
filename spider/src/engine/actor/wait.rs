@@ -14,11 +14,14 @@ pub(super) struct Idle {
     result: Result<(), crate::Error>,
 }
 
-pub(super) fn poll<S, D, E>(engine: &mut Engine<S, D, E>, actor_ref: ActorRef<Engine<S, D, E>>)
-where
+pub(super) fn poll<S, D, E, O>(
+    engine: &mut Engine<S, D, E, O>,
+    actor_ref: ActorRef<Engine<S, D, E, O>>,
+) where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     let handle = tokio::spawn(async move {
         let result = task::protect(async {
@@ -32,11 +35,14 @@ where
     engine.poll = Some(task::Task::new(handle));
 }
 
-pub(super) fn idle<S, D, E>(engine: &mut Engine<S, D, E>, actor_ref: ActorRef<Engine<S, D, E>>)
-where
+pub(super) fn idle<S, D, E, O>(
+    engine: &mut Engine<S, D, E, O>,
+    actor_ref: ActorRef<Engine<S, D, E, O>>,
+) where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     let events = engine.events.clone();
     let handle = tokio::spawn(async move {
@@ -51,11 +57,12 @@ where
     engine.idle = Some(task::Task::new(handle));
 }
 
-impl<S, D, E> Message<Poll> for Engine<S, D, E>
+impl<S, D, E, O> Message<Poll> for Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     type Reply = ();
 
@@ -73,11 +80,12 @@ where
     }
 }
 
-impl<S, D, E> Message<Idle> for Engine<S, D, E>
+impl<S, D, E, O> Message<Idle> for Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     type Reply = ();
 

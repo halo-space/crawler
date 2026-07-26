@@ -70,7 +70,6 @@ impl Operation {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) enum Action {
     Init(String),
-    Items(String),
 }
 
 pub(super) struct Operations {
@@ -106,7 +105,7 @@ impl Operations {
         }
         if self.values.len() >= self.capacity {
             return Err(spider::scheduler::Error::Unavailable(format!(
-                "API Scheduler has {} unresolved Item or Init operations",
+                "API Scheduler has {} unresolved Init operations",
                 self.capacity
             )));
         }

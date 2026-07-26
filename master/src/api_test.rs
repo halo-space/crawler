@@ -323,13 +323,6 @@ impl scheduler::Scheduler for Reset {
         self.api.push(value).await
     }
 
-    async fn push_items(
-        &self,
-        value: &payload::Payload,
-    ) -> std::result::Result<(), scheduler::Error> {
-        self.api.push_items(value).await
-    }
-
     async fn trace(
         &self,
         trace_id: &str,

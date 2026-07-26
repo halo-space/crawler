@@ -1,4 +1,4 @@
-use spider::{item, net, payload};
+use spider::{net, payload};
 
 pub(crate) fn request(id: &str, url: &str) -> net::Request {
     net::Request::follow(url).unwrap().with_id(id)
@@ -30,11 +30,4 @@ pub(super) fn failure(request: &net::Request, error: &str) -> payload::Payload {
     payload.start_time = Some(1);
     payload.end_time = Some(2);
     payload
-}
-
-pub(super) fn item(value: &str) -> Box<dyn item::Item> {
-    Box::new(item::Map::new(item::Values::from([(
-        "value".to_string(),
-        value.into(),
-    )])))
 }

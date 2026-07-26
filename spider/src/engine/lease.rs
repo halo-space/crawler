@@ -212,10 +212,6 @@ mod tests {
             Ok(())
         }
 
-        async fn push_items(&self, _payload: &payload::Payload) -> Result<(), scheduler::Error> {
-            Ok(())
-        }
-
         async fn trace(
             &self,
             _trace_id: &str,

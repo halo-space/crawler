@@ -74,7 +74,7 @@ async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
     let (start_url, server) = serve_pages();
     let runtime_dir = temp_dir();
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new().with_dir(&runtime_dir))
+        .with_store(spider::item::Jsonl::with_dir(&runtime_dir))
         .with_spider(AcceptanceSpider::new(start_url))
         .build()
         .with_concurrency(2);
@@ -102,10 +102,9 @@ async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
     let item_path = files.next_entry().await.unwrap().unwrap().path();
     assert!(files.next_entry().await.unwrap().is_none());
     let content = tokio::fs::read_to_string(item_path).await.unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(content.trim()).unwrap(),
-        serde_json::json!({"title": "桂林米粉"})
-    );
+    let record = serde_json::from_str::<Value>(content.trim()).unwrap();
+    assert!(!record["id"].as_str().unwrap().is_empty());
+    assert_eq!(record["data"], serde_json::json!({"title": "桂林米粉"}));
 
     tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
 }

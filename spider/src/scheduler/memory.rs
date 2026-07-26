@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::{item, net, payload, scheduler, stats, trace};
+use crate::{net, payload, scheduler, stats, trace};
 
 mod claim;
 mod queue;
@@ -17,7 +17,6 @@ use state::State;
 pub struct Memory {
     lease: scheduler::Lease,
     state: Mutex<State>,
-    writer: item::local::Writer,
 }
 
 impl Memory {
@@ -25,13 +24,7 @@ impl Memory {
         Self {
             lease: scheduler::Lease::default(),
             state: Mutex::new(State::default()),
-            writer: item::local::Writer::default(),
         }
-    }
-
-    pub fn with_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        self.writer = item::local::Writer::new(dir);
-        self
     }
 
     pub fn with_lease(mut self, lease: scheduler::Lease) -> Self {
@@ -111,42 +104,22 @@ impl Default for Memory {
 }
 
 impl scheduler::Scheduler for Memory {
-    fn dir(&self) -> Option<&std::path::Path> {
-        Some(self.writer.dir())
-    }
-
     fn lease(&self) -> Option<scheduler::Lease> {
         Some(self.lease)
     }
 
     async fn open(&self) -> Result<(), scheduler::Error> {
-        self.writer
-            .open()
-            .await
-            .map_err(|error| scheduler::Error::Message(error.to_string()))
+        Ok(())
     }
 
     async fn close(&self) -> Result<(), scheduler::Error> {
-        self.writer
-            .close()
-            .await
-            .map_err(|error| scheduler::Error::Message(error.to_string()))
+        Ok(())
     }
 
     async fn push(&self, payload: payload::Payload) -> Result<(), scheduler::Error> {
-        payload
-            .validate_push()
-            .map_err(|message| scheduler::Error::Message(message.to_string()))?;
-        let mut request_ids = HashSet::with_capacity(payload.requests.len());
+        payload.validate_push().map_err(scheduler::Error::Message)?;
         let mut queued = Vec::with_capacity(payload.requests.len());
         for request in payload.requests {
-            if !request_ids.insert(request.id.clone()) {
-                return Err(scheduler::Error::Message(format!(
-                    "duplicate request id in payload: {}",
-                    request.id
-                )));
-            }
-            validate::request(&request)?;
             let snapshot = queue::snapshot(request)?;
             let digest = snapshot
                 .digest()
@@ -178,20 +151,6 @@ impl scheduler::Scheduler for Memory {
             state.request_digests.insert(snapshot.id.clone(), digest);
             state.enqueue(snapshot, now);
         }
-        Ok(())
-    }
-
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
-        payload
-            .validate_items()
-            .map_err(|message| scheduler::Error::Message(message.to_string()))?;
-        if payload.items.is_empty() {
-            return Ok(());
-        }
-        self.writer
-            .write(payload)
-            .await
-            .map_err(|error| scheduler::Error::Message(error.to_string()))?;
         Ok(())
     }
 
@@ -389,16 +348,12 @@ impl scheduler::Init for Memory {
                 "all initial requests must reference the Trace Snapshot task_id".to_string(),
             ));
         }
+        let payload = payload::Payload::new().requests(requests);
+        payload.validate_push().map_err(scheduler::Error::Message)?;
+        let requests = payload.requests;
 
-        let mut request_ids = HashSet::with_capacity(requests.len());
         let mut queue = Vec::with_capacity(requests.len());
         for request in requests {
-            if !request_ids.insert(request.id.clone()) {
-                return Err(scheduler::Error::Message(
-                    "duplicate initial request id".to_string(),
-                ));
-            }
-            validate::request(&request)?;
             let snapshot = queue::snapshot(request)?;
             let digest = snapshot
                 .digest()

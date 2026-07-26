@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -41,14 +40,9 @@ graph:
         })
         .build()
         .with_concurrency(1);
-    let dir = engine.scheduler().dir().map(PathBuf::from);
-
     engine.start().await.unwrap();
 
     assert_eq!(fetched.load(Ordering::SeqCst), 2);
-    if let Some(dir) = dir {
-        tokio::fs::remove_dir_all(dir).await.unwrap();
-    }
 }
 
 pub(super) async fn existing_trace_runs_without_local_seed<S>(scheduler: S)
@@ -97,16 +91,11 @@ graph:
         })
         .build()
         .with_concurrency(1);
-    let dir = engine.scheduler().dir().map(PathBuf::from);
-
     engine.start().await.unwrap();
 
     assert_eq!(started.load(Ordering::SeqCst), 0);
     assert_eq!(fetched.load(Ordering::SeqCst), 1);
     assert_eq!(indexed.load(Ordering::SeqCst), 1);
-    if let Some(dir) = dir {
-        tokio::fs::remove_dir_all(dir).await.unwrap();
-    }
 }
 
 struct LocalSpider {
@@ -149,10 +138,6 @@ impl<S> Scheduler for NoSeed<S>
 where
     S: Scheduler,
 {
-    fn dir(&self) -> Option<&Path> {
-        self.0.dir()
-    }
-
     fn lease(&self) -> Option<scheduler::Lease> {
         self.0.lease()
     }
@@ -167,10 +152,6 @@ where
 
     async fn push(&self, payload: payload::Payload) -> Result<(), scheduler::Error> {
         self.0.push(payload).await
-    }
-
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
-        self.0.push_items(payload).await
     }
 
     async fn trace(&self, trace_id: &str) -> Result<Option<trace::Snapshot>, scheduler::Error> {

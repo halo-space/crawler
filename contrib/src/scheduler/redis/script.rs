@@ -9,7 +9,6 @@ pub(super) struct Scripts {
     pub(super) refresh: redis::Script,
     pub(super) success: redis::Script,
     pub(super) failure: redis::Script,
-    pub(super) items: redis::Script,
 }
 
 impl Scripts {
@@ -25,7 +24,6 @@ impl Scripts {
             refresh: redis::Script::new(include_str!("scripts/refresh.lua")),
             success: redis::Script::new(include_str!("scripts/success.lua")),
             failure: redis::Script::new(include_str!("scripts/failure.lua")),
-            items: redis::Script::new(include_str!("scripts/items.lua")),
         }
     }
 
@@ -44,7 +42,6 @@ impl Scripts {
             &self.refresh,
             &self.success,
             &self.failure,
-            &self.items,
         ] {
             script.load_async(connection).await?;
         }

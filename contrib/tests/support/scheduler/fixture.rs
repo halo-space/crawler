@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
@@ -83,15 +82,7 @@ pub(super) async fn close<S>(scheduler: &S)
 where
     S: Scheduler,
 {
-    let dir = scheduler.dir().map(PathBuf::from);
     scheduler.close().await.unwrap();
-    if let Some(dir) = dir {
-        match tokio::fs::remove_dir_all(dir).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("failed to remove Scheduler fixture directory: {error}"),
-        }
-    }
 }
 
 /// Executes two Scheduler operations from separate runtime threads after both are ready.

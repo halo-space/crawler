@@ -64,10 +64,6 @@ impl Keys {
         self.key(&format!("trace:{}:stats", token(trace_id)))
     }
 
-    pub(super) fn items(&self) -> String {
-        self.key("items")
-    }
-
     fn key(&self, suffix: &str) -> String {
         format!("{}:{suffix}", self.namespace)
     }

@@ -271,11 +271,6 @@ impl scheduler::Scheduler for Api {
         self.enqueue(payload).await
     }
 
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
-        let _activity = self.enter().await?;
-        self.submit(payload).await
-    }
-
     async fn trace(&self, trace_id: &str) -> Result<Option<trace::Snapshot>, scheduler::Error> {
         let _activity = self.enter().await?;
         self.load_trace(trace_id).await

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use serde_json::Value;
-use spider::item::Item;
+use spider::item::{Item, Store};
 use spider::middleware::{BoxFuture, Middleware, Next, Spec};
 use spider::scheduler::{Init, Scheduler};
 use spider::{downloader, engine, net, payload};
@@ -93,6 +93,9 @@ struct RetryingRulesSpider {
 }
 
 #[macros::spider]
+struct RetryingRulesStoreSpider;
+
+#[macros::spider]
 struct AiCodeSpider {
     value: Arc<Mutex<Option<Value>>>,
 }
@@ -109,7 +112,7 @@ impl AiCodeSpider {
             .with_middleware(
                 Spec::new("retry")
                     .hook("error_parse")
-                    .args(serde_json::json!({"count": 1, "backoff": [0]})),
+                    .args(serde_json::json!({"count": 1, "backoff": [25]})),
             );
         self.tx.request(vec![request]).await
     }
@@ -152,6 +155,25 @@ impl RetryingRulesSpider {
             return Err(spider::Error::Message("retry rules item".to_string()));
         }
         Ok(())
+    }
+}
+
+#[macros::spider(item = TestItem)]
+impl RetryingRulesStoreSpider {
+    fn name(&self) -> &str {
+        "retrying-rules-store"
+    }
+
+    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+        Ok(())
+    }
+
+    #[item]
+    async fn publish(&self, item: TestItem) -> Result<(), spider::Error> {
+        let retry = Spec::new("retry")
+            .hook("error_item")
+            .args(serde_json::json!({"count": 1, "backoff": [0]}));
+        self.tx.item(vec![item.with_middlewares(vec![retry])]).await
     }
 }
 
@@ -205,8 +227,55 @@ impl FailureAttempt {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ItemAttempt {
+    id: String,
+    data: Value,
+    schema: Option<spider::item::SchemaKey>,
+    vals: HashMap<String, Value>,
+    middlewares: Vec<Spec>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoreAttempt {
+    payload: FailureAttempt,
+    request_ids: Vec<String>,
+    items: Vec<ItemAttempt>,
+}
+
+impl StoreAttempt {
+    fn from_payload(payload: &payload::Payload) -> Result<Self, spider::item::Error> {
+        let items = payload
+            .items
+            .iter()
+            .map(|item| {
+                Ok(ItemAttempt {
+                    id: item.id().to_string(),
+                    data: serde_json::to_value(item.as_ref())?,
+                    schema: item.schema(),
+                    vals: item.vals().clone(),
+                    middlewares: item.middlewares().to_vec(),
+                })
+            })
+            .collect::<Result<Vec<_>, spider::item::Error>>()?;
+        Ok(Self {
+            payload: FailureAttempt::from_payload(payload),
+            request_ids: payload
+                .requests
+                .iter()
+                .map(|request| request.id.clone())
+                .collect(),
+            items,
+        })
+    }
+}
+
 struct LifecycleMiddleware {
     calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+struct FailingErrorItemMiddleware {
+    calls: Arc<AtomicUsize>,
 }
 
 struct RejectSeedAdmission;
@@ -306,6 +375,24 @@ impl Middleware for LifecycleMiddleware {
     }
 }
 
+impl Middleware for FailingErrorItemMiddleware {
+    fn error_item<'a>(
+        &'a self,
+        _item: &'a dyn Item,
+        _error: &'a str,
+        _spec: &'a Spec,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(spider::middleware::Error::Message(
+                    "error item callback".to_string(),
+                ));
+            }
+            Ok(())
+        })
+    }
+}
+
 struct TestDownload;
 
 impl downloader::Download for TestDownload {
@@ -359,6 +446,20 @@ fn assert_ai_request(request: &ai::Request) {
     assert_eq!(request.body["model"], Value::from("engine-model"));
 }
 
+fn ai_test_lock() -> &'static tokio::sync::Mutex<()> {
+    // Keep the blocking mock providers from contending inside this test binary.
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn ai_test_lease() -> spider::scheduler::Lease {
+    spider::scheduler::Lease::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+    )
+    .unwrap()
+}
+
 #[test]
 #[should_panic(expected = "Rules config uses an AI extractor but Engine has no AI provider")]
 fn rules_ai_without_a_provider_panics_during_build() {
@@ -380,11 +481,13 @@ fn rules_trace_does_not_persist_ai_provider_configuration() {
 
 #[tokio::test]
 async fn code_parse_retry_keeps_openai_after_scheduler_replacement() {
+    let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start(["not JSON", r#"{"title":"Rust"}"#]);
     let openai =
         spider::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
     let value = Arc::new(Mutex::new(None));
-    let scheduler = LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new())));
+    let scheduler =
+        LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))).with_lease(ai_test_lease());
     let mut engine = engine::Builder::new()
         .with_ai(openai)
         .with_scheduler(scheduler)
@@ -406,6 +509,7 @@ async fn code_parse_retry_keeps_openai_after_scheduler_replacement() {
 
 #[tokio::test]
 async fn rules_code_and_declarative_parsers_share_engine_openai() {
+    let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start([r#"{"source":"code"}"#, r#"{"source":"rules"}"#]);
     let openai =
         spider::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
@@ -426,10 +530,12 @@ async fn rules_code_and_declarative_parsers_share_engine_openai() {
 
 #[tokio::test]
 async fn rules_builder_keeps_openai_after_scheduler_replacement() {
+    let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start([r#"{"title":"Rust"}"#]);
     let openai =
         spider::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
-    let scheduler = LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new())));
+    let scheduler =
+        LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))).with_lease(ai_test_lease());
     let mut engine = engine::Builder::new()
         .with_rules(ai_rules())
         .with_ai(openai)
@@ -644,6 +750,46 @@ item:
 }
 
 #[tokio::test]
+async fn rules_store_retry_reuses_the_same_payload_and_settles_success() {
+    let config = spider::config::Config::from_yaml(
+        r#"
+spider:
+  name: retrying-rules-store
+  start: [{node: detail, url: https://example.com/detail/1}]
+graph:
+  nodes:
+    detail: {}
+  edges:
+    - from: detail
+      kind: item
+      fn: publish
+      vals: {}
+item:
+  schema:
+    fields: {}
+"#,
+    )
+    .unwrap();
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = engine::Builder::new()
+        .with_rules(config)
+        .with_store(RetryOnceStore::new(attempts.clone()))
+        .with_spider(RetryingRulesStoreSpider::new())
+        .with_downloader(RulesDownload)
+        .build();
+
+    engine.start().await.unwrap();
+
+    let attempts = attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0], attempts[1]);
+    assert!(!attempts[0].items[0].id.is_empty());
+    drop(attempts);
+    assert_eq!(engine.scheduler().done_len(), 1);
+    assert_eq!(engine.scheduler().failed_len(), 0);
+}
+
+#[tokio::test]
 async fn rules_builds_the_spider_item_type_and_calls_the_configured_function() {
     let config = spider::config::Config::from_yaml(
         r#"
@@ -680,7 +826,7 @@ item:
     let called = Arc::new(AtomicBool::new(false));
     let dir = std::env::temp_dir().join(format!("crawler-typed-{}", uuid::Uuid::now_v7()));
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new().with_dir(&dir))
+        .with_store(spider::item::Jsonl::with_dir(&dir))
         .with_rules(config)
         .with_spider(TypedRulesSpider::new(called.clone()))
         .with_downloader(RulesDownload)
@@ -697,8 +843,7 @@ item:
 async fn code_parse_retry_reuses_the_emitted_request_id() {
     let pushed_requests = Arc::new(Mutex::new(Vec::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
-    let pushed_items = Arc::new(Mutex::new(Vec::new()));
-    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records, pushed_items);
+    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records);
     let attempts = Arc::new(AtomicUsize::new(0));
     let request = net::Request::follow("https://example.com/source")
         .unwrap()
@@ -777,8 +922,7 @@ item:
     .unwrap();
     let pushed_requests = Arc::new(Mutex::new(Vec::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
-    let pushed_items = Arc::new(Mutex::new(Vec::new()));
-    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records, pushed_items);
+    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records);
     let attempts = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
@@ -894,7 +1038,7 @@ item:
     .unwrap();
     let dir = std::env::temp_dir().join(format!("crawler-media-{}", uuid::Uuid::now_v7()));
     let mut engine = engine::Builder::new()
-        .with_scheduler(spider::Memory::new().with_dir(&dir))
+        .with_store(spider::item::Jsonl::with_dir(&dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(MediaDownload)
@@ -911,7 +1055,7 @@ item:
     let path = files.next_entry().await.unwrap().unwrap().path();
     let line = tokio::fs::read_to_string(path).await.unwrap();
     let item: Value = serde_json::from_str(line.trim()).unwrap();
-    let media = &item["images"][0];
+    let media = &item["data"]["images"][0];
     assert_eq!(media["name"], "");
     assert_eq!(media["url"], "https://example.com/cover.JPG");
     assert_eq!(media["src"], "../cover.JPG#preview");
@@ -1206,6 +1350,105 @@ struct FailingCloseDownload {
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
+struct LifecycleStore {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    fail_open: bool,
+    fail_close: bool,
+    fail_submit: bool,
+}
+
+impl LifecycleStore {
+    fn new(calls: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        Self {
+            calls,
+            fail_open: false,
+            fail_close: false,
+            fail_submit: false,
+        }
+    }
+
+    fn fail_open(calls: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        Self {
+            calls,
+            fail_open: true,
+            fail_close: false,
+            fail_submit: false,
+        }
+    }
+
+    fn fail_close(calls: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        Self {
+            calls,
+            fail_open: false,
+            fail_close: true,
+            fail_submit: false,
+        }
+    }
+
+    fn fail_submit(calls: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        Self {
+            calls,
+            fail_open: false,
+            fail_close: false,
+            fail_submit: true,
+        }
+    }
+}
+
+impl Store for LifecycleStore {
+    async fn open(&self) -> Result<(), spider::item::Error> {
+        self.calls.lock().unwrap().push("store.open");
+        if self.fail_open {
+            return Err(spider::item::Error::Message("store open".to_string()));
+        }
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), spider::item::Error> {
+        self.calls.lock().unwrap().push("store.close");
+        if self.fail_close {
+            return Err(spider::item::Error::Message("store close".to_string()));
+        }
+        Ok(())
+    }
+
+    async fn submit(&self, _payload: &payload::Payload) -> Result<(), spider::item::Error> {
+        self.calls.lock().unwrap().push("store.submit");
+        if self.fail_submit {
+            return Err(spider::item::Error::Message("store submit".to_string()));
+        }
+        Ok(())
+    }
+}
+
+struct GatedStore {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    gate: Arc<PushGate>,
+}
+
+impl Store for GatedStore {
+    async fn open(&self) -> Result<(), spider::item::Error> {
+        self.calls.lock().unwrap().push("store.open");
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), spider::item::Error> {
+        self.calls.lock().unwrap().push("store.close");
+        Ok(())
+    }
+
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+        payload
+            .validate_store()
+            .map_err(|message| spider::item::Error::Message(message.to_string()))?;
+        self.calls.lock().unwrap().push("store.submit");
+        self.gate.entered.add_permits(1);
+        self.gate.release.acquire().await.unwrap().forget();
+        self.calls.lock().unwrap().push("store.submit.complete");
+        Ok(())
+    }
+}
+
 impl downloader::Download for FailingCloseDownload {
     async fn open(&self) -> Result<(), downloader::Error> {
         Ok(())
@@ -1322,6 +1565,11 @@ impl LifecycleScheduler {
         self
     }
 
+    fn with_lease(mut self, lease: spider::scheduler::Lease) -> Self {
+        self.inner = spider::Memory::new().with_lease(lease);
+        self
+    }
+
     fn gate_push(mut self, gate: Arc<PushGate>) -> Self {
         self.push_gate = Some(gate);
         self
@@ -1369,10 +1617,6 @@ impl Scheduler for LifecycleScheduler {
         }
 
         self.inner.push(payload).await
-    }
-
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
-        self.inner.push_items(payload).await
     }
 
     async fn trace(
@@ -1507,10 +1751,6 @@ impl Scheduler for FlakyScheduler {
         self.inner.push(payload).await
     }
 
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
-        self.inner.push_items(payload).await
-    }
-
     async fn trace(
         &self,
         trace_id: &str,
@@ -1611,25 +1851,17 @@ struct RecordingScheduler {
     inner: spider::Memory,
     requests: RequestRecords,
     records: Arc<Mutex<Vec<PayloadRecord>>>,
-    items: Arc<Mutex<Vec<PayloadRecord>>>,
     reject_emitted: bool,
-    reject_items: bool,
     claim_sync: Option<Arc<ClaimSync>>,
 }
 
 impl RecordingScheduler {
-    fn new(
-        requests: RequestRecords,
-        records: Arc<Mutex<Vec<PayloadRecord>>>,
-        items: Arc<Mutex<Vec<PayloadRecord>>>,
-    ) -> Self {
+    fn new(requests: RequestRecords, records: Arc<Mutex<Vec<PayloadRecord>>>) -> Self {
         Self {
             inner: spider::Memory::new(),
             requests,
             records,
-            items,
             reject_emitted: false,
-            reject_items: false,
             claim_sync: None,
         }
     }
@@ -1639,14 +1871,92 @@ impl RecordingScheduler {
         self
     }
 
-    fn reject_items(mut self) -> Self {
-        self.reject_items = true;
-        self
-    }
-
     fn with_stale_claim(mut self, sync: Arc<ClaimSync>) -> Self {
         self.claim_sync = Some(sync);
         self
+    }
+}
+
+struct RecordingStore {
+    items: Arc<Mutex<Vec<PayloadRecord>>>,
+    reject: bool,
+}
+
+struct RetryOnceStore {
+    attempts: Arc<Mutex<Vec<StoreAttempt>>>,
+    fail_next: AtomicBool,
+}
+
+impl RecordingStore {
+    fn new(items: Arc<Mutex<Vec<PayloadRecord>>>) -> Self {
+        Self {
+            items,
+            reject: false,
+        }
+    }
+
+    fn reject(mut self) -> Self {
+        self.reject = true;
+        self
+    }
+}
+
+impl RetryOnceStore {
+    fn new(attempts: Arc<Mutex<Vec<StoreAttempt>>>) -> Self {
+        Self {
+            attempts,
+            fail_next: AtomicBool::new(true),
+        }
+    }
+}
+
+impl Store for RecordingStore {
+    async fn open(&self) -> Result<(), spider::item::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), spider::item::Error> {
+        Ok(())
+    }
+
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+        payload
+            .validate_store()
+            .map_err(|message| spider::item::Error::Message(message.to_string()))?;
+        self.items
+            .lock()
+            .unwrap()
+            .push(PayloadRecord::from_payload(payload));
+        if self.reject {
+            return Err(spider::item::Error::Message("item submit".to_string()));
+        }
+        Ok(())
+    }
+}
+
+impl Store for RetryOnceStore {
+    async fn open(&self) -> Result<(), spider::item::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), spider::item::Error> {
+        Ok(())
+    }
+
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+        payload
+            .validate_store()
+            .map_err(|message| spider::item::Error::Message(message.to_string()))?;
+        self.attempts
+            .lock()
+            .unwrap()
+            .push(StoreAttempt::from_payload(payload)?);
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(spider::item::Error::Message(
+                "retrying Rules Store submit".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1691,17 +2001,6 @@ impl Scheduler for RecordingScheduler {
             sync.pushed.add_permits(1);
         }
         result
-    }
-
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
-        self.items
-            .lock()
-            .unwrap()
-            .push(PayloadRecord::from_payload(payload));
-        if self.reject_items {
-            return Err(spider::scheduler::Error::Message("item push".to_string()));
-        }
-        self.inner.push_items(payload).await
     }
 
     async fn trace(
@@ -1803,10 +2102,6 @@ impl Scheduler for FailingCloseScheduler {
 
     async fn push(&self, payload: payload::Payload) -> Result<(), spider::scheduler::Error> {
         self.inner.push(payload).await
-    }
-
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
-        self.inner.push_items(payload).await
     }
 
     async fn trace(
@@ -1969,6 +2264,9 @@ fn lifecycle_spec(hook: &str) -> Spec {
 struct StartItemSpider;
 
 #[macros::spider]
+struct FailingStartItemsSpider;
+
+#[macros::spider]
 impl StartItemSpider {
     fn name(&self) -> &str {
         "start_item"
@@ -1976,6 +2274,27 @@ impl StartItemSpider {
 
     async fn start(&self) -> Result<(), spider::Error> {
         self.tx.item(vec![TestItem::new()]).await
+    }
+
+    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+        Ok(())
+    }
+}
+
+#[macros::spider]
+impl FailingStartItemsSpider {
+    fn name(&self) -> &str {
+        "failing_start_items"
+    }
+
+    async fn start(&self) -> Result<(), spider::Error> {
+        let middleware = Spec::new("failing-error-item").hook("error_item");
+        self.tx
+            .item(vec![
+                TestItem::new().with_middlewares(vec![middleware.clone()]),
+                TestItem::new().with_middlewares(vec![middleware]),
+            ])
+            .await
     }
 
     async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
@@ -2109,6 +2428,9 @@ impl EventSpider {
 struct LateEventSpider;
 
 #[macros::spider]
+struct DetachedItemSpider;
+
+#[macros::spider]
 impl LateEventSpider {
     fn name(&self) -> &str {
         "late-event"
@@ -2131,6 +2453,28 @@ impl LateEventSpider {
                 tx.item(vec![TestItem::new()]).await.unwrap();
             });
         }
+        Ok(())
+    }
+}
+
+#[macros::spider]
+impl DetachedItemSpider {
+    fn name(&self) -> &str {
+        "detached-item"
+    }
+
+    async fn start(&self) -> Result<(), spider::Error> {
+        let request = net::Request::follow("https://example.com/source")
+            .map_err(|error| spider::Error::Message(error.to_string()))?;
+        self.tx.request(vec![request]).await
+    }
+
+    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            tx.item(vec![TestItem::new()]).await.unwrap();
+        });
         Ok(())
     }
 }
@@ -2246,7 +2590,7 @@ impl Item for TestItem {
 }
 
 #[tokio::test]
-async fn engine_open_opens_scheduler_then_downloader() {
+async fn engine_open_opens_scheduler_downloader_and_store() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let spider = TestSpider::new();
     let scheduler = LifecycleScheduler::new(calls.clone());
@@ -2257,6 +2601,7 @@ async fn engine_open_opens_scheduler_then_downloader() {
     let engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
+        .with_store(LifecycleStore::new(calls.clone()))
         .with_spider(spider)
         .build();
 
@@ -2264,12 +2609,12 @@ async fn engine_open_opens_scheduler_then_downloader() {
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["scheduler.open", "downloader.open"]
+        ["scheduler.open", "downloader.open", "store.open"]
     );
 }
 
 #[tokio::test]
-async fn engine_close_closes_downloader_then_scheduler() {
+async fn engine_close_closes_downloader_store_and_scheduler() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let spider = TestSpider::new();
     let scheduler = LifecycleScheduler::new(calls.clone());
@@ -2280,6 +2625,7 @@ async fn engine_close_closes_downloader_then_scheduler() {
     let engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
+        .with_store(LifecycleStore::new(calls.clone()))
         .with_spider(spider)
         .build();
 
@@ -2287,7 +2633,7 @@ async fn engine_close_closes_downloader_then_scheduler() {
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["downloader.close", "scheduler.close"]
+        ["downloader.close", "store.close", "scheduler.close"]
     );
 }
 
@@ -2304,13 +2650,14 @@ async fn engine_close_attempts_every_component_when_cleanup_fails() {
     let engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
+        .with_store(LifecycleStore::fail_close(calls.clone()))
         .with_spider(EmptySpider::new())
         .build();
 
     engine.close().await.unwrap_err();
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["downloader.close", "scheduler.close"]
+        ["downloader.close", "store.close", "scheduler.close"]
     );
 }
 
@@ -2326,6 +2673,7 @@ async fn engine_start_opens_runs_and_closes_resources() {
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
+        .with_store(LifecycleStore::new(calls.clone()))
         .with_spider(spider)
         .build();
 
@@ -2336,8 +2684,11 @@ async fn engine_start_opens_runs_and_closes_resources() {
         [
             "scheduler.open",
             "downloader.open",
+            "store.open",
             "downloader.fetch",
+            "store.submit",
             "downloader.close",
+            "store.close",
             "scheduler.close"
         ]
     );
@@ -2382,6 +2733,7 @@ async fn engine_start_closes_resources_when_spider_start_fails() {
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
+        .with_store(LifecycleStore::new(calls.clone()))
         .with_spider(spider)
         .build();
 
@@ -2393,7 +2745,49 @@ async fn engine_start_closes_resources_when_spider_start_fails() {
         [
             "scheduler.open",
             "downloader.open",
+            "store.open",
             "downloader.close",
+            "store.close",
+            "scheduler.close"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn start_item_store_failure_keeps_store_error_and_closes_resources() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let error_item_calls = Arc::new(AtomicUsize::new(0));
+    let scheduler = LifecycleScheduler::new(calls.clone());
+    let downloader = LifecycleDownload {
+        calls: calls.clone(),
+    };
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(downloader)
+        .with_store(LifecycleStore::fail_submit(calls.clone()))
+        .with_spider(FailingStartItemsSpider::new())
+        .with_middleware(
+            "failing-error-item",
+            FailingErrorItemMiddleware {
+                calls: error_item_calls.clone(),
+            },
+        )
+        .build();
+
+    let error = engine.start().await.unwrap_err();
+
+    assert!(error.to_string().contains("store submit"));
+    assert!(!error.to_string().contains("error item callback"));
+    assert_eq!(error_item_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "scheduler.open",
+            "downloader.open",
+            "store.open",
+            "store.submit",
+            "downloader.close",
+            "store.close",
             "scheduler.close"
         ]
     );
@@ -2444,6 +2838,7 @@ async fn engine_start_closes_resources_when_event_push_fails() {
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
+        .with_store(LifecycleStore::new(calls.clone()))
         .with_spider(spider)
         .build();
 
@@ -2455,8 +2850,10 @@ async fn engine_start_closes_resources_when_event_push_fails() {
         [
             "scheduler.open",
             "downloader.open",
+            "store.open",
             "scheduler.push",
             "downloader.close",
+            "store.close",
             "scheduler.close"
         ]
     );
@@ -2514,6 +2911,35 @@ async fn engine_start_closes_resources_when_downloader_open_fails() {
 }
 
 #[tokio::test]
+async fn engine_open_closes_prior_resources_when_store_open_fails() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = LifecycleScheduler::new(calls.clone());
+    let downloader = LifecycleDownload {
+        calls: calls.clone(),
+    };
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(downloader)
+        .with_store(LifecycleStore::fail_open(calls.clone()))
+        .with_spider(EmptySpider::new())
+        .build();
+
+    let error = engine.start().await.unwrap_err();
+
+    assert!(error.to_string().contains("store open"));
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "scheduler.open",
+            "downloader.open",
+            "store.open",
+            "downloader.close",
+            "scheduler.close"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn executor_completes_current_request() {
     let scheduler = spider::Memory::new();
     let request = net::Request::follow("https://example.com").unwrap();
@@ -2561,9 +2987,11 @@ async fn engine_waits_for_output_sent_after_the_request_task_finishes() {
     let pushed_requests = Arc::new(Mutex::new(Vec::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
     let pushed_items = Arc::new(Mutex::new(Vec::new()));
-    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records, pushed_items.clone());
+    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records);
+    let store = RecordingStore::new(pushed_items.clone());
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
+        .with_store(store)
         .with_downloader(TestDownload)
         .with_spider(LateEventSpider::new())
         .build()
@@ -2599,10 +3027,61 @@ async fn engine_waits_for_output_sent_after_the_request_task_finishes() {
 }
 
 #[tokio::test]
+async fn engine_waits_for_detached_item_submit_before_closing_store() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(PushGate::new());
+    let scheduler = LifecycleScheduler::new(calls.clone());
+    let downloader = LifecycleDownload {
+        calls: calls.clone(),
+    };
+    let mut engine = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(downloader)
+        .with_store(GatedStore {
+            calls: calls.clone(),
+            gate: gate.clone(),
+        })
+        .with_spider(DetachedItemSpider::new())
+        .build();
+
+    let runtime = tokio::spawn(async move { engine.start().await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), gate.entered.acquire())
+        .await
+        .expect("detached Item submission must reach the Store")
+        .unwrap()
+        .forget();
+
+    tokio::task::yield_now().await;
+    assert!(!runtime.is_finished());
+    assert!(!calls.lock().unwrap().contains(&"store.close"));
+
+    gate.release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(1), runtime)
+        .await
+        .expect("Engine must finish after the Store submission is released")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "scheduler.open",
+            "downloader.open",
+            "store.open",
+            "downloader.fetch",
+            "store.submit",
+            "store.submit.complete",
+            "downloader.close",
+            "store.close",
+            "scheduler.close"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn stale_empty_claim_is_rechecked_after_detached_output() {
     let sync = Arc::new(ClaimSync::new());
     let scheduler = RecordingScheduler::new(
-        Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
     )
@@ -2641,9 +3120,11 @@ graph:
     let pushed_requests = Arc::new(Mutex::new(Vec::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
     let pushed_items = Arc::new(Mutex::new(Vec::new()));
-    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records, pushed_items.clone());
+    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records);
+    let store = RecordingStore::new(pushed_items.clone());
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
+        .with_store(store)
         .with_rules(config)
         .with_spider(LateEventSpider::new())
         .with_downloader(TestDownload)
@@ -2678,12 +3159,15 @@ graph:
 }
 
 #[tokio::test]
-async fn engine_sends_start_items_to_scheduler() {
+async fn engine_submits_start_items_to_store() {
     let spider = StartItemSpider::new();
     let scheduler = spider::Memory::new();
+    let items = Arc::new(Mutex::new(Vec::new()));
+    let store = RecordingStore::new(items.clone());
 
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
+        .with_store(store)
         .with_downloader(TestDownload)
         .with_spider(spider)
         .build();
@@ -2694,10 +3178,34 @@ async fn engine_sends_start_items_to_scheduler() {
     assert_eq!(scheduler.done_len(), 0);
     assert_eq!(scheduler.queued_len(), 0);
     assert_eq!(scheduler.processing_len(), 0);
+    assert_eq!(items.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn builder_uses_memory_scheduler_and_local_item_by_default() {
+async fn replacing_scheduler_does_not_change_store_submission() {
+    let items = Arc::new(Mutex::new(Vec::new()));
+
+    let mut memory = engine::Builder::new()
+        .with_scheduler(spider::Memory::new())
+        .with_store(RecordingStore::new(items.clone()))
+        .with_downloader(TestDownload)
+        .with_spider(StartItemSpider::new())
+        .build();
+    memory.start().await.unwrap();
+
+    let mut alternate = engine::Builder::new()
+        .with_scheduler(LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))))
+        .with_store(RecordingStore::new(items.clone()))
+        .with_downloader(TestDownload)
+        .with_spider(StartItemSpider::new())
+        .build();
+    alternate.start().await.unwrap();
+
+    assert_eq!(items.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn builder_uses_memory_scheduler_and_jsonl_store_by_default() {
     let mut engine = engine::Builder::new()
         .with_spider(EmptySpider::new())
         .build();
@@ -2708,7 +3216,7 @@ async fn builder_uses_memory_scheduler_and_local_item_by_default() {
     assert_eq!(scheduler.done_len(), 0);
     assert_eq!(scheduler.queued_len(), 0);
     assert_eq!(scheduler.processing_len(), 0);
-    assert_eq!(engine.scheduler().dir(), Some(std::path::Path::new(".")));
+    assert_eq!(engine.store().dir(), std::path::Path::new("."));
 }
 
 #[tokio::test]
@@ -2935,11 +3443,8 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
     let pushed_requests = Arc::new(Mutex::new(Vec::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
     let pushed_items = Arc::new(Mutex::new(Vec::new()));
-    let scheduler = RecordingScheduler::new(
-        pushed_requests.clone(),
-        records.clone(),
-        pushed_items.clone(),
-    );
+    let scheduler = RecordingScheduler::new(pushed_requests.clone(), records.clone());
+    let store = RecordingStore::new(pushed_items.clone());
     scheduler
         .inner
         .init(
@@ -2960,6 +3465,7 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
 
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
+        .with_store(store)
         .with_downloader(TestDownload)
         .with_spider(EventSpider::new())
         .build()
@@ -3017,9 +3523,7 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
 async fn rejected_requests_only_fail_current_request_and_keep_consuming() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
-    let scheduler =
-        RecordingScheduler::new(requests, records.clone(), Arc::new(Mutex::new(Vec::new())))
-            .reject_emitted();
+    let scheduler = RecordingScheduler::new(requests, records.clone()).reject_emitted();
     let failed = net::Request::follow("https://example.com/push-fail").unwrap();
     let failed_id = failed.id.clone();
     let ok = net::Request::follow("https://example.com/ok").unwrap();
@@ -3063,8 +3567,8 @@ async fn rejected_items_only_fail_current_request_and_keep_consuming() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
     let pushed_items = Arc::new(Mutex::new(Vec::new()));
-    let scheduler =
-        RecordingScheduler::new(requests, records.clone(), pushed_items.clone()).reject_items();
+    let scheduler = RecordingScheduler::new(requests, records.clone());
+    let store = RecordingStore::new(pushed_items.clone()).reject();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut failed = net::Request::follow("https://example.com/item-fail").unwrap();
     failed.middlewares = vec![lifecycle_spec("error_parse")];
@@ -3078,6 +3582,7 @@ async fn rejected_items_only_fail_current_request_and_keep_consuming() {
 
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
+        .with_store(store)
         .with_downloader(TestDownload)
         .with_spider(EventSpider::new())
         .with_middleware(

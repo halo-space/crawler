@@ -11,7 +11,7 @@ use super::script::Scripts;
 /// A Redis 7 standalone Scheduler.
 ///
 /// The Scheduler owns no Worker-local files. Its queues, mode-scoped processing ownership, Trace
-/// Snapshots, completions, statistics, and Item output are scoped by its namespace in Redis.
+/// Snapshots, completions, and statistics are scoped by its namespace in Redis.
 pub struct Redis {
     pub(super) client: redis::Client,
     pub(super) connection: Mutex<Option<redis::aio::ConnectionManager>>,
@@ -126,10 +126,6 @@ impl scheduler::Scheduler for Redis {
 
     async fn push(&self, payload: payload::Payload) -> Result<(), scheduler::Error> {
         self.enqueue(payload).await
-    }
-
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
-        self.submit(payload).await
     }
 
     async fn trace(&self, trace_id: &str) -> Result<Option<trace::Snapshot>, scheduler::Error> {

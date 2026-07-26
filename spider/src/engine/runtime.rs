@@ -10,14 +10,25 @@ pub const MAX_REQUEST_CONCURRENCY: usize = 16;
 pub const MAX_EVENTS: usize = 32;
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-pub struct Runtime<S, D, E, N = engine::NoInit> {
+pub(super) struct Setup<S, D, E, O> {
+    pub(super) scheduler: S,
+    pub(super) downloader: D,
+    pub(super) executor: E,
+    pub(super) store: O,
+    pub(super) events: Events,
+    pub(super) registry: middleware::Registry,
+    pub(super) middlewares: Vec<middleware::Spec>,
+    pub(super) worker: Worker,
+}
+
+pub struct Runtime<S, D, E, N = engine::NoInit, O = crate::item::Jsonl> {
     scheduler: Arc<S>,
     downloader: Arc<D>,
     executor: Arc<E>,
+    store: Arc<O>,
     events: Option<Events>,
     registry: Arc<middleware::Registry>,
     middlewares: Arc<Vec<middleware::Spec>>,
-    snapshots: Option<Arc<crate::item::snapshot::Store>>,
     concurrency: usize,
     claim_limit: Option<usize>,
     event_limit: usize,
@@ -25,47 +36,38 @@ pub struct Runtime<S, D, E, N = engine::NoInit> {
     init: N,
 }
 
-impl<S: scheduler::Scheduler, D, E> Runtime<S, D, E, engine::NoInit> {
-    pub(super) fn new(
-        scheduler: S,
-        downloader: D,
-        executor: E,
-        events: Events,
-        registry: middleware::Registry,
-        middlewares: Vec<middleware::Spec>,
-        worker: Worker,
-    ) -> Self {
-        let snapshots = scheduler
-            .dir()
-            .map(crate::item::snapshot::Store::new)
-            .map(Arc::new);
+impl<S: scheduler::Scheduler, D, E, O> Runtime<S, D, E, engine::NoInit, O>
+where
+    O: crate::item::Store + 'static,
+{
+    pub(super) fn new(setup: Setup<S, D, E, O>) -> Self {
         Self {
-            scheduler: Arc::new(scheduler),
-            downloader: Arc::new(downloader),
-            executor: Arc::new(executor),
-            events: Some(events),
-            registry: Arc::new(registry),
-            middlewares: Arc::new(middlewares),
-            snapshots,
+            scheduler: Arc::new(setup.scheduler),
+            downloader: Arc::new(setup.downloader),
+            executor: Arc::new(setup.executor),
+            store: Arc::new(setup.store),
+            events: Some(setup.events),
+            registry: Arc::new(setup.registry),
+            middlewares: Arc::new(setup.middlewares),
             concurrency: MAX_REQUEST_CONCURRENCY,
             claim_limit: None,
             event_limit: MAX_EVENTS,
-            worker,
+            worker: setup.worker,
             init: engine::NoInit,
         }
     }
 }
 
-impl<S, D, E, N> Runtime<S, D, E, N> {
-    pub(super) fn with_init<T>(self, init: T) -> Runtime<S, D, E, T> {
+impl<S, D, E, N, O> Runtime<S, D, E, N, O> {
+    pub(super) fn with_init<T>(self, init: T) -> Runtime<S, D, E, T, O> {
         Runtime {
             scheduler: self.scheduler,
             downloader: self.downloader,
             executor: self.executor,
+            store: self.store,
             events: self.events,
             registry: self.registry,
             middlewares: self.middlewares,
-            snapshots: self.snapshots,
             concurrency: self.concurrency,
             claim_limit: self.claim_limit,
             event_limit: self.event_limit,
@@ -75,12 +77,13 @@ impl<S, D, E, N> Runtime<S, D, E, N> {
     }
 }
 
-impl<S, D, E, N> Runtime<S, D, E, N>
+impl<S, D, E, N, O> Runtime<S, D, E, N, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
     N: engine::init::Init<S> + 'static,
+    O: crate::item::Store + 'static,
 {
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency;
@@ -101,6 +104,10 @@ where
         self.scheduler.as_ref()
     }
 
+    pub fn store(&self) -> &O {
+        self.store.as_ref()
+    }
+
     pub async fn open(&self) -> Result<(), crate::Error> {
         if let Err(error) = self.scheduler.open().await {
             return Err(crate::Error::Scheduler(error));
@@ -111,30 +118,27 @@ where
             return Err(crate::Error::Download(error));
         }
 
-        if let Some(snapshots) = &self.snapshots
-            && let Err(error) = snapshots.open().await
-        {
+        if let Err(error) = self.store.open().await {
             let _ = self.downloader.close().await;
             let _ = self.scheduler.close().await;
-            return Err(error);
+            return Err(crate::Error::Item(error));
         }
 
         Ok(())
     }
 
     pub async fn close(&self) -> Result<(), crate::Error> {
-        let download_result = self
-            .downloader
-            .close()
-            .await
-            .map_err(crate::Error::Download);
-        let scheduler_result = self
-            .scheduler
-            .close()
-            .await
-            .map_err(crate::Error::Scheduler);
-
-        download_result.and(scheduler_result)
+        let mut first_error = None;
+        if let Err(error) = self.downloader.close().await {
+            first_error.get_or_insert(crate::Error::Download(error));
+        }
+        if let Err(error) = self.store.close().await {
+            first_error.get_or_insert(crate::Error::Item(error));
+        }
+        if let Err(error) = self.scheduler.close().await {
+            first_error.get_or_insert(crate::Error::Scheduler(error));
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     pub async fn start(&mut self) -> Result<(), crate::Error> {
@@ -174,8 +178,8 @@ where
             self.scheduler.clone(),
             self.downloader.clone(),
             self.executor.clone(),
+            self.store.clone(),
             self.registry.clone(),
-            self.snapshots.clone(),
             events.clone(),
             engine::actor::Config::new(
                 self.concurrency,
@@ -184,7 +188,7 @@ where
             ),
         );
         let prepared =
-            engine::actor::Engine::<S, D, E>::prepare_with_mailbox(kameo::mailbox::unbounded());
+            engine::actor::Engine::<S, D, E, O>::prepare_with_mailbox(kameo::mailbox::unbounded());
         events.bind(prepared.actor_ref().clone().reply_recipient::<Event>())?;
         let handle = prepared.spawn((actor, init));
         let (actor, reason) = handle

@@ -32,12 +32,12 @@ impl Config {
     }
 }
 
-pub(super) struct Engine<S, D, E> {
+pub(super) struct Engine<S, D, E, O> {
     scheduler: Arc<S>,
     downloader: Arc<D>,
     executor: Arc<E>,
+    store: Arc<O>,
     registry: Arc<middleware::Registry>,
-    snapshots: Option<Arc<crate::item::snapshot::Store>>,
     events: Events,
     config: Config,
 
@@ -65,18 +65,19 @@ pub(super) struct Engine<S, D, E> {
     error: Option<crate::Error>,
 }
 
-impl<S, D, E> Engine<S, D, E>
+impl<S, D, E, O> Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     pub(super) fn new(
         scheduler: Arc<S>,
         downloader: Arc<D>,
         executor: Arc<E>,
+        store: Arc<O>,
         registry: Arc<middleware::Registry>,
-        snapshots: Option<Arc<crate::item::snapshot::Store>>,
         events: Events,
         config: Config,
     ) -> Self {
@@ -84,8 +85,8 @@ where
             scheduler,
             downloader,
             executor,
+            store,
             registry,
-            snapshots,
             events,
             config,
             requests: task::Tasks::default(),
@@ -155,11 +156,12 @@ where
     }
 }
 
-impl<S, D, E> Actor for Engine<S, D, E>
+impl<S, D, E, O> Actor for Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     type Args = (Self, engine::init::Output);
     type Error = kameo::error::Infallible;

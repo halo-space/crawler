@@ -1,7 +1,6 @@
 mod claims;
 pub(crate) mod fixture;
 mod initialization;
-mod items;
 mod leases;
 mod limits;
 pub(crate) mod payload;
@@ -23,6 +22,7 @@ where
 {
     initialization::lifecycle_and_trace(create(), initializes_run).await;
     initialization::initialization_is_atomic(create()).await;
+    replay::initial_request_validation_is_atomic(create()).await;
     replay::request_replay_is_atomic(create()).await;
     initialization::trace_ownership_is_atomic(create()).await;
     rules::claimed_requests_preserve_trace(create()).await;
@@ -37,7 +37,6 @@ where
     if let Some(scheduler) = failover {
         settlement::failed_worker_is_excluded(scheduler).await;
     }
-    items::submission_is_isolated(create()).await;
 }
 
 /// Runs the lease-specific scenarios for a fixture that explicitly exposes a lease policy.

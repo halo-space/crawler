@@ -83,25 +83,36 @@ impl Payload {
         self
     }
 
-    pub fn validate_push(&self) -> Result<(), &'static str> {
+    pub fn validate_push(&self) -> Result<(), String> {
         if !self.items.is_empty() || self.has_completion_fields() {
-            return Err("request payload contains unrelated fields");
+            return Err("request payload contains unrelated fields".to_string());
         }
         if self.requests.iter().any(|request| {
             (!self.task_id.is_empty() && request.task_id != self.task_id)
                 || (!self.trace_id.is_empty() && request.trace_id != self.trace_id)
         }) {
-            return Err("request payload ownership mismatch");
+            return Err("request payload ownership mismatch".to_string());
+        }
+        let mut ids = std::collections::HashSet::with_capacity(self.requests.len());
+        for request in &self.requests {
+            request.validate_initial()?;
+            if !ids.insert(request.id.as_str()) {
+                return Err(format!("duplicate Request id in payload: {}", request.id));
+            }
         }
         Ok(())
     }
 
-    pub fn validate_items(&self) -> Result<(), &'static str> {
+    /// Validates the fields consumed by an Item Store.
+    pub fn validate_store(&self) -> Result<(), &'static str> {
         if !self.items.is_empty() && self.task_id.is_empty() {
             return Err("item payload requires task id");
         }
         if !self.requests.is_empty() || self.has_completion_fields() {
             return Err("item payload contains unrelated fields");
+        }
+        if self.items.iter().any(|item| item.id().is_empty()) {
+            return Err("every Item requires a non-empty framework Item ID");
         }
         Ok(())
     }
@@ -340,13 +351,39 @@ mod tests {
             Payload::new().items(vec![Box::new(crate::item::Map::new(Default::default()))]);
         assert_eq!(
             with_item.validate_push(),
-            Err("request payload contains unrelated fields")
+            Err("request payload contains unrelated fields".to_string())
         );
 
         let with_request = Payload::new().requests(vec![request]);
         assert_eq!(
-            with_request.validate_items(),
+            with_request.validate_store(),
             Err("item payload contains unrelated fields")
+        );
+    }
+
+    #[test]
+    fn push_validation_rejects_duplicate_request_ids() {
+        let request = net::Request::follow("https://example.com").unwrap();
+        let id = request.id.clone();
+        let payload = Payload::new().requests(vec![request.clone(), request]);
+
+        assert_eq!(
+            payload.validate_push(),
+            Err(format!("duplicate Request id in payload: {id}"))
+        );
+    }
+
+    #[test]
+    fn push_validation_checks_every_request() {
+        let valid = net::Request::follow("https://example.com/valid").unwrap();
+        let mut invalid = net::Request::follow("https://example.com/invalid").unwrap();
+        invalid.version = 1;
+
+        assert_eq!(
+            Payload::new()
+                .requests(vec![valid, invalid])
+                .validate_push(),
+            Err("new Request version must be 0".to_string())
         );
     }
 }

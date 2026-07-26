@@ -71,10 +71,6 @@ impl Scheduler for ClaimScheduler {
         self.inner.push(payload).await
     }
 
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
-        self.inner.push_items(payload).await
-    }
-
     async fn trace(
         &self,
         trace_id: &str,

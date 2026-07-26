@@ -96,7 +96,6 @@ struct Recovery {
 
 impl Redis {
     fn stored(request: net::Request) -> Result<Queued, scheduler::Error> {
-        validate::request(&request)?;
         let snapshot =
             net::request::Snapshot::try_from(request).map_err(scheduler::Error::Message)?;
         let digest = snapshot
@@ -121,9 +120,7 @@ impl Redis {
     }
 
     pub(super) async fn enqueue(&self, payload: payload::Payload) -> Result<(), scheduler::Error> {
-        payload
-            .validate_push()
-            .map_err(|message| scheduler::Error::Message(message.to_string()))?;
+        payload.validate_push().map_err(scheduler::Error::Message)?;
         let requests = payload
             .requests
             .into_iter()
@@ -398,6 +395,9 @@ impl Redis {
                 "all initial requests must reference the Trace Snapshot task_id".to_string(),
             ));
         }
+        let payload = payload::Payload::new().requests(requests);
+        payload.validate_push().map_err(scheduler::Error::Message)?;
+        let requests = payload.requests;
 
         let requests = requests
             .into_iter()

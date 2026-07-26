@@ -23,11 +23,11 @@ fn machine_error_code_keeps_the_master_request_id() {
 fn generic_invalid_request_is_not_a_protocol_error() {
     let error = client::map_error(
         reqwest::StatusCode::BAD_REQUEST,
-        br#"{"error":{"code":"invalid_request","id":null,"field":null,"message":"item data must be an object"}}"#,
+        br#"{"error":{"code":"invalid_request","id":null,"field":null,"message":"request payload is invalid"}}"#,
     );
 
     assert!(
-        matches!(error, scheduler::Error::Message(message) if message == "item data must be an object")
+        matches!(error, scheduler::Error::Message(message) if message == "request payload is invalid")
     );
 }
 

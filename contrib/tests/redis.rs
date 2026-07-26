@@ -6,7 +6,6 @@ mod redis {
     mod eligibility;
     mod error;
     mod integrity;
-    mod items;
     mod key;
     mod lifecycle;
     mod precision;

@@ -60,10 +60,10 @@ engine.start().await?;
 
 All Redis keys are isolated by the selected namespace; normal `close()` releases client resources
 without deleting queued work. Redis stores Trace Snapshots, Request state, mode-scoped processing
-leases, settlements, statistics, and Items. Each `processing:<mode>` ZSET is the only active
+leases, settlements, and statistics. Each `processing:<mode>` ZSET is the only active
 execution-lease projection and uses `lease_time` as its score; the Request Hash remains the
-authoritative state. Each accepted non-empty Item `Payload` becomes one Redis Stream entry and
-remains at-least-once; it does not perform business Item deduplication.
+authoritative state. Item persistence is a separate `item::Store` dependency and never enters the
+Redis Scheduler.
 
 Redis bounds recurring claim maintenance: one `next_requests` call recovers at most 64 expired
 leases per mode, inspects at most 128 processing records across both modes, and promotes and
@@ -94,8 +94,7 @@ This release supports one Redis 7+ standalone primary only. It does not support 
 multi-key Lua transitions rely on single-instance atomicity, so Cluster will be a separate Scheduler
 design. For durable use, enable AOF (`appendonly yes`) and set `maxmemory-policy noeviction`.
 `appendfsync` is an operator choice between stronger durability and write throughput/latency (for
-example, `always` versus `everysec`). Monitor Stream growth and apply an explicit retention policy;
-the Scheduler does not trim Item output automatically.
+example, `always` versus `everysec`).
 
 In rules mode, extractor expressions determine result cardinality directly: zero matches produce
 `null`, one match produces a scalar or element object, and multiple matches produce an array.
@@ -284,12 +283,27 @@ functions referenced by edge `fn` are marked with `#[item]`; local Rules assembl
 initialization when a referenced function is not registered.
 The complete executable example is in [examples/src/bin/rules.rs](examples/src/bin/rules.rs).
 
-The default Memory Scheduler writes one JSON value per line below
-`./data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl`. Item submission uses
-`Scheduler::push_items`; Requests emitted by `self.tx.request(...)` enter the same Scheduler queue.
-Memory serializes and writes Items one at a time under one append lock, and rolls the entire append back
-if any Item fails. Failure snapshots are written to a temporary file and atomically renamed only after
-the complete snapshot is flushed.
+Engine uses `item::Jsonl` as its default Item Store. It writes one record per line below
+`./data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl`, using the stable shape
+`{"id":"...","data":{...}}`. `self.tx.request(...)` submits Requests to the Scheduler, while
+`self.tx.item(...)` submits an Item-only `Payload` through `Store::submit(&Payload)`. The two
+dependencies are independent: `.with_scheduler(...)` replaces Request scheduling and
+`.with_store(...)` replaces Item persistence.
+
+`Jsonl::with_dir(path)` changes the output root. It serializes a complete Payload before taking the
+hourly file's append lock, then writes and flushes the complete byte sequence. A write or flush error
+is logged and returned without a transaction or file rollback; bytes already written may remain. Its
+open-file cache is bounded; additional busy paths use uncached handles rather than growing the cache.
+Jsonl owns submission-failure snapshots below
+`<dir>/data/items/snapshots/`; it publishes each snapshot through a flushed temporary file and atomic
+rename, removes it after a later successful retry of the same immutable Payload projection, and leaves an exhausted
+snapshot for manual handling. Equal immutable Payload projections may share this recovery snapshot,
+but every `submit` call still reaches output and no durable replay index or Item deduplication is created.
+Item submission is at-least-once. Business Item deduplication is downstream business logic outside
+the Store contract.
+Every Store implementation validates the complete Payload with `Payload::validate_store()` before
+backend mutation. After Store retries are exhausted, `error_item` is a best-effort notification for
+each Item: callback failures are logged, while the original Store error remains the Request failure.
 `Scheduler::push` treats the same Request ID and initial Snapshot as an idempotent replay, atomically
 adds missing Requests, and rejects the whole collection when any existing Snapshot conflicts.
 For a directly awaited `Tx.request` call inside a Request execution, framework-created child IDs are

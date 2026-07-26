@@ -1,18 +1,16 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::spider::tx::Context;
-use crate::{middleware, payload, scheduler};
+use crate::{item, middleware, payload};
 
-pub(super) async fn handle<S>(
+pub(super) async fn handle<O>(
     items: Vec<Box<dyn crate::item::Item>>,
     context: Option<&Context>,
-    scheduler: Arc<S>,
+    store: Arc<O>,
     registry: Arc<middleware::Registry>,
-    snapshots: Option<Arc<crate::item::snapshot::Store>>,
 ) -> Result<(), crate::Error>
 where
-    S: scheduler::Scheduler + Send,
+    O: item::Store + Send,
 {
     if let Some(stats) = context.and_then(Context::stats) {
         stats.total("items", items.len());
@@ -52,49 +50,31 @@ where
     }
     let retry = retry_policy(&payload, &registry)?;
     let mut attempt = 0;
-    let mut snapshot: Option<PathBuf> = None;
-    let mut snapshot_error: Option<String> = None;
     loop {
-        match scheduler.push_items(&payload).await {
+        match store.submit(&payload).await {
             Ok(()) => {
-                if let (Some(path), Some(snapshots)) = (snapshot.as_deref(), &snapshots) {
-                    let _ = snapshots.remove(path).await;
-                }
                 break;
             }
             Err(error) => {
                 let submit_error = error.to_string();
-                if snapshot.is_none()
-                    && snapshot_error.is_none()
-                    && let Some(snapshots) = &snapshots
-                {
-                    match snapshots.write(&payload, &submit_error).await {
-                        Ok(path) => snapshot = Some(path),
-                        Err(error) => snapshot_error = Some(error.to_string()),
-                    }
-                }
                 if let Some(delay) = retry.delay(attempt) {
                     attempt += 1;
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                let message = snapshot_error.as_ref().map_or_else(
-                    || submit_error.clone(),
-                    |snapshot_error| {
-                        format!("{submit_error}; failure snapshot also failed: {snapshot_error}")
-                    },
-                );
                 for item in &payload.items {
-                    registry
-                        .error_item(item.as_ref(), &message)
-                        .await
-                        .map_err(crate::Error::Middleware)?;
+                    if let Err(callback_error) =
+                        registry.error_item(item.as_ref(), &submit_error).await
+                    {
+                        tracing::error!(
+                            item_id = %item.id(),
+                            store_error = %submit_error,
+                            error = %callback_error,
+                            "failed to run Item error middleware"
+                        );
+                    }
                 }
-                return if snapshot_error.is_some() {
-                    Err(crate::item::Error::Message(message).into())
-                } else {
-                    Err(crate::Error::Scheduler(error))
-                };
+                return Err(crate::Error::Item(error));
             }
         }
     }

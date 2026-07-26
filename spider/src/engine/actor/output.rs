@@ -3,18 +3,19 @@ use kameo::reply::DelegatedReply;
 
 use super::{Engine, task};
 use crate::spider::tx::Event;
-use crate::{downloader, engine, scheduler};
+use crate::{downloader, engine, item, scheduler};
 
 pub(super) struct Done {
     id: task::Id,
     error: Option<crate::Error>,
 }
 
-impl<S, D, E> Message<Event> for Engine<S, D, E>
+impl<S, D, E, O> Message<Event> for Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: item::Store + 'static,
 {
     type Reply = DelegatedReply<Result<(), String>>;
 
@@ -22,14 +23,14 @@ where
         self.invalidate_claim();
         let event = event.accept();
         let scheduler = self.scheduler.clone();
+        let store = self.store.clone();
         let registry = self.registry.clone();
-        let snapshots = self.snapshots.clone();
         let actor_ref = ctx.actor_ref().clone();
         let (delegated, reply) = ctx.reply_sender();
 
         let handle = tokio::spawn(async move {
             let result =
-                task::protect(engine::event::handle(event, scheduler, registry, snapshots)).await;
+                task::protect(engine::event::handle(event, scheduler, store, registry)).await;
             let error = match (result, reply) {
                 (Ok(()), Some(reply)) => {
                     let _ = send_reply(reply.boxed(), Ok(()));
@@ -54,11 +55,12 @@ where
     }
 }
 
-impl<S, D, E> Message<Done> for Engine<S, D, E>
+impl<S, D, E, O> Message<Done> for Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: item::Store + 'static,
 {
     type Reply = ();
 

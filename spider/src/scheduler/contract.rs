@@ -1,14 +1,8 @@
 use std::future::Future;
-use std::path::Path;
 
 use crate::{net, payload, trace};
 
 pub trait Scheduler: Send + Sync {
-    /// Worker 本地运行目录；未配置本地文件能力的实现返回 `None`。
-    fn dir(&self) -> Option<&Path> {
-        None
-    }
-
     /// 当前实现的租约恢复和续租策略；不需要租约的实现返回 `None`。
     fn lease(&self) -> Option<crate::scheduler::Lease> {
         None
@@ -25,12 +19,6 @@ pub trait Scheduler: Send + Sync {
     fn push(
         &self,
         payload: payload::Payload,
-    ) -> impl Future<Output = Result<(), crate::scheduler::Error>> + Send;
-
-    /// 提交本轮解析产生的 Item 集合，只消费 `payload.items`。
-    fn push_items(
-        &self,
-        payload: &payload::Payload,
     ) -> impl Future<Output = Result<(), crate::scheduler::Error>> + Send;
 
     /// 读取当前运行不可变的 Trace Snapshot；不存在时返回 `None`。

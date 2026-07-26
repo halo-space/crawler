@@ -9,11 +9,14 @@ pub(super) struct Done {
     result: Result<(), crate::Error>,
 }
 
-pub(super) fn spawn<S, D, E>(engine: &mut Engine<S, D, E>, actor_ref: ActorRef<Engine<S, D, E>>)
-where
+pub(super) fn spawn<S, D, E, O>(
+    engine: &mut Engine<S, D, E, O>,
+    actor_ref: ActorRef<Engine<S, D, E, O>>,
+) where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     let executor = engine.executor.clone();
     let handle = tokio::spawn(async move {
@@ -24,11 +27,12 @@ where
     engine.startup = Some(task::Task::new(handle));
 }
 
-impl<S, D, E> Message<Done> for Engine<S, D, E>
+impl<S, D, E, O> Message<Done> for Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     type Reply = ();
 

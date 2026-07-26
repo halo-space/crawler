@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use serde_json::Value;
-use spider::item::Item;
+use spider::item::{Item, Store};
 use spider::middleware::{BoxFuture, Middleware, Spec};
 use spider::scheduler::{Init, Scheduler};
 use spider::{downloader, engine, net, payload};
@@ -23,9 +23,6 @@ struct PayloadRecord {
 struct RecordingScheduler {
     inner: spider::Memory,
     records: Arc<Mutex<Vec<PayloadRecord>>>,
-    item_attempts: Option<Arc<AtomicUsize>>,
-    item_failures: usize,
-    block_snapshots: bool,
 }
 
 impl RecordingScheduler {
@@ -33,27 +30,7 @@ impl RecordingScheduler {
         Self {
             inner: spider::Memory::new(),
             records,
-            item_attempts: None,
-            item_failures: 0,
-            block_snapshots: false,
         }
-    }
-
-    fn with_items(
-        mut self,
-        dir: impl Into<PathBuf>,
-        attempts: Arc<AtomicUsize>,
-        failures: usize,
-    ) -> Self {
-        self.inner = self.inner.with_dir(dir);
-        self.item_attempts = Some(attempts);
-        self.item_failures = failures;
-        self
-    }
-
-    fn block_snapshots(mut self) -> Self {
-        self.block_snapshots = true;
-        self
     }
 
     fn trace_stats(&self) -> HashMap<String, spider::stats::Counter> {
@@ -64,10 +41,6 @@ impl RecordingScheduler {
 }
 
 impl Scheduler for RecordingScheduler {
-    fn dir(&self) -> Option<&Path> {
-        self.inner.dir()
-    }
-
     fn lease(&self) -> Option<spider::scheduler::Lease> {
         self.inner.lease()
     }
@@ -82,25 +55,6 @@ impl Scheduler for RecordingScheduler {
 
     async fn push(&self, payload: payload::Payload) -> Result<(), spider::scheduler::Error> {
         self.inner.push(payload).await
-    }
-
-    async fn push_items(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
-        if let Some(attempts) = &self.item_attempts {
-            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-            if attempt <= self.item_failures {
-                if self.block_snapshots
-                    && let Some(dir) = self.dir()
-                {
-                    let snapshots = dir.join("data").join("items").join("snapshots");
-                    let _ = tokio::fs::remove_dir_all(&snapshots).await;
-                    tokio::fs::write(&snapshots, b"blocked")
-                        .await
-                        .map_err(|error| spider::scheduler::Error::Message(error.to_string()))?;
-                }
-                return Err(spider::scheduler::Error::Message("item submit".to_string()));
-            }
-        }
-        self.inner.push_items(payload).await
     }
 
     async fn trace(
@@ -175,6 +129,98 @@ impl Init for RecordingScheduler {
         requests: Vec<net::Request>,
     ) -> Result<(), spider::scheduler::Error> {
         self.inner.init(trace_id, snapshot, requests).await
+    }
+}
+
+struct FlakyStore {
+    inner: spider::item::Jsonl,
+    dir: PathBuf,
+    attempts: Arc<AtomicUsize>,
+    failures: usize,
+    block_snapshots: bool,
+}
+
+impl FlakyStore {
+    fn new(dir: impl Into<PathBuf>, attempts: Arc<AtomicUsize>, failures: usize) -> Self {
+        let dir = dir.into();
+        Self {
+            inner: spider::item::Jsonl::with_dir(&dir),
+            dir,
+            attempts,
+            failures,
+            block_snapshots: false,
+        }
+    }
+
+    fn block_snapshots(mut self) -> Self {
+        self.block_snapshots = true;
+        self
+    }
+
+    async fn block_output(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+        let output = self
+            .dir
+            .join("data")
+            .join("items")
+            .join("output")
+            .join(&payload.task_id);
+        match tokio::fs::remove_dir_all(&output).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                tokio::fs::remove_file(&output).await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        tokio::fs::write(&output, b"blocked").await?;
+
+        if self.block_snapshots {
+            let snapshots = self.dir.join("data").join("items").join("snapshots");
+            match tokio::fs::remove_dir_all(&snapshots).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                    tokio::fs::remove_file(&snapshots).await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            tokio::fs::write(&snapshots, b"blocked").await?;
+        }
+        Ok(())
+    }
+
+    async fn unblock_output(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+        let output = self
+            .dir
+            .join("data")
+            .join("items")
+            .join("output")
+            .join(&payload.task_id);
+        match tokio::fs::remove_file(output).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl Store for FlakyStore {
+    async fn open(&self) -> Result<(), spider::item::Error> {
+        self.inner.open().await
+    }
+
+    async fn close(&self) -> Result<(), spider::item::Error> {
+        self.inner.close().await
+    }
+
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt <= self.failures {
+            self.block_output(payload).await?;
+        } else {
+            self.unblock_output(payload).await?;
+        }
+        self.inner.submit(payload).await
     }
 }
 
@@ -808,8 +854,8 @@ async fn item_retry_removes_failure_snapshot_after_recovery() {
     let runtime_dir = temp_dir();
     let records = Arc::new(Mutex::new(Vec::new()));
     let attempts = Arc::new(AtomicUsize::new(0));
-    let scheduler =
-        RecordingScheduler::new(records.clone()).with_items(&runtime_dir, attempts.clone(), 1);
+    let scheduler = RecordingScheduler::new(records.clone());
+    let store = FlakyStore::new(&runtime_dir, attempts.clone(), 1);
     scheduler
         .inner
         .init(
@@ -828,6 +874,7 @@ async fn item_retry_removes_failure_snapshot_after_recovery() {
         .unwrap();
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
+        .with_store(store)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(RetryItemSpider::new())
         .build();
@@ -845,8 +892,8 @@ async fn final_item_failure_keeps_complete_local_snapshot() {
     let runtime_dir = temp_dir();
     let records = Arc::new(Mutex::new(Vec::new()));
     let attempts = Arc::new(AtomicUsize::new(0));
-    let scheduler =
-        RecordingScheduler::new(records.clone()).with_items(&runtime_dir, attempts.clone(), 3);
+    let scheduler = RecordingScheduler::new(records.clone());
+    let store = FlakyStore::new(&runtime_dir, attempts.clone(), 3);
     scheduler
         .inner
         .init(
@@ -866,6 +913,7 @@ async fn final_item_failure_keeps_complete_local_snapshot() {
         .unwrap();
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
+        .with_store(store)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(RetryItemSpider::new())
         .build();
@@ -885,7 +933,12 @@ async fn final_item_failure_keeps_complete_local_snapshot() {
         Some(uuid::Version::SortRand)
     );
     assert_eq!(snapshot["items"][0]["data"]["title"], "book");
-    assert!(snapshot["error"].as_str().unwrap().contains("item submit"));
+    assert!(
+        snapshot["error"]
+            .as_str()
+            .unwrap()
+            .contains("item I/O failed")
+    );
     tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
 }
 
@@ -894,9 +947,8 @@ async fn snapshot_write_failure_preserves_original_submit_error() {
     let runtime_dir = temp_dir();
     let records = Arc::new(Mutex::new(Vec::new()));
     let attempts = Arc::new(AtomicUsize::new(0));
-    let scheduler = RecordingScheduler::new(records.clone())
-        .with_items(&runtime_dir, attempts, 1)
-        .block_snapshots();
+    let scheduler = RecordingScheduler::new(records.clone());
+    let store = FlakyStore::new(&runtime_dir, attempts, 1).block_snapshots();
     scheduler
         .inner
         .init(
@@ -915,6 +967,7 @@ async fn snapshot_write_failure_preserves_original_submit_error() {
         .unwrap();
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
+        .with_store(store)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(ItemSpider::new())
         .build();
@@ -925,8 +978,8 @@ async fn snapshot_write_failure_preserves_original_submit_error() {
         let records = records.lock().unwrap();
         assert_eq!(records[0].state, payload::State::Failed);
         let error = records[0].error.as_deref().unwrap();
-        assert!(error.contains("item submit"));
-        assert!(error.contains("failure snapshot also failed"));
+        assert!(error.contains("item I/O failed"));
+        assert!(!error.contains("failure snapshot"));
     }
     tokio::fs::remove_dir_all(runtime_dir).await.unwrap();
 }

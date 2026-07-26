@@ -7,10 +7,16 @@ use crate::spider::Spider as _;
 use crate::spider::tx;
 use crate::{config, downloader, engine, middleware, net, scheduler, spider};
 
-pub struct Builder<S = scheduler::Memory, D = downloader::Downloader, F = ()> {
+pub struct Builder<
+    S = scheduler::Memory,
+    D = downloader::Downloader,
+    F = (),
+    O = crate::item::Jsonl,
+> {
     pub(super) scheduler: S,
     pub(super) downloader: D,
     pub(super) spider_factory: F,
+    pub(super) store: O,
     pub(super) registry: middleware::Registry,
     pub(super) schemas: Arc<crate::item::schema::Store>,
     pub(super) ai: Option<Arc<crate::ai::OpenAI>>,
@@ -18,13 +24,14 @@ pub struct Builder<S = scheduler::Memory, D = downloader::Downloader, F = ()> {
     pub(super) worker: Worker,
 }
 
-impl Builder<scheduler::Memory, downloader::Downloader, ()> {
+impl Builder<scheduler::Memory, downloader::Downloader, (), crate::item::Jsonl> {
     pub fn new() -> Self {
         let schemas = Arc::new(crate::item::schema::Store::new());
         Self {
             scheduler: scheduler::Memory::new(),
             downloader: downloader::Downloader::new(),
             spider_factory: (),
+            store: crate::item::Jsonl::new(),
             registry: middleware::Registry::with_schemas(schemas.clone()),
             schemas,
             ai: None,
@@ -40,12 +47,13 @@ impl Default for Builder<scheduler::Memory, downloader::Downloader, ()> {
     }
 }
 
-impl<S, D, F> Builder<S, D, F> {
-    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Builder<NextS, D, F> {
+impl<S, D, F, O> Builder<S, D, F, O> {
+    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Builder<NextS, D, F, O> {
         Builder {
             scheduler,
             downloader: self.downloader,
             spider_factory: self.spider_factory,
+            store: self.store,
             registry: self.registry,
             schemas: self.schemas,
             ai: self.ai,
@@ -54,11 +62,12 @@ impl<S, D, F> Builder<S, D, F> {
         }
     }
 
-    pub fn with_downloader<NextD>(self, downloader: NextD) -> Builder<S, NextD, F> {
+    pub fn with_downloader<NextD>(self, downloader: NextD) -> Builder<S, NextD, F, O> {
         Builder {
             scheduler: self.scheduler,
             downloader,
             spider_factory: self.spider_factory,
+            store: self.store,
             registry: self.registry,
             schemas: self.schemas,
             ai: self.ai,
@@ -67,11 +76,12 @@ impl<S, D, F> Builder<S, D, F> {
         }
     }
 
-    pub fn with_spider<NextF>(self, spider_factory: NextF) -> Builder<S, D, NextF> {
+    pub fn with_spider<NextF>(self, spider_factory: NextF) -> Builder<S, D, NextF, O> {
         Builder {
             scheduler: self.scheduler,
             downloader: self.downloader,
             spider_factory,
+            store: self.store,
             registry: self.registry,
             schemas: self.schemas,
             ai: self.ai,
@@ -80,12 +90,27 @@ impl<S, D, F> Builder<S, D, F> {
         }
     }
 
-    pub fn with_rules(self, config: config::Config) -> super::rules::Builder<S, D, F> {
+    pub fn with_rules(self, config: config::Config) -> super::rules::Builder<S, D, F, O> {
         super::rules::Builder {
             scheduler: self.scheduler,
             downloader: self.downloader,
             spider_factory: self.spider_factory,
+            store: self.store,
             config,
+            registry: self.registry,
+            schemas: self.schemas,
+            ai: self.ai,
+            middlewares: self.middlewares,
+            worker: self.worker,
+        }
+    }
+
+    pub fn with_store<NextO>(self, store: NextO) -> Builder<S, D, F, NextO> {
+        Builder {
+            scheduler: self.scheduler,
+            downloader: self.downloader,
+            spider_factory: self.spider_factory,
+            store,
             registry: self.registry,
             schemas: self.schemas,
             ai: self.ai,
@@ -124,14 +149,17 @@ impl<S, D, F> Builder<S, D, F> {
     }
 }
 
-impl<S, D, F> Builder<S, D, F>
+impl<S, D, F, O> Builder<S, D, F, O>
 where
     S: scheduler::Scheduler + scheduler::Init + 'static,
     D: downloader::Download + 'static,
     F: spider::SpiderFactory,
     F::Spider: Any + spider::Spider + 'static,
+    O: crate::item::Store + 'static,
 {
-    pub fn build(self) -> Runtime<S, D, engine::executor::Executor<F::Spider>, engine::code::Init> {
+    pub fn build(
+        self,
+    ) -> Runtime<S, D, engine::executor::Executor<F::Spider>, engine::code::Init, O> {
         let (tx, events) = tx::channel(MAX_EVENTS);
         let spider = self.spider_factory.build(tx);
         let seed = self.scheduler.initializes_run().then(|| {
@@ -142,15 +170,16 @@ where
         });
         let executor = engine::executor::Executor::new(Arc::new(spider), self.schemas, self.ai);
 
-        Runtime::new(
-            self.scheduler,
-            self.downloader,
+        Runtime::new(super::runtime::Setup {
+            scheduler: self.scheduler,
+            downloader: self.downloader,
             executor,
+            store: self.store,
             events,
-            self.registry,
-            self.middlewares,
-            self.worker,
-        )
+            registry: self.registry,
+            middlewares: self.middlewares,
+            worker: self.worker,
+        })
         .with_init(engine::code::Init::new(seed))
     }
 }

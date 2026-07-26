@@ -10,15 +10,16 @@ pub(super) struct Done {
     result: Result<(), crate::Error>,
 }
 
-pub(super) fn spawn<S, D, E>(
-    engine: &mut Engine<S, D, E>,
-    actor_ref: ActorRef<Engine<S, D, E>>,
+pub(super) fn spawn<S, D, E, O>(
+    engine: &mut Engine<S, D, E, O>,
+    actor_ref: ActorRef<Engine<S, D, E, O>>,
     request: crate::net::Request,
     claim_started: Instant,
 ) where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     let scheduler = engine.scheduler.clone();
     let downloader = engine.downloader.clone();
@@ -40,11 +41,12 @@ pub(super) fn spawn<S, D, E>(
     engine.requests.insert(handle);
 }
 
-impl<S, D, E> Message<Done> for Engine<S, D, E>
+impl<S, D, E, O> Message<Done> for Engine<S, D, E, O>
 where
     S: scheduler::Scheduler + 'static,
     D: downloader::Download + 'static,
     E: engine::contract::Execute + 'static,
+    O: crate::item::Store + 'static,
 {
     type Reply = ();
 

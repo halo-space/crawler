@@ -32,10 +32,10 @@
 | AI Selector | 已实现 | 独立的 OpenAI-compatible JSON 对象提取，不属于 CSS Healing fallback |
 | AI 运行时配置 | 已实现 | 通过 `Engine::with_ai` 注入一个 Worker 本地可复用的 `ai::OpenAI` provider；provider 配置不进入 Rules 或 Trace Snapshot |
 | Middleware | 已实现 | 生命周期 Registry、Worker 本地 Memory 实现，以及可选 RedisBloom Dedup 和共享 Redis RateLimit |
-| Item 输出 | 已实现 | Schema 校验、媒体规范化、JSONL 输出和提交失败快照；附件下载计划在 v5 实现 |
+| Item Store | 已实现 | 独立的 `open / close / submit(&Payload)` 持久化合同；默认 JSONL 输出与 Jsonl 自管失败快照；附件下载计划在 v5 实现 |
 | Worker 能力领取 | 已实现 | Memory 只在当前 Worker 配置的 Request mode 范围内领取并判断待处理工作 |
-| Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；按 namespace 隔离，完整实现 Scheduler/Init 合同、Lua 原子转换与 Redis Stream Item 输出 |
-| API Scheduler | 已实现 | `contrib::scheduler::api::Api` 是 Worker 侧 HTTP Scheduler 实现；通过 Master 保持完整 Scheduler/Init 合同 |
+| Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；按 namespace 隔离，完整实现 Request Scheduler/Init 合同与 Lua 原子转换 |
+| API Scheduler | 已实现 | `contrib::scheduler::api::Api` 是 Worker 侧 HTTP Request Scheduler 实现；通过 Master 保持完整 Scheduler/Init 合同 |
 | Master control-plane | 已实现 | 独立 Axum 服务，使用私有 MySQL 8.0.19+ 存储，负责 Task 派发和恢复；不实现 Scheduler |
 | 直接 MySQL Scheduler | 不在范围内 | MySQL 只是 Master 私有控制面存储；Worker 使用 `Api`，不使用直连 MySQL Scheduler |
 | 运行期链路追踪 | 规划中 | v4 使用 `fasttrace`；与业务 `trace_id` 是两个概念 |
@@ -45,12 +45,13 @@ XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护�
 ## 2. 核心设计原则
 
 1. **统一运行时**：代码模式和 Rules 模式使用同一个 Executor；Trace Snapshot 决定进入代码 handler 还是 Rules 解释路径，只有运行种子的初始化方式不同。
-2. **Scheduler 是分布式边界**：从 Memory 切换到其他实现时，装配层只替换 `.with_scheduler(...)`；新实现必须承担完整调度语义，不能只是把一个存储客户端包起来。
-3. **输出即时提交**：解析产生的 Request 和 Item 通过 `Tx` 立即进入 Engine，不等待整条 Trace 或整棵请求图结束。
-4. **身份与执行权分离**：Request ID 在重试和恢复中不变；`version`、`leased_by` 和 `lease_time` 描述某一次执行权。
-5. **不可变运行快照**：一个 Trace 对应一份不可变 Trace Snapshot；Rules 保存完整 DSL，代码模式不持久化 Rust handler。
-6. **恢复必须显式**：租约、续租、归还、成功和失败分别使用独立接口，不用一个多义的 `finish` 覆盖不同状态变化。
-7. **模块职责单一**：Actor 只协调，启动时冻结的 Worker 状态只持有身份与能力，Request task 持有单次执行权，Executor 只解析，Scheduler 只实现调度和提交合同。
+2. **Scheduler 是 Request 分布式边界**：从 Memory 切换到其他实现时，装配层只替换 `.with_scheduler(...)`；新实现必须承担完整 Request 调度语义，不能只是把一个存储客户端包起来。
+3. **Store 是 Item 持久化边界**：`.with_store(...)` 独立替换 Item 持久化；Store 不领取、不续租，也不结算 Request。
+4. **输出即时提交**：解析产生的 Request 和 Item 通过 `Tx` 立即进入 Engine；Request Payload 交给 Scheduler，Item Payload 交给 Store，两者都不等待整条 Trace 或整棵请求图结束。
+5. **身份与执行权分离**：Request ID 在重试和恢复中不变；`version`、`leased_by` 和 `lease_time` 描述某一次执行权。
+6. **不可变运行快照**：一个 Trace 对应一份不可变 Trace Snapshot；Rules 保存完整 DSL，代码模式不持久化 Rust handler。
+7. **恢复必须显式**：租约、续租、归还、成功和失败分别使用独立接口，不用一个多义的 `finish` 覆盖不同状态变化。
+8. **模块职责单一**：Actor 只协调，启动时冻结的 Worker 状态只持有身份与能力，Request task 持有单次执行权，Executor 只解析，Scheduler 只负责 Request 调度，Store 只负责 Item 持久化。
 
 ## 3. 系统总览
 
@@ -72,10 +73,11 @@ flowchart LR
     D["Downloader"]
     H["HTTP"]
     E["统一 Executor"]
-    O["Request / Item 输出任务"]
+    O["Tx 输出任务"]
+    IS["item::Store 合同"]
+    J["item::Jsonl"]
     P["JSONL Item 输出"]
-    I["Redis Stream Item 输出"]
-    F["Item 失败快照"]
+    F["Jsonl 失败快照"]
 
     C --> X
     R --> X
@@ -94,10 +96,11 @@ flowchart LR
     E --> T
     T --> A
     A --> O
-    O --> S
-    M --> P
-    Z --> I
-    O -. 提交失败时 .-> F
+    O -->|Request Payload| S
+    O -->|Item Payload| IS
+    IS --> J
+    J --> P
+    J -. 追加失败 .-> F
 ```
 
 Engine 内部使用一个私有 Kameo Actor 作为消息驱动的单一协调者，但不会把 Scheduler、Downloader、Executor 或 AI 强制改造成 Actor。对外组件仍使用方法合同；Actor 直接持有运行状态和依赖，Request 与输出工作继续在独立 Tokio 任务中执行，长 I/O 不会阻塞消息处理。
@@ -183,12 +186,12 @@ Request 上保存的 Middleware 仍可用于后续生命周期，但其中的 `b
 
 ```text
 校验运行限制
--> open Scheduler / Downloader / 本地快照目录
+-> open Scheduler / Downloader / Item Store
 -> before_spider
 -> 初始化或接入运行
 -> 启动并排空 Engine Actor
 -> after_spider
--> close Downloader / Scheduler
+-> close Downloader / Item Store / Scheduler
 ```
 
 `engine/actor.rs` 中的 `Engine` 是真实的 Kameo Actor，也是唯一协调者，持有以下运行状态：
@@ -198,7 +201,7 @@ Request 上保存的 Middleware 仍可用于后续生命周期，但其中的 `b
 - 当前 Request 任务集合；
 - 当前 Tx 输出处理任务集合；
 - Tx Event 容量、producer 活跃状态和第一个终态错误；
-- Scheduler、Downloader、Executor、Middleware Registry 和可选 Item 快照存储的共享引用。
+- Scheduler、Item Store、Downloader、Executor 和 Middleware Registry 的共享引用。
 
 启动、领取、Request、输出、轮询和 producer 空闲分别通过独立 Actor 消息报告完成。所有派生任务都会捕获 panic 并报告完成。已接受的输出失败通常返回正在等待的 `Tx` 调用方；如果调用方已取消，输出完成消息会把无法交付的错误报告给 Engine，不能静默成功。Kameo mailbox 对内部消息使用无界队列；显式 Event 容量只限制外部 `Tx` 输出，不会把内部完成消息计入用户配置的容量。
 
@@ -240,11 +243,9 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 
 | 方法 | 单一语义 |
 | --- | --- |
-| `dir` | 返回可选的 Worker 本地目录；用于框架本地 Item 失败快照 |
 | `lease` | 返回可选的租约超时和续租间隔 |
 | `open / close` | 打开和关闭 Scheduler 自身资源 |
 | `push` | 只消费 `Payload.requests`；跳过一致重放、原子写入缺失 Request，并拒绝存在冲突的整批数据 |
-| `push_items` | 只消费 `Payload.items`，提交 Items |
 | `trace` | 按 `trace_id` 读取不可变 Trace Snapshot |
 | `next_requests(limit, worker_id, modes)` | 按传入的 Worker 身份和 modes 原子领取并恢复最多 `limit` 条 Request |
 | `has_pending_requests(worker_id, modes)` | 判断传入 Worker 能力范围内是否仍有排队或执行中的 Request |
@@ -259,7 +260,7 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 - `initializes_run()`：当前 Engine 是否负责创建本地运行；
 - `init(trace_id, snapshot, requests)`：原子保存 Trace Snapshot 和传入的初始 Request 集合；空集合仍然合法。
 
-`Payload` 是这些方法共用的唯一传输信封，不增加 Batch、Receipt 或其他平行结构。它携带 Request 执行身份、状态、错误、时间、统计以及 `requests / items` 两个输出集合；每个 Scheduler 方法会拒绝与自身语义无关的字段。例如 `push` 只允许 Requests，`push_items` 只允许 Items，结算 Payload 的两个集合必须为空。
+`Payload` 继续作为唯一传输信封，不增加 Batch、Receipt 或其他平行结构。它携带 Request 执行身份、状态、错误、时间、统计以及 `requests / items` 两个输出集合。Scheduler 不再持久化 Item：`push` 只允许 Requests，执行权和结算 Payload 的两个集合必须为空；独立的 `item::Store::submit(&Payload)` 只接受 Item Payload，并拒绝 Request 或结算字段。
 
 `has_pending_requests` 的能力范围由 `modes` 定义。只要 processing Request 的 mode 匹配，所有具备该能力的 Worker 都将其视为 pending，不按当前 `leased_by` 过滤。`worker_id` 用于标识并校验调用方，不把 processing 集合缩小为该 Worker 自己持有的租约。这个保守退出规则避免兼容 Worker 在租约恢复前，或执行中 Request 继续产生兼容任务前提前退出。
 
@@ -309,7 +310,7 @@ Memory 是不注册到集群的进程内 Scheduler。Engine 持有 Worker 身份
 
 `contrib::scheduler::redis::Redis` 是同一套 `Scheduler` 和 `Init` 合同的完整持久化实现。它不是
 由 Engine 包装的 Redis client：Trace Snapshot、规范化 Request 重放身份、按能力领取的队列顺序、租约、
-ack、release、续租、结算、重试、终态记录、统计和 Item 提交都由 Redis 自身负责。Engine 只替换装配依赖：
+ack、release、续租、结算、重试、终态记录和统计都由 Redis 自身负责。Engine 只替换 Request 调度依赖：
 
 ```rust
 let scheduler = contrib::scheduler::redis::Redis::new("redis://127.0.0.1:6379")?
@@ -358,21 +359,16 @@ Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算�
 每个 Request Snapshot 的 `max_retry_count` 必须位于 `1..=128`；恢复以不可变 Snapshot 为准，并以此约束
 失败 Worker 历史，可变 Hash 不能扩大该值。当前内部 key 布局不迁移旧 Redis namespace。
 
-`push_items` 会先序列化完整集合，再为每组已接受的非空 Item Payload 追加一条 Redis Stream entry。entry
-保存 Payload 身份、框架 Item ID、业务 Item JSON 和可用的 Trace 元数据。提交采用 at-least-once 语义：
-重试同一 Payload 会产生另一条完整 Stream entry，Redis 不做业务 Item 去重。Stream 保留与回放是独立
-能力；当前 Scheduler 不会 trim Stream。
-
 该实现只面向 Redis 7+ 单实例 primary，不支持 Redis Cluster。namespace 跨多个 key，Lua 状态转换依赖
 单实例原子性，因此 Cluster 是未来独立的 Scheduler 设计，而不是该类型的连接参数。需要可恢复持久化时，
 必须启用 AOF（`appendonly yes`）并设置 `maxmemory-policy noeviction`。`appendfsync` 由运维侧在
 持久化强度与写入吞吐/延迟之间选择：`always` 缩小持久化窗口但降低吞吐，`everysec` 通常吞吐更高，
-但已确认写入可能暴露约一秒。还应监控 Redis 容量，并为 Item Stream 选择明确的外部保留策略。
+但已确认写入可能暴露约一秒。Redis 容量应与独立配置的 Item Store 分开监控。
 
 ### 6.4 API Scheduler 与 Master 控制面
 
 `contrib::scheduler::api::Api` 是完整的 Worker 侧 `Scheduler` 与 `Init` 实现。它把
-`open / close / push / push_items / trace / next_requests / has_pending_requests / ack / release /
+`open / close / push / trace / next_requests / has_pending_requests / ack / release /
 refresh_lease / success / failure` 转换为 Master Worker API，并保持核心 Payload、身份、能力、租约、
 重试和终态语义。它持有 HTTP client、有界响应读取、有界出站 JSON 序列化、远端操作需要幂等时的
 operation key、有界不可变 Trace 缓存和 Worker 心跳任务。出站重试复用同一份不可变 byte buffer，不会
@@ -388,8 +384,12 @@ MySQL Scheduler 被明确排除：Worker 只连接 `Api`，只有 Master 持有�
 
 | API | 凭据 | 职责 |
 | --- | --- | --- |
-| Worker API | Worker token | Scheduler 操作、Trace 读取、领取、ack、续租、结算、Item 提交和心跳 |
+| Worker API | Worker token | Scheduler 操作、Trace 读取、领取、ack、续租、结算、心跳，以及独立的 Item 写入入口 |
 | control API | control token | 发布 Task，以及只读观测 Task、Trace、Request、Worker 和 Item |
+
+Master 保留 `POST /v1/worker/items` 作为独立的 Item 写入入口。API Scheduler 不调用、也不实现该入口；
+单独配置的 Store 或客户端可以使用它，而不改变 Request 调度。保留这个入口不表示 Master 或 API
+Scheduler 重新承担 Item 持久化职责。
 
 Worker token 不能发布 Task；control token 也不是 Worker Scheduler 凭据。凭据和 Master 数据库 URL
 属于 Worker 本地或控制面部署配置，不会进入 Rules、Trace Snapshot、Request Snapshot、Payload 或 Item。
@@ -409,12 +409,12 @@ YAML 的 `api.max_size` 或 `master::Config::with_api(...)` 设置请求/响应�
 先拒绝新调用并等待已经进入的调用，再停止心跳并清空 Worker 本地 operation key 与 Trace cache；不可变
 Trace cache 同时受 128 条和 64 MiB 限制。
 
-每次公开 claim/release 都生成新的幂等 key，只有该次调用内部的 HTTP 自动重试复用它。Init 与 Item
-提交则在同一任务的 Engine 外层重试期间保留未决逻辑操作 key，因为已经提交但响应不确定的 Item
-不能重复写入。明确成功或确定性错误会清除 key；未决 key 从首次创建起恰好五分钟后过期，复用不会滑动
+每次公开 claim/release 都生成新的幂等 key，只有该次调用内部的 HTTP 自动重试复用它。Init 在同一任务的
+Engine 外层重试期间保留一条未决逻辑操作 key。明确成功或确定性错误会清除 key；未决 key 从首次创建起
+恰好五分钟后过期，复用不会滑动
 续期，达到 4096 条上限时拒绝新操作，不淘汰仍存活的操作。Master 要求
 `history.ttl >= max(lease_timeout, 5m30s)`，使持久化的 operation 与 completion 重放记录覆盖该
-client 窗口。若当前没有 Tokio task 身份，每次 Init/Item 调用都会使用新 key，不进入这份未决操作存储。
+client 窗口。若当前没有 Tokio task 身份，每次 Init 调用都会使用新 key，不进入这份未决操作存储。
 成功 `POST` 的响应若超过 client 上限，结果仍为 `Unavailable`，不会被误判为确定性失败；携带
 operation key 的调用会保留该 key 以供重放。
 
@@ -479,6 +479,7 @@ sequenceDiagram
     participant D as Downloader
     participant E as Executor
     participant T as Tx / Event
+    participant I as Item Store
 
     A->>S: next_requests(n, worker_id, modes)
     S-->>A: Requests in processing with lease
@@ -494,7 +495,11 @@ sequenceDiagram
         M->>E: parse(request, response)
         E->>T: request([...]) / item([...])
         T->>A: Event with completion reply
-        A->>S: push(payload) / push_items(&payload)
+        alt Request 输出
+            A->>S: push(payload)
+        else Item 输出
+            A->>I: submit(&payload)
+        end
         A-->>T: handled
     end
     alt 执行成功
@@ -517,7 +522,7 @@ sequenceDiagram
 - 执行生成不可变最终 Payload 后，以 `success / failure` 为最终依据。并发续租错误只停止后续续租，不能取消结算；临时结算错误只重试同一个 Payload，不重新执行 Request。
 - Middleware Retry 是当前 Worker 内的下载、解析或 Item 提交重试。
 - Scheduler `failure` 是唯一的队列层 Request 重试入口。只有本地执行重试耗尽后，Worker 才提交 failure。
-- `Tx.request` 和 `Tx.item` 都等待其 Event 真正处理完成，因此解析成功不会早于输出被 Scheduler 接受。
+- `Tx.request` 和 `Tx.item` 都等待其 Event 真正处理完成，因此解析成功不会早于对应输出被 Scheduler 或 Item Store 接受。
 - Item 提交最终失败会返回到当前解析调用，并使当前 Request 走失败结算。
 - 当前 Request 的 `Tx.request` 输出在每次 parse attempt 使用新的出现次数分配器；规范化输出包含 `next_time` 等调度意图，并使用不随时间漂移的 Cookie 视图。parse retry 与队列重试对相同规范化输出生成相同 ID，同一次执行中多个相同输出仍保持不同 ID。detached Tx 没有父 Request 身份，继续保持 at-least-once 语义。
 - 每组输出 Request 都会在任何 `before_scheduler` Middleware 之前统一校验其 `task_id / trace_id` 是否匹配 Tx；Middleware 不得改写 `id / task_id / trace_id`。可重放 ID 在该 hook 前派生，因此 hook 若修改其余 Request 规格，对相同输入必须保持确定性；依赖当前时间、随机值或外部可变状态的修改会在重放时按预期暴露为 Snapshot 冲突。
@@ -777,9 +782,9 @@ Item 主链固定为：
 Tx.item
 -> 缺少 ID 时生成 UUID v7
 -> before_item
--> Scheduler.push_items(&Payload)
+-> item::Store::submit(&Payload)
 -> 成功，或按 error_item 策略重试
--> 最终失败时 error_item，并使当前 Request 失败
+-> 最终失败时逐个执行 best-effort error_item，并用原始 Store 错误使当前 Request 失败
 ```
 
 每个具体 Item 必须显式持有一份 `#[serde(skip)] item::State`，拒绝 serde 未知字段，并同时 derive
@@ -789,7 +794,19 @@ Tx.item
 规范化后的 schema 计算稳定 SHA-256 key、缓存 `validator::Validator`，再对序列化后的 Item 执行
 校验。Item ID 不进入 schema，也不参与业务去重。
 
-默认 Memory 的输出根目录是当前工作目录，可通过 `Memory::with_dir(path)` 同时改变正常输出和失败快照根目录。
+`item::Store` 只有三个职责：
+
+| 方法 | 单一职责 |
+| --- | --- |
+| `open` | Engine 执行前打开 Store 自己的资源 |
+| `close` | Engine 关闭时刷新并关闭 Store 自己的资源 |
+| `submit(&Payload)` | 校验并持久化一份完整 Item Payload，在修改后端前拒绝 Request 或结算字段 |
+
+Engine 默认使用 `item::Jsonl::new()`。`.with_store(store)` 只替换 Item 持久化，
+`.with_scheduler(scheduler)` 只替换 Request 调度。Store 接收现有 Payload，可使用其中的 task、Trace、
+Request 与 Worker 来源信息选择自己的存储模型，但不会读取、领取、续租或结算 Scheduler 工作。
+
+`Jsonl::new()` 使用当前工作目录；`Jsonl::with_dir(path)` 修改其输出根目录：
 
 正常 Item 输出：
 
@@ -797,29 +814,32 @@ Tx.item
 <dir>/data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
-每个 Item 写一行 JSON，JSONL 只包含 Item 的业务序列化结果。并发写入同一小时文件会串行化；一个
-Payload 逐 Item 序列化和写入，不在内存中展开整个集合，每次完整追加后立即 flush。任何序列化、写入
-或 flush 失败都会尝试把文件截断回该 Payload 写入前的长度，`close()` 再次刷新全部打开文件。
+每个 Item 写一行固定结构 `{"id":"...","data":{...}}`。框架 Item ID 与业务序列化结果并列，
+不会注入业务字段。Jsonl 会在修改文件前预先序列化完整 Payload，再持有小时文件的追加锁；同一文件的
+并发提交会串行执行，成功追加立即 flush。写入或 flush 失败时记录错误并返回，不执行事务或文件回滚；
+底层已经写入的完整或部分字节可能保留，Engine 仍按至少一次语义重试原 Payload。`close()` 会再次刷新
+全部打开文件。文件句柄缓存最多保留 64 个路径；所有缓存句柄都正在使用时，额外路径只为当前提交打开，
+不进入缓存。独立的固定路径分片锁保证无论是否命中缓存，同一路径的写入都保持串行。
 
-`version / timezone` 是 Trace 级运行元数据，持久化 Scheduler 在 `push_items` 时可通过
-`payload.trace_id` 读取对应 Trace Snapshot，并按需要反规范化到自己的 Item 记录。列名固定为
-`config_version / timezone`；裸 `version` 保留给 Request 执行权。这些元数据不自动注入业务
-Item JSON，也不复制到每条 Request Snapshot；默认 Memory JSONL 不保存这些运行字段。
-
-提交失败快照：
+Jsonl 自己管理提交失败快照：
 
 ```text
-<dir>/data/items/snapshots/<task_id>/<yyyy-mm-dd-HH>/<uuid-v7>.json
+<dir>/data/items/snapshots/<task_id>/<yyyy-mm-dd-HH>/<content-sha256>-<submission-sha256>.json
 ```
 
-- 第一次 `push_items` 失败时尝试写快照，然后继续既定重试；
-- 快照流式写入唯一临时文件，完整 flush 后才原子 rename；失败时删除临时文件，不发布半截快照；
-- 快照写入失败不阻止 Scheduler 重试；
-- 后续重试成功时删除快照；删除失败不改变 Item 已成功的结果；
+- 一次完整 Item Payload 追加失败时，在向 Engine 返回原错误前尝试写一份快照；
+- 快照包含 Payload 来源信息、`id / data` 记录、错误和失败时间；
+- 唯一临时文件完整写入并 flush 后才原子 rename；失败时不发布半截快照；
+- 快照写入失败只记录日志，不覆盖原始 Store 错误，也不阻止 Engine 重试；
+- 一次成功 `Jsonl::open()` 生命周期固定使用同一个快照小时目录，因此重试跨过自然小时仍能定位原路径；
+- 文件名同时包含规范 Payload 内容摘要和随机 Jsonl open-session 摘要；进程重启后不会把旧文件名当作当前关联；
+- 同一次 open 生命周期内，完全相同的不可变 Payload 投影可以只共用恢复快照，因为人工恢复数据相同；每次 Store 调用仍会执行输出，不形成 Item 去重；
+- 固定数量的分片锁保证同一进程内投影的输出、快照发布与清理顺序；
+- 同一个不可变 Payload 投影后续重试成功时删除对应快照；删除失败不改变 Item 成功结果；
 - 重试耗尽时快照保留，当前没有自动回放，需人工处理；
-- 其他 Scheduler 只有在 `dir()` 返回本地目录时才启用框架本地快照。
+- 自定义 Store 自己决定失败持久化，不从 Scheduler 获取本地目录或框架快照。
 
-Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自定义 Scheduler 的 Item 提交实现处理。
+Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合同之外的下游业务逻辑。
 
 ## 12. 源码职责划分
 
@@ -839,7 +859,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/engine/admission.rs` | Request 输出进入 Scheduler 前统一执行 `before_scheduler` 准入 |
 | `spider/src/engine/request.rs` | 单条已领取 Request 的下载、Middleware、Worker 本地重试与解析生命周期 |
 | `spider/src/engine/event/request.rs` | 处理 Tx 产生的 Request 输出 |
-| `spider/src/engine/event/item.rs` | 处理 Item、提交重试与失败快照 |
+| `spider/src/engine/event/item.rs` | 执行 Item Middleware、Store 重试与 `error_item` 编排 |
 | `spider/src/spider/tx/identity.rs` | 为当前 Request 输出派生可重放的稳定 ID |
 | `spider/src/engine/executor.rs` | 根据 Trace Snapshot 选择 Code/Rules 并调用共享 Spider |
 | `spider/src/engine/code.rs` | 代码模式本地运行种子初始化 |
@@ -854,7 +874,11 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `spider/src/downloader/http.rs` | 执行 HTTP 请求、redirect、headers、cookies 与 Response 转换 |
 | `spider/src/downloader/http/pool.rs` | 按 proxy/TLS 键管理 Client 复用、过期与关闭 |
 | `spider/src/net/request/contract.rs` | Request、mode、state、proxy 与 TLS 公共合同 |
-| `spider/src/payload/contract.rs` | Scheduler 操作 Payload 及其结构校验 |
+| `spider/src/payload/contract.rs` | 统一传输 Payload 与各操作的结构校验 |
+| `spider/src/item/store.rs` | Item 持久化公共合同 |
+| `spider/src/item/jsonl.rs` | 默认 Jsonl Store 生命周期与提交流程 |
+| `spider/src/item/jsonl/output.rs` | 小时 JSONL 文件、有界句柄缓存、串行追加、刷新与错误日志 |
+| `spider/src/item/jsonl/snapshot.rs` | 进程内失败快照投影、有序发布与清理 |
 | `spider/src/scheduler/contract.rs` | Scheduler 公共合同 |
 | `spider/src/scheduler/init.rs` | 运行种子初始化合同 |
 | `spider/src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |
@@ -882,12 +906,11 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 | `contrib/src/scheduler/redis/contract.rs` | Redis 对外类型、生命周期及 Scheduler/Init 合同连接 |
 | `contrib/src/scheduler/redis/request.rs` | Redis Trace/Request 存储、领取、恢复和租约回收 |
 | `contrib/src/scheduler/redis/settle.rs` | Redis ack、release、续租、success 与 failure 转换 |
-| `contrib/src/scheduler/redis/item.rs` | Redis Stream Item 提交与 Trace 元数据投影 |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | key 隔离、Lua 加载、边界校验和错误映射 |
 | `contrib/src/middleware/connection.rs` | 为每个 Middleware 实例按需建立并共享一个 Redis ConnectionManager |
 | `contrib/src/middleware/dedup.rs` | RedisBloom Options、桶 key 和原子 `BF.INSERT` 去重 |
 | `contrib/src/middleware/rate_limit.rs` 与 `rate_limit/reserve.lua` | Redis 服务端时间的共享 group 预约和失活清理 |
-| `contrib/src/scheduler/api/{contract,client,request,item,settle,worker,state,wire}.rs` | Worker 侧 API Scheduler 的合同映射、生命周期、有界 HTTP 传输、Trace cache、心跳和 wire 数据 |
+| `contrib/src/scheduler/api/{contract,client,request,settle,worker,state,wire}.rs` | Worker 侧 API Scheduler 的合同映射、生命周期、有界 HTTP 传输、Trace cache、心跳和 wire 数据 |
 | `contrib/src/scheduler/api/client/response.rs` | 流式限制 Master 响应并映射传输大小错误 |
 | `contrib/src/scheduler/api/request/{claim,init,trace}.rs` | 将领取、运行初始化与不可变 Trace 读取映射到 Worker API |
 | `master/src/server.rs` | 管理 Axum 服务生命周期，并随服务启动/停止 Cron |
@@ -917,7 +940,8 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重应由下游或自
 这些能力必须沿用当前核心合同：
 
 - Scheduler 替换不能改变 Engine、Spider、Downloader、Middleware、Request、Response 或 Item 的业务形态；
-- Redis 与 API Scheduler 实现必须自行完成领取原子性、租约、续租、版本校验、重试、终态、Trace 读取和 Item 提交；所有提供租约的实现都必须在 Worker 仍在线时按租约到期恢复，offline Worker 只能提前触发同一回收，不得替代超时恢复；
+- Redis 与 API Scheduler 实现必须自行完成领取原子性、租约、续租、版本校验、重试、终态和 Trace 读取；所有提供租约的实现都必须在 Worker 仍在线时按租约到期恢复，offline Worker 只能提前触发同一回收，不得替代超时恢复；
+- 替换 Item Store 不能改变 Request 调度、租约或结算；替换 Scheduler 也不能替换或重新配置 Store；
 - Master 是控制面，不是 Scheduler：只有 `Api` 跨越 Engine 的 Scheduler 边界，Worker/control 凭据必须隔离，Master 私有 MySQL 不会暴露给 Worker；
 - Worker 能力筛选必须在 Scheduler 领取时原子完成，不能先领取不兼容 Request 再由 Downloader 丢弃；
 - Browser 必须实现现有 `Download` 合同，输出同一个 `Response` 模型；

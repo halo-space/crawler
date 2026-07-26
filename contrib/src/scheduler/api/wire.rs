@@ -41,18 +41,6 @@ pub(super) struct Push {
 }
 
 #[derive(Debug, Serialize)]
-pub(super) struct Items {
-    pub context: Context,
-    pub items: Vec<Record>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct Record {
-    pub id: String,
-    pub data: Value,
-}
-
-#[derive(Debug, Serialize)]
 pub(super) struct Worker {
     pub worker_id: String,
     pub modes: Vec<net::Mode>,

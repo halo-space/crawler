@@ -37,6 +37,7 @@ pub(crate) fn segment(value: &str) -> String {
 fn portable(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_PLAIN_BYTES
+        && !value.bytes().any(|byte| byte.is_ascii_uppercase())
         && !matches!(value, "." | "..")
         && !value.ends_with('.')
         && !reserved(value)
@@ -75,6 +76,15 @@ mod tests {
         assert!(question.starts_with("task_a--"));
         assert_ne!(slash, question);
         assert!(!slash.contains('/'));
+    }
+
+    #[test]
+    fn identities_that_differ_only_by_case_do_not_share_a_path() {
+        let lower = segment("task");
+        let upper = segment("Task");
+
+        assert_eq!(lower, "task");
+        assert_ne!(lower.to_ascii_lowercase(), upper.to_ascii_lowercase());
     }
 
     #[test]

@@ -8,6 +8,43 @@ use super::{
     settlement::succeed,
 };
 
+pub(super) async fn initial_request_validation_is_atomic<S>(scheduler: S)
+where
+    S: Scheduler,
+{
+    open(&scheduler).await;
+    let valid = request(
+        "initial-validation-valid",
+        "https://example.com/initial-validation/valid",
+    );
+    let mut invalid = request(
+        "initial-validation-invalid",
+        "https://example.com/initial-validation/invalid",
+    );
+    invalid.version = 1;
+
+    assert!(
+        scheduler
+            .push(payload::Payload::new().requests(vec![valid, invalid]))
+            .await
+            .is_err()
+    );
+    assert!(
+        scheduler
+            .next_requests(2, WORKER_A, HTTP)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !scheduler
+            .has_pending_requests(WORKER_A, HTTP)
+            .await
+            .unwrap()
+    );
+    close(&scheduler).await;
+}
+
 pub(super) async fn request_replay_is_atomic<S>(scheduler: S)
 where
     S: Scheduler + 'static,
