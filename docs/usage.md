@@ -128,16 +128,42 @@ let document: serde_json::Value = response.json()?;
 let codes = spider::selector::json::select(&document, "$.data.diff[*].f12")?;
 ```
 
-Rules mode uses the same selector directly:
+Rules mode uses the same selector directly. This is a complete configuration for the EastMoney test
+endpoint:
 
 ```yaml
-codes:
-  extractors:
-    - kind: json
-      expr: $.data.diff[*].f12
+spider:
+  name: eastmoney
+  start:
+    - node: index
+      url: "https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.601398,1.600036,1.600030,1.601318,0.300059,1.600705,1"
+
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          quotes:
+            required: true
+            extractors:
+              - kind: json
+                expr: $.data.diff[*]
+          stock_codes:
+            extractors:
+              - kind: json
+                expr: $.data.diff[*].f12
+          total:
+            extractors:
+              - kind: json
+                expr: $.data.total
+  edges: []
 ```
 
-For example, that path selects security codes from the EastMoney quote response. A valid miss
+`quotes`, `stock_codes`, and `total` are application-defined output field names, not JSON extractor
+keywords. Later Rules expressions can reference them as `$fields.quotes`, `$fields.stock_codes`, and
+`$fields.total`. Only `kind: json` and the RFC 9535 JSONPath `expr` are fixed parts of the extractor.
+
+For example, `$.data.diff[*].f12` selects security codes from the EastMoney quote response. A valid miss
 continues to the next extractor. One match remains its JSON value and multiple matches become an
 array under the existing Rules cardinality contract. Invalid JSON and invalid JSONPath expressions
 are errors; JSON selection has no Healing or AI fallback.

@@ -125,16 +125,41 @@ let document: serde_json::Value = response.json()?;
 let codes = spider::selector::json::select(&document, "$.data.diff[*].f12")?;
 ```
 
-Rules 模式直接复用同一个 selector：
+Rules 模式直接复用同一个 selector。下面是一份使用东方财富测试接口的完整配置：
 
 ```yaml
-codes:
-  extractors:
-    - kind: json
-      expr: $.data.diff[*].f12
+spider:
+  name: eastmoney
+  start:
+    - node: index
+      url: "https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.601398,1.600036,1.600030,1.601318,0.300059,1.600705,1"
+
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          quotes:
+            required: true
+            extractors:
+              - kind: json
+                expr: $.data.diff[*]
+          stock_codes:
+            extractors:
+              - kind: json
+                expr: $.data.diff[*].f12
+          total:
+            extractors:
+              - kind: json
+                expr: $.data.total
+  edges: []
 ```
 
-例如该路径会从东方财富行情响应中选择证券代码。合法路径未命中时继续当前字段的下一个 extractor；
+`quotes`、`stock_codes` 和 `total` 都是用户自定义的输出字段名，不是 JSON extractor 的固定关键字；
+后续可以通过 `$fields.quotes`、`$fields.stock_codes` 和 `$fields.total` 引用。固定配置只有
+`kind: json` 和 RFC 9535 JSONPath `expr`。
+
+例如 `$.data.diff[*].f12` 会从东方财富行情响应中选择证券代码。合法路径未命中时继续当前字段的下一个 extractor；
 一个匹配保留原始 JSON 值，多个匹配按现有 Rules 数量合同折叠为数组。正文非法或 JSONPath 非法都
 直接报错；JSON 选择没有 Healing，也不会触发 AI fallback。
 
