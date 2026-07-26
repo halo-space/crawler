@@ -1,8 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use bytesize::ByteSize;
-use serde::{Deserialize, Deserializer, de};
+use serde::Deserialize;
 
 use super::{Api as RuntimeApi, Config, History as RuntimeHistory, Policy as RuntimePolicy};
 use crate::Error;
@@ -32,8 +31,8 @@ pub(super) struct Source {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Api {
-    #[serde(default = "default_api_size", deserialize_with = "deserialize_size")]
-    max_size: ByteSize,
+    #[serde(default = "default_api_size")]
+    max_size: u64,
 }
 
 impl Default for Api {
@@ -47,8 +46,8 @@ impl Default for Api {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct History {
-    #[serde(default = "default_history_ttl", with = "humantime_serde")]
-    ttl: Duration,
+    #[serde(default = "default_history_ttl")]
+    ttl: u64,
     #[serde(default = "default_cleanup_limit")]
     cleanup_limit: usize,
 }
@@ -107,7 +106,7 @@ impl Source {
             .bind
             .parse()
             .map_err(|error| Error::Config(format!("invalid bind address: {error}")))?;
-        let max_size = usize::try_from(self.api.max_size.as_u64()).map_err(|_| {
+        let max_size = usize::try_from(self.api.max_size).map_err(|_| {
             Error::Config("API max size exceeds the platform size range".to_string())
         })?;
         let config = Config {
@@ -126,7 +125,7 @@ impl Source {
             dispatch_limit: self.dispatch_limit,
             recovery_limit: self.recovery_limit,
             history: RuntimeHistory {
-                ttl: self.history.ttl,
+                ttl: Duration::from_secs(self.history.ttl),
                 cleanup_limit: self.history.cleanup_limit,
             },
         };
@@ -135,30 +134,12 @@ impl Source {
     }
 }
 
-fn default_api_size() -> ByteSize {
-    ByteSize::b(RuntimeApi::default().max_size as u64)
+fn default_api_size() -> u64 {
+    RuntimeApi::default().max_size as u64
 }
 
-fn deserialize_size<'de, D>(deserializer: D) -> Result<ByteSize, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = serde_yaml::Value::deserialize(deserializer)?;
-    let serde_yaml::Value::String(value) = value else {
-        return Err(de::Error::custom(
-            "API max size must be a string with an explicit unit, such as \"64MiB\"",
-        ));
-    };
-    if !value.chars().any(|value| value.is_ascii_alphabetic()) {
-        return Err(de::Error::custom(
-            "API max size must include an explicit unit, such as \"64MiB\"",
-        ));
-    }
-    value.parse().map_err(de::Error::custom)
-}
-
-fn default_history_ttl() -> Duration {
-    RuntimeHistory::default().ttl
+fn default_history_ttl() -> u64 {
+    RuntimeHistory::default().ttl.as_secs()
 }
 
 fn default_cleanup_limit() -> usize {
@@ -190,9 +171,9 @@ control_token: "control-secret"
 "#;
 
     #[test]
-    fn reads_nested_human_sizes_and_durations() {
+    fn reads_nested_numeric_limits() {
         let source = format!(
-            "{BASE}\napi:\n  max_size: \"64MiB\"\nhistory:\n  ttl: \"48h\"\n  cleanup_limit: 42\n"
+            "{BASE}\napi:\n  max_size: 67108864\nhistory:\n  ttl: 172800\n  cleanup_limit: 42\n"
         );
         let config = serde_yaml::from_str::<Source>(&source)
             .unwrap()
@@ -223,22 +204,33 @@ control_token: "control-secret"
         let old = format!("{BASE}\nmax_api_bytes: 67108864\n");
         assert!(serde_yaml::from_str::<Source>(&old).is_err());
 
-        let unknown = format!("{BASE}\napi:\n  max_size: \"64MiB\"\n  bytes: 1\n");
+        let unknown = format!("{BASE}\napi:\n  max_size: 67108864\n  bytes: 1\n");
         assert!(serde_yaml::from_str::<Source>(&unknown).is_err());
     }
 
     #[test]
     fn rejects_invalid_and_out_of_range_values() {
-        let invalid_size = format!("{BASE}\napi:\n  max_size: \"64XB\"\n");
-        assert!(serde_yaml::from_str::<Source>(&invalid_size).is_err());
+        let string_size = format!("{BASE}\napi:\n  max_size: \"64MiB\"\n");
+        assert!(serde_yaml::from_str::<Source>(&string_size).is_err());
 
-        let ambiguous_size = format!("{BASE}\napi:\n  max_size: 67108864\n");
-        assert!(serde_yaml::from_str::<Source>(&ambiguous_size).is_err());
+        let numeric_string_size = format!("{BASE}\napi:\n  max_size: \"67108864\"\n");
+        assert!(serde_yaml::from_str::<Source>(&numeric_string_size).is_err());
 
-        let unitless_size = format!("{BASE}\napi:\n  max_size: \"67108864\"\n");
-        assert!(serde_yaml::from_str::<Source>(&unitless_size).is_err());
+        let float_size = format!("{BASE}\napi:\n  max_size: 67108864.0\n");
+        assert!(serde_yaml::from_str::<Source>(&float_size).is_err());
 
-        let too_small = format!("{BASE}\napi:\n  max_size: \"1023B\"\n");
+        let negative_size = format!("{BASE}\napi:\n  max_size: -1\n");
+        assert!(serde_yaml::from_str::<Source>(&negative_size).is_err());
+
+        let zero_size = format!("{BASE}\napi:\n  max_size: 0\n");
+        assert!(
+            serde_yaml::from_str::<Source>(&zero_size)
+                .unwrap()
+                .into_config()
+                .is_err()
+        );
+
+        let too_small = format!("{BASE}\napi:\n  max_size: 1023\n");
         assert!(
             serde_yaml::from_str::<Source>(&too_small)
                 .unwrap()
@@ -246,10 +238,32 @@ control_token: "control-secret"
                 .is_err()
         );
 
-        let invalid_ttl = format!("{BASE}\nhistory:\n  ttl: \"forever\"\n");
-        assert!(serde_yaml::from_str::<Source>(&invalid_ttl).is_err());
+        let string_ttl = format!("{BASE}\nhistory:\n  ttl: \"48h\"\n");
+        assert!(serde_yaml::from_str::<Source>(&string_ttl).is_err());
 
-        let overflowing_ttl = format!("{BASE}\nhistory:\n  ttl: \"9223372036854775808ms\"\n");
-        assert!(serde_yaml::from_str::<Source>(&overflowing_ttl).is_err());
+        let numeric_string_ttl = format!("{BASE}\nhistory:\n  ttl: \"172800\"\n");
+        assert!(serde_yaml::from_str::<Source>(&numeric_string_ttl).is_err());
+
+        let float_ttl = format!("{BASE}\nhistory:\n  ttl: 172800.0\n");
+        assert!(serde_yaml::from_str::<Source>(&float_ttl).is_err());
+
+        let negative_ttl = format!("{BASE}\nhistory:\n  ttl: -1\n");
+        assert!(serde_yaml::from_str::<Source>(&negative_ttl).is_err());
+
+        let zero_ttl = format!("{BASE}\nhistory:\n  ttl: 0\n");
+        assert!(
+            serde_yaml::from_str::<Source>(&zero_ttl)
+                .unwrap()
+                .into_config()
+                .is_err()
+        );
+
+        let overflowing_ttl = format!("{BASE}\nhistory:\n  ttl: 9223372036854776\n");
+        assert!(
+            serde_yaml::from_str::<Source>(&overflowing_ttl)
+                .unwrap()
+                .into_config()
+                .is_err()
+        );
     }
 }

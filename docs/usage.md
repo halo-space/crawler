@@ -118,6 +118,30 @@ args:
     min: 0.8
 ```
 
+The Rules executor deserializes a JSON response once and reuses that document across JSON fields.
+Code mode obtains the full `serde_json::Value` through `Response::json<T>()`, then queries it with
+RFC 9535 JSONPath. Selected values are returned by reference without stringifying numbers, booleans,
+objects, or arrays:
+
+```rust
+let document: serde_json::Value = response.json()?;
+let codes = spider::selector::json::select(&document, "$.data.diff[*].f12")?;
+```
+
+Rules mode uses the same selector directly:
+
+```yaml
+codes:
+  extractors:
+    - kind: json
+      expr: $.data.diff[*].f12
+```
+
+For example, that path selects security codes from the EastMoney quote response. A valid miss
+continues to the next extractor. One match remains its JSON value and multiple matches become an
+array under the existing Rules cardinality contract. Invalid JSON and invalid JSONPath expressions
+are errors; JSON selection has no Healing or AI fallback.
+
 AI is an independent extractor that sends the current Response text and `expr` prompt through an
 OpenAI-compatible Chat Completion endpoint. Its result is strictly one JSON object:
 
@@ -196,15 +220,18 @@ load balancer before traffic reaches this listener; bearer tokens must never cro
 network in plaintext.
 
 The checked-in template leaves both tokens empty and will not start until deployment supplies distinct
-credentials. Runtime capacities and retention use explicit human-readable units:
+credentials. Runtime capacities and retention use integers with fixed units:
 
 ```yaml
 api:
-  max_size: "64MiB"
+  max_size: 67108864
 history:
-  ttl: "48h"
+  ttl: 172800
   cleanup_limit: 1000
 ```
+
+`api.max_size` is a byte count and `history.ttl` is a second count. Both fields accept only positive
+YAML integers; strings, including values such as `"64MiB"`, `"48h"`, or `"67108864"`, are rejected.
 
 The control plane is split by responsibility: `master/src/handler/` contains Axum extraction and
 route handlers, `master/src/logic/` contains resource operations, `master/src/svc.rs` owns the
@@ -214,8 +241,8 @@ do not call MySQL directly. `master/src/config/` loads and validates runtime YAM
 
 Both sides default to a 64 MiB API message limit. Set a Worker's receive capacity with
 `Api::with_max_response_bytes(...)` before opening it, and set Master's request/response limit with
-YAML `api.max_size` or `master::Config::with_api(...)`. Master accepts values from 1 KiB through
-4 GiB minus one byte. Startup rejects a
+YAML `api.max_size` as an integer byte count or use `master::Config::with_api(...)`. Master accepts
+values from 1 KiB through 4 GiB minus one byte. Startup rejects a
 Master limit larger than the Worker's configured capacity, so 64 MiB is a default rather than a
 fixed system-wide limit. The Worker serializes every outbound JSON message into the same bounded
 capacity before network I/O and reuses those immutable bytes across transport retries. Master checks

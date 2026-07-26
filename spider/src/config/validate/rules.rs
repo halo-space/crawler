@@ -71,6 +71,11 @@ fn check_node(name: &str, node: &graph::node::Config) -> Result<(), Error> {
                         ))
                     })?;
                 }
+                graph::rules::Extractor::Json { expr } => {
+                    crate::selector::json::compile(expr).map_err(|error| {
+                        Error::Message(format!("node {name} field {field_name} {error}"))
+                    })?;
+                }
                 graph::rules::Extractor::Ai { .. } => {}
             }
         }

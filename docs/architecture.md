@@ -28,7 +28,7 @@ The workspace contains five crates:
 | Browser Downloader | Not implemented | The current stub returns `UnsupportedMode("browser")`; implementation is planned for v5 |
 | CSS Selector | Implemented | `Response::css()` returns the native `scrape_core::Soup` |
 | CSS Healing | Implemented | Deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
-| Regex and JSON | Implemented | Regex selection and code-mode `Response::json<T>()` |
+| Regex and JSON | Implemented | Regex selection, full-body `Response::json<T>()`, and shared RFC 9535 JSONPath selection for code and Rules modes |
 | AI Selector | Implemented | Explicit OpenAI-compatible JSON-object extraction, independent of CSS Healing |
 | AI runtime configuration | Implemented | One reusable Worker-local `ai::OpenAI` provider is injected with `Engine::with_ai`; provider configuration does not enter Rules or Trace snapshots |
 | Middleware | Implemented | Lifecycle Registry, Worker-local Memory implementations, and optional RedisBloom Dedup/shared Redis RateLimit implementations |
@@ -443,8 +443,9 @@ plaintext hop.
 An API-backed Worker has a finite external lifecycle. `Api::open()` fetches and verifies the Master
 lease policy and advertised response limit (64 MiB by default). `Api::with_max_response_bytes(...)`
 sets the Worker's receive capacity before opening; Master sets its request/response limit with YAML
-`api.max_size` or `master::Config::with_api(...)`. The YAML accepts human-readable sizes such as
-`64MiB`; values must be between 1 KiB and 4 GiB minus one byte. Opening rejects a
+`api.max_size` as an integer byte count or with `master::Config::with_api(...)`. The YAML value must
+be between 1 KiB and 4 GiB minus one byte. `history.ttl` is likewise a YAML integer with a fixed unit
+of seconds. Strings and human-readable unit values such as `"64MiB"` or `"48h"` are rejected. Opening rejects a
 Master limit larger than that local capacity, so 64 MiB is a default, not a fixed topology-wide limit. The first
 claim or pending-work check registers the supplied `worker_id` and supported modes. Later calls only
 rewrite that record when modes change or its heartbeat is stale, and heartbeat maintenance stops when
@@ -769,8 +770,9 @@ Healing stores no historical fingerprints, does not rewrite or persist a repaire
 ### 9.2 Regex, JSON, and AI
 
 - Regex returns every capture. It uses capture group one when present, otherwise the full match.
-- `Response::json<T>()` follows the shared response-text decoding contract before deserialization.
-- AI is an explicit selector alongside CSS and Regex. A Rules AI extractor contains only `kind: ai` and its non-empty `expr`; the prompt describes the expected object fields, while provider configuration is not part of the DSL.
+- `Response::json<T>()` follows the shared response-text decoding contract and deserializes the complete body. Code mode can then call `selector::json::select(&value, expr)` with an RFC 9535 JSONPath. Rules mode uses the same implementation through `kind: json` and `expr`.
+- JSONPath selection preserves JSON types and document order. A valid miss returns an empty set; an invalid response body remains a `net::Error::Json`, while an invalid JSONPath is rejected during Rules validation and checked again at runtime. JSON selection has no Healing and never invokes AI.
+- AI is an explicit selector alongside CSS, Regex, and JSON. A Rules AI extractor contains only `kind: ai` and its non-empty `expr`; the prompt describes the expected object fields, while provider configuration is not part of the DSL.
 - The application resolves `base_url`, `api_key`, and `model_name` from its chosen configuration or secret source, constructs one `ai::OpenAI`, and injects it through `Engine::with_ai`. Crawler does not read these values from environment variables. `ai::OpenAI` owns one reusable `async-openai` client for an OpenAI-compatible Chat Completion endpoint.
 - The unified Executor attaches the shared provider to each Response immediately before parsing. Code handlers and Rules both call `response.ai(expr).await`; Response clones share it through a crate-private field. Provider configuration is non-serializable and omitted from Response Debug output.
 - Provider settings and credentials never enter Rules, Trace Snapshot, Request, Payload, Scheduler, or Item data. `base_url` must be an absolute HTTP(S) base endpoint without user information, a query, or a fragment. `OpenAI` Debug may identify that validated endpoint and model, but never the key; provider failures omit request URLs and raw response content.
@@ -983,6 +985,7 @@ the Store contract.
 | `spider/src/selector/css/healing.rs` | Healing configuration and orchestration |
 | `spider/src/selector/css/healing/reference.rs` | CSS AST to scoring reference model |
 | `spider/src/selector/css/healing/score.rs` | DOM candidate traversal, relationships, and scoring |
+| `spider/src/selector/json.rs` | Full Response deserialization and shared RFC 9535 JSONPath selection |
 | `spider/src/ai.rs` | Public AI runtime entry and `OpenAI` export |
 | `spider/src/ai/openai.rs` | Validate provider configuration, own the reusable provider and execute model calls |
 | `spider/src/ai/transport.rs` | Execute one provider request and bound its HTTP-decoded body before dependency buffering |

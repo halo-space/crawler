@@ -10,6 +10,7 @@ pub(super) async fn parse(
     response: &net::Response,
 ) -> Result<IndexMap<String, Value>, crate::Error> {
     let mut soup = None;
+    let mut document = None;
     let mut fields = IndexMap::new();
     for (name, field) in &parse.fields {
         let mut field_value = None;
@@ -38,6 +39,16 @@ pub(super) async fn parse(
                     selector::regex::select(response, expr)
                         .map(|values| values.into_iter().map(Value::String).collect::<Vec<_>>())
                 }
+                graph::rules::Extractor::Json { expr } => {
+                    if document.is_none() {
+                        document = Some(response.json::<Value>()?);
+                    }
+                    selector::json::select(
+                        document.as_ref().expect("JSON document initialized above"),
+                        expr,
+                    )
+                    .map(|values| values.into_iter().cloned().collect())
+                }
                 graph::rules::Extractor::Ai { expr } => response.ai(expr).await.map(|value| {
                     if value::is_empty(&value) {
                         Vec::new()
@@ -48,7 +59,11 @@ pub(super) async fn parse(
             };
             match selection {
                 Ok(values) if !values.is_empty() => {
-                    field_value = Some(collapse(values));
+                    let selected = collapse(values);
+                    if value::is_empty(&selected) {
+                        continue;
+                    }
+                    field_value = Some(selected);
                     break;
                 }
                 Ok(_) => {}
@@ -126,6 +141,24 @@ mod tests {
     fn healing(min: f64) -> selector::css::Config {
         selector::css::Config::default()
             .with_healing(selector::css::healing::Config::new(min).unwrap())
+    }
+
+    fn eastmoney() -> net::Response {
+        response(
+            r#"{
+                "rc": 0,
+                "empty": null,
+                "mixed": [null, "", "601398", []],
+                "data": {
+                    "total": 3,
+                    "diff": [
+                        {"f2": 6.61, "f12": "601398", "f14": "工商银行"},
+                        {"f2": 46.15, "f12": "600036", "f14": "招商银行"},
+                        {"f2": 6.36, "f12": "600030", "f14": "中信证券"}
+                    ]
+                }
+            }"#,
+        )
     }
 
     #[test]
@@ -212,6 +245,110 @@ mod tests {
         };
         let fields = parse(&spec, &response("<h2>Fallback</h2>")).await.unwrap();
         assert_eq!(fields["title"], Value::from("Fallback"));
+    }
+
+    #[tokio::test]
+    async fn rules_json_preserves_scalar_object_and_multiple_values() {
+        let spec = graph::rules::Parse {
+            fields: IndexMap::from([
+                (
+                    "total".to_string(),
+                    graph::rules::Field {
+                        required: true,
+                        default: None,
+                        extractors: vec![graph::rules::Extractor::json("$.data.total")],
+                    },
+                ),
+                (
+                    "first".to_string(),
+                    graph::rules::Field {
+                        required: true,
+                        default: None,
+                        extractors: vec![graph::rules::Extractor::json("$.data.diff[0]")],
+                    },
+                ),
+                (
+                    "codes".to_string(),
+                    graph::rules::Field {
+                        required: true,
+                        default: None,
+                        extractors: vec![graph::rules::Extractor::json("$.data.diff[*].f12")],
+                    },
+                ),
+                (
+                    "mixed".to_string(),
+                    graph::rules::Field {
+                        required: true,
+                        default: None,
+                        extractors: vec![graph::rules::Extractor::json("$.mixed[*]")],
+                    },
+                ),
+            ]),
+        };
+
+        let fields = parse(&spec, &eastmoney()).await.unwrap();
+
+        assert_eq!(fields["total"], Value::from(3));
+        assert_eq!(fields["first"]["f14"], Value::from("工商银行"));
+        assert_eq!(
+            fields["codes"],
+            serde_json::json!(["601398", "600036", "600030"])
+        );
+        assert_eq!(fields["mixed"], serde_json::json!([null, "", "601398", []]));
+    }
+
+    #[tokio::test]
+    async fn empty_json_selection_continues_to_next_extractor() {
+        let spec = graph::rules::Parse {
+            fields: IndexMap::from([(
+                "code".to_string(),
+                graph::rules::Field {
+                    required: true,
+                    default: None,
+                    extractors: vec![
+                        graph::rules::Extractor::json("$.empty"),
+                        graph::rules::Extractor::json("$.data.diff[0].f12"),
+                    ],
+                },
+            )]),
+        };
+
+        let fields = parse(&spec, &eastmoney()).await.unwrap();
+
+        assert_eq!(fields["code"], Value::from("601398"));
+    }
+
+    #[tokio::test]
+    async fn invalid_json_body_and_path_return_typed_errors() {
+        let valid_path = graph::rules::Parse {
+            fields: IndexMap::from([(
+                "code".to_string(),
+                graph::rules::Field {
+                    required: true,
+                    default: None,
+                    extractors: vec![graph::rules::Extractor::json("$.data.diff[0].f12")],
+                },
+            )]),
+        };
+        let invalid_path = graph::rules::Parse {
+            fields: IndexMap::from([(
+                "code".to_string(),
+                graph::rules::Field {
+                    required: true,
+                    default: None,
+                    extractors: vec![graph::rules::Extractor::json("$.data[")],
+                },
+            )]),
+        };
+
+        assert!(matches!(
+            parse(&valid_path, &response("not-json")).await.unwrap_err(),
+            crate::Error::Net(net::Error::Json(_))
+        ));
+        assert!(matches!(
+            parse(&invalid_path, &eastmoney()).await.unwrap_err(),
+            crate::Error::Selector(selector::Error::Json(_))
+        ));
     }
 
     #[tokio::test]

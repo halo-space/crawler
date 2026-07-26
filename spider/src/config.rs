@@ -293,6 +293,10 @@ graph:
             extractors:
               - kind: ai
                 expr: 提取文章并返回 JSON
+          codes:
+            extractors:
+              - kind: json
+                expr: $.data.diff[*].f12
   edges: []
 "#;
         let config = Config::from_yaml(rules).unwrap();
@@ -320,6 +324,47 @@ graph:
             panic!("article extractor must remain AI");
         };
         assert_eq!(expr, "提取文章并返回 JSON");
+
+        let graph::rules::Extractor::Json { expr } = &fields["codes"].extractors[0] else {
+            panic!("codes extractor must remain JSON");
+        };
+        assert_eq!(expr, "$.data.diff[*].f12");
+    }
+
+    #[test]
+    fn json_extractor_is_validated_during_loading() {
+        let rules = r#"
+spider:
+  name: market
+  start: [{node: index, url: https://push2.eastmoney.com/api/qt/ulist.np/get}]
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          codes:
+            extractors:
+              - kind: json
+                expr: $.data.diff[*].f12
+  edges: []
+"#;
+
+        assert!(Config::from_yaml(rules).is_ok());
+
+        let invalid = rules.replace("$.data.diff[*].f12", "$.data[");
+        let error = Config::from_yaml(&invalid).unwrap_err();
+        assert!(error.to_string().contains("invalid JSONPath"));
+
+        let empty = rules.replace("$.data.diff[*].f12", "\"  \"");
+        let error = Config::from_yaml(&empty).unwrap_err();
+        assert!(error.to_string().contains("extractor expr is empty"));
+
+        let unknown = rules.replace(
+            "                expr: $.data.diff[*].f12",
+            "                expr: $.data.diff[*].f12\n                args: {}",
+        );
+        let error = Config::from_yaml(&unknown).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]

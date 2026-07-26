@@ -28,7 +28,7 @@
 | Browser Downloader | 未实现 | 当前为明确返回 `UnsupportedMode("browser")` 的占位实现，计划在 v5 完成 |
 | CSS Selector | 已实现 | `Response::css()` 返回原生 `scrape_core::Soup` |
 | CSS Healing | 已实现 | 普通 CSS 失败后执行确定性全文档候选评分；需要显式开启 |
-| Regex 与 JSON | 已实现 | Regex 选择器，以及代码模式的 `Response::json<T>()` |
+| Regex 与 JSON | 已实现 | Regex 选择、完整正文 `Response::json<T>()`，以及代码与 Rules 共用的 RFC 9535 JSONPath 选择 |
 | AI Selector | 已实现 | 独立的 OpenAI-compatible JSON 对象提取，不属于 CSS Healing fallback |
 | AI 运行时配置 | 已实现 | 通过 `Engine::with_ai` 注入一个 Worker 本地可复用的 `ai::OpenAI` provider；provider 配置不进入 Rules 或 Trace Snapshot |
 | Middleware | 已实现 | 生命周期 Registry、Worker 本地 Memory 实现，以及可选 RedisBloom Dedup 和共享 Redis RateLimit |
@@ -406,8 +406,9 @@ Axum 监听本身是明文 HTTP；生产拓扑必须由可信反向代理或负�
 
 API Worker 是有限生命周期的外部进程。`Api::open()` 会读取并校验 Master 的租约策略与公布的响应
 上限（默认 64 MiB）。`Api::with_max_response_bytes(...)` 在打开前设置 Worker 的接收容量；Master 通过
-YAML 的 `api.max_size` 或 `master::Config::with_api(...)` 设置请求/响应上限。YAML 使用 `64MiB` 这类带
-单位的容量，允许范围为 1 KiB 到 4 GiB 减一字节。若 Master 上限
+YAML 的 `api.max_size` 字节整数或 `master::Config::with_api(...)` 设置请求/响应上限；该整数允许范围为
+1 KiB 到 4 GiB 减一字节。`history.ttl` 同样使用 YAML 整数，固定单位为秒。配置会拒绝字符串以及
+`"64MiB"`、`"48h"` 这类带单位的值。若 Master 上限
 大于本地容量，打开会被拒绝，因此 64 MiB 是默认值，不是整套拓扑的固定上限。第一次领取或待处理判断会
 登记传入的 `worker_id` 和支持的 mode；后续只在 mode 改变或心跳已过期时重写记录，Scheduler 关闭后
 停止心跳维护。client 的连接、读取、单次
@@ -696,8 +697,9 @@ Healing 不保存历史节点指纹、不改写或持久化修复后的 selector
 ### 9.2 Regex、JSON 与 AI
 
 - Regex 返回所有捕获结果；存在第一捕获组时优先返回该组，否则返回完整匹配。
-- `Response::json<T>()` 先经过统一的响应文本解码合同，再反序列化结构化 JSON。
-- AI 是与 CSS、Regex 并列的显式 selector。Rules AI extractor 只包含 `kind: ai` 和非空 `expr`；提示词描述期望的对象字段，provider 配置不属于 DSL。
+- `Response::json<T>()` 先经过统一的响应文本解码合同，再反序列化完整正文。代码模式随后可以用 RFC 9535 JSONPath 调用 `selector::json::select(&value, expr)`；Rules 模式通过 `kind: json` 和 `expr` 复用同一实现。
+- JSONPath 选择保留原始 JSON 类型与文档顺序。合法路径未命中时返回空集合；正文非法仍返回 `net::Error::Json`，非法 JSONPath 会在 Rules 静态校验阶段被拒绝，运行时也会再次防御校验。JSON 选择没有 Healing，也不会调用 AI。
+- AI 是与 CSS、Regex、JSON 并列的显式 selector。Rules AI extractor 只包含 `kind: ai` 和非空 `expr`；提示词描述期望的对象字段，provider 配置不属于 DSL。
 - 业务层从自己的配置或密钥来源取得 `base_url`、`api_key` 和 `model_name`，构造一个 `ai::OpenAI`，再用 `Engine::with_ai` 注入；crawler 不读取这些环境变量。`ai::OpenAI` 持有一个可复用的 `async-openai` Client，用于调用 OpenAI-compatible Chat Completion endpoint。
 - 统一 Executor 在解析前把共享 provider 挂到 Response；代码 handler 与 Rules 都调用 `response.ai(expr).await`。Response clone 共享同一个 provider，该字段保持 crate-private、不可序列化，也不会出现在 Response Debug 输出中。
 - provider 配置和密钥不会进入 Rules、Trace Snapshot、Request、Payload、Scheduler 或 Item。`base_url` 必须是绝对 HTTP(S) base endpoint，不能包含 user information、query 或 fragment。`OpenAI` Debug 可以标识这个已校验的 endpoint 和 model，但绝不显示密钥；provider 失败也不包含请求 URL 或原始响应正文。
@@ -899,6 +901,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `spider/src/selector/css/healing.rs` | Healing 配置与总体流程 |
 | `spider/src/selector/css/healing/reference.rs` | CSS AST 到评分参考结构 |
 | `spider/src/selector/css/healing/score.rs` | DOM 候选遍历、关系判断与评分 |
+| `spider/src/selector/json.rs` | Response 完整反序列化与公共 RFC 9535 JSONPath 选择 |
 | `spider/src/ai.rs` | AI 运行时公共入口并导出 `OpenAI` |
 | `spider/src/ai/openai.rs` | 校验 provider 配置、持有可复用实例并执行模型调用 |
 | `spider/src/ai/transport.rs` | 执行单次 provider 请求，并在依赖缓冲前限制 HTTP 解码后的正文 |

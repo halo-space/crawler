@@ -116,6 +116,28 @@ args:
     min: 0.8
 ```
 
+Rules Executor 会把一份 JSON 响应反序列化一次，并在多个 JSON 字段间复用这份文档。代码模式通过
+`Response::json<T>()` 取得完整的 `serde_json::Value`，再使用 RFC 9535 JSONPath 查询。选择结果
+直接引用原始值，不会把数字、布尔、对象或数组转成字符串：
+
+```rust
+let document: serde_json::Value = response.json()?;
+let codes = spider::selector::json::select(&document, "$.data.diff[*].f12")?;
+```
+
+Rules 模式直接复用同一个 selector：
+
+```yaml
+codes:
+  extractors:
+    - kind: json
+      expr: $.data.diff[*].f12
+```
+
+例如该路径会从东方财富行情响应中选择证券代码。合法路径未命中时继续当前字段的下一个 extractor；
+一个匹配保留原始 JSON 值，多个匹配按现有 Rules 数量合同折叠为数组。正文非法或 JSONPath 非法都
+直接报错；JSON 选择没有 Healing，也不会触发 AI fallback。
+
 AI 是与 CSS 并列的独立 extractor。它通过 OpenAI-compatible Chat Completion API 发送当前
 Response 文本和 `expr` 提示词，结果严格限定为一个 JSON 对象：
 
@@ -187,15 +209,18 @@ cargo run -p master -- --config master/etc/master-api.yaml
 Master 自身监听明文 HTTP。生产环境必须由可信反向代理或负载均衡器在流量到达该监听端口前终止 TLS；
 Bearer token 不能通过不可信网络明文传输。
 
-仓库中的模板将两项 token 留空，部署方填入两套不同凭据前 Master 会拒绝启动。容量和保留时间使用带单位的值：
+仓库中的模板将两项 token 留空，部署方填入两套不同凭据前 Master 会拒绝启动。容量和保留时间使用固定单位的整数：
 
 ```yaml
 api:
-  max_size: "64MiB"
+  max_size: 67108864
 history:
-  ttl: "48h"
+  ttl: 172800
   cleanup_limit: 1000
 ```
+
+`api.max_size` 的单位固定为字节，`history.ttl` 的单位固定为秒。两个字段只接受 YAML 正整数；
+`"64MiB"`、`"48h"`、`"67108864"` 等字符串均会被拒绝。
 
 控制面按职责分层：`master/src/handler/` 负责 Axum 提取器和路由 handler，
 `master/src/logic/` 负责资源业务操作，`master/src/svc.rs` 持有共享 service context，
@@ -204,7 +229,7 @@ history:
 
 两端的 API 消息上限默认都是 64 MiB。Worker 在打开前通过
 `Api::with_max_response_bytes(...)` 设置接收容量；Master 通过
-YAML 的 `api.max_size` 或 `master::Config::with_api(...)` 设置请求/响应上限，允许范围为 1 KiB 到
+YAML 的 `api.max_size` 字节整数或 `master::Config::with_api(...)` 设置请求/响应上限，允许范围为 1 KiB 到
 4 GiB 减一字节。
 启动时若 Master 上限大于 Worker 已配置的容量会被拒绝，因此 64 MiB 是默认值，不是全局固定上限。
 Worker 会在发起网络请求前，把每条出站 JSON 消息序列化到同一个有界容量中，并在传输重试时复用这份

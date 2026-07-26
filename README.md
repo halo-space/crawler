@@ -12,7 +12,7 @@ Master API.
 - Memory, Redis, and HTTP API Scheduler implementations use one scheduling contract.
 - HTTP downloading includes retries, bounded bodies, redirects, cookies, proxy/TLS settings, and
   deterministic response decoding.
-- CSS selection, deterministic CSS healing, and explicit OpenAI-compatible JSON extraction are built in.
+- CSS selection, deterministic CSS healing, RFC 9535 JSONPath, and explicit OpenAI-compatible JSON-object extraction are built in.
 - Items use an independent Store contract; JSONL is the default local implementation.
 - The Axum/MySQL `master` crate provides Task dispatch and control-plane APIs for remote Workers.
 

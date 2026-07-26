@@ -8,6 +8,9 @@ pub enum Error {
     #[error("invalid css selector: {0}")]
     Css(String),
 
+    #[error("invalid JSONPath: {0}")]
+    Json(String),
+
     #[error("ai selector error: {0}")]
     Ai(String),
 }

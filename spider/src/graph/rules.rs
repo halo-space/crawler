@@ -33,6 +33,9 @@ pub enum Extractor {
         #[serde(default)]
         args: (),
     },
+    Json {
+        expr: String,
+    },
     Ai {
         expr: String,
     },
@@ -53,13 +56,20 @@ impl Extractor {
         }
     }
 
+    pub fn json(expr: impl Into<String>) -> Self {
+        Self::Json { expr: expr.into() }
+    }
+
     pub fn ai(expr: impl Into<String>) -> Self {
         Self::Ai { expr: expr.into() }
     }
 
     pub fn expr(&self) -> &str {
         match self {
-            Self::Css { expr, .. } | Self::Regex { expr, .. } | Self::Ai { expr, .. } => expr,
+            Self::Css { expr, .. }
+            | Self::Regex { expr, .. }
+            | Self::Json { expr }
+            | Self::Ai { expr } => expr,
         }
     }
 }

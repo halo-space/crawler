@@ -10,7 +10,7 @@
 - 代码模式与 Rules 模式共用 Spider、Request、Response、Item、Middleware 和 Engine。
 - Memory、Redis 与 HTTP API Scheduler 实现同一套调度合同。
 - HTTP 下载支持重试、响应体上限、重定向、Cookie、Proxy/TLS 和确定性字符集解码。
-- 内置 CSS Selector、确定性 CSS Healing，以及显式的 OpenAI-compatible JSON 提取。
+- 内置 CSS Selector、确定性 CSS Healing、RFC 9535 JSONPath，以及显式的 OpenAI-compatible JSON 对象提取。
 - Item 使用独立 Store 合同，默认实现为本地 JSONL。
 - `master` crate 使用 Axum/MySQL，为远程 Worker 提供 Task 派发和控制面 API。
 
