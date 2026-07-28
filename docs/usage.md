@@ -405,9 +405,10 @@ persistent Scheduler implementation and is covered by the shared Scheduler confo
 `fasttrace` runtime tracing remains separate work; a real Browser Downloader and mixed HTTP/browser
 end-to-end execution remain v5 work. AI provider configuration is already Worker-local: one reusable
 `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.
-The local Memory runtime defaults to `worker-1` and HTTP mode. Every distributed Worker must set a
-stable, unique startup identity with `with_worker_id(...)`; `with_modes(...)` freezes its download
-capabilities for that run. An empty Worker ID or mode set is rejected before execution.
+The local Memory runtime defaults to `worker-1` and HTTP mode. Distributed Scheduler
+implementations require a stable, unique startup identity with `with_worker_id(...)`; Engine rejects
+startup when that explicit identity is missing. `with_modes(...)` freezes the download capabilities
+for that run. An empty Worker ID or mode set is rejected before execution.
 
 Media normalization does not download files. Item attachment downloading is planned as an
 independent v5 change alongside, but not dependent on, the Browser Downloader.

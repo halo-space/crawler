@@ -6,7 +6,6 @@ use std::time::Duration;
 use spider::{net, trace};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 
 use super::wire;
 
@@ -17,12 +16,8 @@ pub(super) struct Runtime {
     pub(super) activity: RwLock<()>,
     pub(super) heartbeat_interval: RwLock<Duration>,
     pub(super) workers: Mutex<HashMap<String, Worker>>,
-    pub(super) operations: Mutex<Operations>,
     pub(super) traces: Mutex<TraceCache>,
 }
-
-pub(super) const OPERATION_TTL: Duration = Duration::from_secs(5 * 60);
-pub(super) const OPERATION_CAPACITY: usize = 4096;
 
 impl Runtime {
     pub(super) fn new(
@@ -37,7 +32,6 @@ impl Runtime {
             activity: RwLock::new(()),
             heartbeat_interval: RwLock::new(heartbeat_interval),
             workers: Mutex::new(HashMap::new()),
-            operations: Mutex::new(Operations::new(OPERATION_TTL, OPERATION_CAPACITY)),
             traces: Mutex::new(TraceCache::new(trace_cache_capacity, trace_cache_bytes)),
         }
     }
@@ -48,85 +42,21 @@ impl Runtime {
 }
 
 pub(super) struct Worker {
-    pub(super) modes: Arc<RwLock<Vec<net::Mode>>>,
+    pub(super) registration: Arc<Mutex<Registration>>,
     pub(super) task: JoinHandle<()>,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) struct Operation {
-    task: Option<tokio::task::Id>,
-    action: Action,
+pub(super) struct Registration {
+    pub(super) modes: Vec<net::Mode>,
+    pub(super) confirmed: bool,
 }
 
-impl Operation {
-    pub(super) fn new(action: Action) -> Self {
+impl Registration {
+    pub(super) fn new(modes: Vec<net::Mode>) -> Self {
         Self {
-            task: tokio::task::try_id(),
-            action,
+            modes,
+            confirmed: false,
         }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) enum Action {
-    Init(String),
-}
-
-pub(super) struct Operations {
-    ttl: Duration,
-    capacity: usize,
-    values: HashMap<Operation, OperationEntry>,
-}
-
-struct OperationEntry {
-    key: String,
-    expires_at: Instant,
-}
-
-impl Operations {
-    pub(super) fn new(ttl: Duration, capacity: usize) -> Self {
-        Self {
-            ttl,
-            capacity,
-            values: HashMap::with_capacity(capacity),
-        }
-    }
-
-    pub(super) fn key(&mut self, operation: Operation) -> Result<String, spider::scheduler::Error> {
-        let now = Instant::now();
-        self.values.retain(|_, entry| entry.expires_at > now);
-
-        if operation.task.is_none() {
-            return Ok(uuid::Uuid::now_v7().to_string());
-        }
-
-        if let Some(entry) = self.values.get(&operation) {
-            return Ok(entry.key.clone());
-        }
-        if self.values.len() >= self.capacity {
-            return Err(spider::scheduler::Error::Unavailable(format!(
-                "API Scheduler has {} unresolved Init operations",
-                self.capacity
-            )));
-        }
-
-        let key = uuid::Uuid::now_v7().to_string();
-        self.values.insert(
-            operation,
-            OperationEntry {
-                key: key.clone(),
-                expires_at: now + self.ttl,
-            },
-        );
-        Ok(key)
-    }
-
-    pub(super) fn remove(&mut self, operation: &Operation) {
-        self.values.remove(operation);
-    }
-
-    pub(super) fn clear(&mut self) {
-        self.values.clear();
     }
 }
 

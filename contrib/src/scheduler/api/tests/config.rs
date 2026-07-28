@@ -13,6 +13,7 @@ fn construction_exposes_the_lease_before_open() {
         .unwrap();
 
     assert_eq!(api.lease(), Some(lease));
+    assert!(api.requires_explicit_worker_id());
 }
 #[test]
 fn construction_rejects_invalid_transport_configuration() {

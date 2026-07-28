@@ -3,6 +3,14 @@ use std::future::Future;
 use crate::{net, payload, trace};
 
 pub trait Scheduler: Send + Sync {
+    /// 是否要求 Engine 通过 `with_worker_id` 提供稳定的 Worker 身份。
+    ///
+    /// 进程内实现可以使用 Engine 的本地默认值；分布式实现必须返回 `true`，避免多个 Worker
+    /// 共享同一个默认身份。
+    fn requires_explicit_worker_id(&self) -> bool {
+        false
+    }
+
     /// 当前实现的租约恢复和续租策略；不需要租约的实现返回 `None`。
     fn lease(&self) -> Option<crate::scheduler::Lease> {
         None

@@ -7,7 +7,7 @@ use spider::{Scheduler as _, net, payload, scheduler, trace};
 
 use super::Api;
 use super::client;
-use super::state::{Action, OPERATION_CAPACITY, OPERATION_TTL, Operation, Operations, TraceCache};
+use super::state::TraceCache;
 use super::wire;
 use super::worker::canonical_modes;
 
@@ -21,6 +21,14 @@ mod transport;
 fn claimed(snapshot: net::request::Snapshot) -> serde_json::Value {
     let trace = trace::Snapshot::code(&snapshot.task_id);
     json!({
+        "identity": {
+            "id": snapshot.id,
+            "task_id": snapshot.task_id,
+            "trace_id": snapshot.trace_id,
+            "version": 1,
+            "worker_id": "worker-1",
+            "node": snapshot.node
+        },
         "snapshot": snapshot,
         "execution": {
             "version": 1,
@@ -112,6 +120,7 @@ impl Response {
 struct Request {
     path: String,
     headers: HashMap<String, String>,
+    body: Vec<u8>,
 }
 
 fn server(
@@ -150,6 +159,56 @@ fn server(
     (format!("http://{address}"), receiver, server)
 }
 
+fn concurrent_server(
+    responses: Vec<Response>,
+) -> (
+    String,
+    std::sync::mpsc::Receiver<Vec<Request>>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let count = responses.len();
+        let (request_sender, request_receiver) = std::sync::mpsc::channel();
+        let mut handlers = Vec::with_capacity(count);
+        for (index, response) in responses.into_iter().enumerate() {
+            let (stream, _) = listener.accept().unwrap();
+            let request_sender = request_sender.clone();
+            handlers.push(std::thread::spawn(move || {
+                let Response { status, body, wait } = response;
+                let mut stream = stream;
+                let request = read_request(&mut stream);
+                request_sender.send((index, request)).unwrap();
+                if let Some(wait) = wait {
+                    wait.reached.send(()).unwrap();
+                    wait.resume.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    status,
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+                stream.flush().unwrap();
+            }));
+        }
+        drop(request_sender);
+        for handler in handlers {
+            handler.join().unwrap();
+        }
+        let mut requests = request_receiver.into_iter().collect::<Vec<_>>();
+        requests.sort_by_key(|(index, _)| *index);
+        sender
+            .send(requests.into_iter().map(|(_, request)| request).collect())
+            .unwrap();
+    });
+    (format!("http://{address}"), receiver, server)
+}
+
 async fn wait_for_request(receiver: std::sync::mpsc::Receiver<()>) {
     tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(2)).unwrap())
         .await
@@ -182,13 +241,15 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         .get("content-length")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or_default();
-    let received_body = bytes.len() - headers_end;
-    if received_body < content_length {
-        let mut remaining = vec![0; content_length - received_body];
-        stream.read_exact(&mut remaining).unwrap();
+    let mut body = bytes[headers_end..].to_vec();
+    if body.len() < content_length {
+        let received = body.len();
+        body.resize(content_length, 0);
+        stream.read_exact(&mut body[received..]).unwrap();
     }
     Request {
         path: path.to_string(),
         headers,
+        body,
     }
 }

@@ -79,7 +79,7 @@ async fn claim_reuses_a_key_only_for_automatic_http_retries() {
 }
 
 #[tokio::test]
-async fn init_retry_reuses_the_unresolved_logical_operation_key() {
+async fn init_retry_reuses_the_deterministic_body_key() {
     let mut responses = vec![Response::json(
         "200 OK",
         json!({

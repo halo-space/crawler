@@ -1,8 +1,60 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
 use contrib::scheduler::redis::Redis;
 use spider::scheduler::Init;
 use spider::{Scheduler, payload, stats, trace};
+use tracing::instrument::WithSubscriber;
 
 use super::{key, request, server, settlement, worker};
+
+#[derive(Clone)]
+struct Events {
+    values: Arc<Mutex<Vec<String>>>,
+    next_span: Arc<AtomicU64>,
+}
+
+impl Events {
+    fn new(values: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            values,
+            next_span: Arc::new(AtomicU64::new(1)),
+        }
+    }
+}
+
+impl tracing::Subscriber for Events {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Visitor(String);
+
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                let _ = write!(&mut self.0, " {}={value:?}", field.name());
+            }
+        }
+
+        let mut visitor = Visitor(String::new());
+        event.record(&mut visitor);
+        self.values.lock().unwrap().push(visitor.0);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
 
 #[tokio::test]
 async fn lifecycle_data_and_availability_failures_are_distinct() {
@@ -165,13 +217,35 @@ async fn failed_recovery_does_not_withhold_a_valid_claim() {
         .await
         .unwrap();
 
+    let events = Arc::new(Mutex::new(Vec::new()));
     let claimed = scheduler
         .next_requests(2, worker::A, worker::HTTP)
+        .with_subscriber(Events::new(Arc::clone(&events)))
         .await
         .unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, "valid-after-recovery");
     settlement::succeed(&scheduler, &claimed[0]).await;
+
+    {
+        let events = events.lock().unwrap();
+        let warning = events
+            .iter()
+            .find(|event| event.contains("failed to recover damaged Redis Request"))
+            .expect("failed recovery must be observable");
+        for value in [
+            "request_id",
+            "failed-recovery",
+            "token",
+            &key::token("failed-recovery"),
+            "version",
+            "worker_id",
+            worker::A,
+            "error",
+        ] {
+            assert!(warning.contains(value), "missing {value} in {warning}");
+        }
+    }
 
     let damaged_state: String = redis::cmd("HGET")
         .arg(key::request(&namespace, "failed-recovery"))

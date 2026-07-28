@@ -37,8 +37,19 @@ where
         Ok(Ack::Accepted) => {}
         Ok(Ack::Expired) => return release_unstarted(scheduler.as_ref(), &payload).await,
         Err(error) => {
-            if !error.is_ownership_loss() {
-                let _ = retry_release(scheduler.as_ref(), &payload).await;
+            if !error.is_ownership_loss()
+                && let Err(cleanup_error) = retry_release(scheduler.as_ref(), &payload).await
+            {
+                tracing::warn!(
+                    request_id = %payload.id,
+                    task_id = %payload.task_id,
+                    trace_id = %payload.trace_id,
+                    version = payload.version,
+                    worker_id = %payload.worker_id,
+                    node = %payload.node,
+                    error = %cleanup_error,
+                    "failed to release Request after acknowledgement failed"
+                );
             }
             return Err(crate::Error::Scheduler(error));
         }
@@ -182,11 +193,130 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
     use crate::scheduler::{Init, Scheduler};
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone)]
+    struct Events {
+        values: Arc<Mutex<Vec<String>>>,
+        next_span: Arc<AtomicU64>,
+    }
+
+    impl Events {
+        fn new(values: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                values,
+                next_span: Arc::new(AtomicU64::new(1)),
+            }
+        }
+    }
+
+    impl tracing::Subscriber for Events {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed))
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Visitor(String);
+
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write;
+                    let _ = write!(&mut self.0, " {}={value:?}", field.name());
+                }
+            }
+
+            let mut visitor = Visitor(String::new());
+            event.record(&mut visitor);
+            self.values.lock().unwrap().push(visitor.0);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct FailedAcknowledgement {
+        acknowledgements: AtomicUsize,
+        releases: AtomicUsize,
+    }
+
+    impl Scheduler for FailedAcknowledgement {
+        async fn open(&self) -> Result<(), scheduler::Error> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), scheduler::Error> {
+            Ok(())
+        }
+
+        async fn push(&self, _: payload::Payload) -> Result<(), scheduler::Error> {
+            Ok(())
+        }
+
+        async fn trace(&self, _: &str) -> Result<Option<crate::trace::Snapshot>, scheduler::Error> {
+            Ok(None)
+        }
+
+        async fn next_requests(
+            &self,
+            _: usize,
+            _: &str,
+            _: &[crate::net::Mode],
+        ) -> Result<Vec<crate::net::Request>, scheduler::Error> {
+            Ok(Vec::new())
+        }
+
+        async fn has_pending_requests(
+            &self,
+            _: &str,
+            _: &[crate::net::Mode],
+        ) -> Result<bool, scheduler::Error> {
+            Ok(false)
+        }
+
+        async fn ack(&self, _: &payload::Payload) -> Result<(), scheduler::Error> {
+            self.acknowledgements.fetch_add(1, Ordering::Relaxed);
+            Err(scheduler::Error::Message(
+                "acknowledgement failed".to_string(),
+            ))
+        }
+
+        async fn release(&self, _: &payload::Payload) -> Result<(), scheduler::Error> {
+            self.releases.fetch_add(1, Ordering::Relaxed);
+            Err(scheduler::Error::Message("cleanup failed".to_string()))
+        }
+
+        async fn refresh_lease(&self, _: &payload::Payload) -> Result<(), scheduler::Error> {
+            Ok(())
+        }
+
+        async fn success(&self, _: &payload::Payload) -> Result<(), scheduler::Error> {
+            Ok(())
+        }
+
+        async fn failure(&self, _: &payload::Payload) -> Result<(), scheduler::Error> {
+            Ok(())
+        }
+    }
 
     struct PanickingDownload;
 
@@ -307,6 +437,56 @@ mod tests {
                 !errors.contains(secret),
                 "failure settlement exposed {secret}: {errors}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_error_remains_primary_when_release_cleanup_fails() {
+        let scheduler = Arc::new(FailedAcknowledgement::default());
+        let mut request = crate::net::Request::follow("https://example.com").unwrap();
+        request.id = "request-1".to_string();
+        request.task_id = "task-1".to_string();
+        request.trace_id = "trace-1".to_string();
+        request.version = 7;
+        request.leased_by = "worker-1".to_string();
+        request.state = crate::net::State::Processing;
+        let events = Arc::new(Mutex::new(Vec::new()));
+
+        let result = execute(
+            request,
+            tokio::time::Instant::now(),
+            scheduler.clone(),
+            Arc::new(CountingDownload {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(Executor),
+            Arc::new(middleware::Registry::new()),
+        )
+        .with_subscriber(Events::new(Arc::clone(&events)))
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(crate::Error::Scheduler(scheduler::Error::Message(message)))
+                if message == "acknowledgement failed"
+        ));
+        assert_eq!(scheduler.acknowledgements.load(Ordering::Relaxed), 1);
+        assert_eq!(scheduler.releases.load(Ordering::Relaxed), 1);
+        let events = events.lock().unwrap();
+        let warning = events
+            .iter()
+            .find(|event| event.contains("failed to release Request after acknowledgement failed"))
+            .expect("release cleanup failure must be observable");
+        for value in [
+            "request-1",
+            "task-1",
+            "trace-1",
+            "worker-1",
+            "index",
+            "cleanup failed",
+            "version=7",
+        ] {
+            assert!(warning.contains(value), "missing {value} in {warning}");
         }
     }
 

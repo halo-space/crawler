@@ -1,6 +1,6 @@
 use spider::{net, payload, scheduler, trace};
 
-use super::super::{Api, state::Action, wire};
+use super::super::{Api, wire};
 
 impl Api {
     pub(in crate::scheduler::api) async fn initialize(
@@ -50,11 +50,9 @@ impl Api {
         self.client.validate_body(&body)?;
         let digest = wire::canonical_digest(&body)
             .map_err(|error| scheduler::Error::Message(error.to_string()))?;
-        let (operation, key) = self.operation_key(Action::Init(digest)).await?;
-        let result = self
-            .client
+        let key = format!("init-{digest}");
+        self.client
             .post_empty("v1/worker/runs/init", &body, Some(&key))
-            .await;
-        self.resolve(operation, result).await
+            .await
     }
 }

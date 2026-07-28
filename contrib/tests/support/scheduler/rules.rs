@@ -32,6 +32,7 @@ graph:
     .unwrap();
     let fetched = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
+        .with_worker_id("conformance-rules-worker")
         .with_scheduler(scheduler)
         .with_rules(config)
         .with_spider(LocalSpiderFactory)
@@ -81,6 +82,7 @@ graph:
     let started = Arc::new(AtomicUsize::new(0));
     let indexed = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
+        .with_worker_id("conformance-remote-worker")
         .with_scheduler(scheduler)
         .with_spider(RemoteSpiderFactory {
             started: started.clone(),

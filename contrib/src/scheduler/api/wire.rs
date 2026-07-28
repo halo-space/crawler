@@ -59,7 +59,8 @@ pub(super) struct Pending {
     pub modes: Vec<net::Mode>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Identity {
     pub id: String,
     pub task_id: String,
@@ -78,17 +79,6 @@ impl Identity {
             version: payload.version,
             worker_id: payload.worker_id.clone(),
             node: payload.node.clone(),
-        }
-    }
-
-    pub(super) fn from_claimed(claimed: &Claimed) -> Self {
-        Self {
-            id: claimed.snapshot.id.clone(),
-            task_id: claimed.snapshot.task_id.clone(),
-            trace_id: claimed.snapshot.trace_id.clone(),
-            version: claimed.execution.version,
-            worker_id: claimed.execution.leased_by.clone(),
-            node: claimed.snapshot.node.clone(),
         }
     }
 }
@@ -128,9 +118,10 @@ pub(super) struct ClaimResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Claimed {
-    pub snapshot: net::request::Snapshot,
+    pub identity: Identity,
+    pub snapshot: Value,
     pub execution: Execution,
-    pub trace: Option<trace::Snapshot>,
+    pub trace: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -25,6 +25,7 @@ struct ClaimScheduler {
     transient: AtomicUsize,
     pending_failures: AtomicUsize,
     local: bool,
+    requires_worker_id: bool,
 }
 
 impl ClaimScheduler {
@@ -38,6 +39,7 @@ impl ClaimScheduler {
             transient: AtomicUsize::new(transient),
             pending_failures: AtomicUsize::new(0),
             local: true,
+            requires_worker_id: false,
         }
     }
 
@@ -52,9 +54,18 @@ impl ClaimScheduler {
         self.pending_failures = AtomicUsize::new(failures);
         self
     }
+
+    fn requiring_worker_id(mut self) -> Self {
+        self.requires_worker_id = true;
+        self
+    }
 }
 
 impl Scheduler for ClaimScheduler {
+    fn requires_explicit_worker_id(&self) -> bool {
+        self.requires_worker_id
+    }
+
     fn lease(&self) -> Option<spider::scheduler::Lease> {
         self.inner.lease()
     }
@@ -402,6 +413,21 @@ async fn engine_forwards_worker_identity_and_modes_to_scheduler() {
     assert!(pending.iter().all(|(worker_id, modes)| {
         worker_id == "browser-worker" && modes == &[net::Mode::Browser]
     }));
+}
+
+#[tokio::test]
+async fn scheduler_can_require_an_explicit_worker_identity() {
+    let mut runtime = engine::Builder::new()
+        .with_scheduler(ClaimScheduler::new(0).requiring_worker_id())
+        .with_spider(EmptySpider::new())
+        .build();
+
+    let error = runtime.start().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Scheduler requires an explicit Worker id")
+    );
 }
 
 #[tokio::test]

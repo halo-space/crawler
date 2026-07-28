@@ -230,6 +230,7 @@ where
         if self.event_limit == 0 {
             return Err(crate::Error::message("Event limit must be positive"));
         }
-        self.worker.validate()
+        self.worker
+            .validate(self.scheduler.requires_explicit_worker_id())
     }
 }

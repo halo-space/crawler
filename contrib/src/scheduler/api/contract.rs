@@ -5,11 +5,7 @@ use std::time::Duration;
 use spider::{net, payload, scheduler, trace};
 use tokio::sync::RwLockReadGuard;
 
-use super::{
-    client,
-    error::Error,
-    state::{Action, Operation, Runtime},
-};
+use super::{client, error::Error, state::Runtime};
 
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const TRACE_CACHE_CAPACITY: usize = 128;
@@ -154,35 +150,6 @@ impl Api {
     pub(super) fn invocation_key() -> String {
         uuid::Uuid::now_v7().to_string()
     }
-
-    pub(super) async fn operation_key(
-        &self,
-        action: Action,
-    ) -> Result<(Operation, String), scheduler::Error> {
-        let operation = Operation::new(action);
-        let key = self
-            .runtime
-            .operations
-            .lock()
-            .await
-            .key(operation.clone())?;
-        Ok((operation, key))
-    }
-
-    pub(super) async fn resolve<T>(
-        &self,
-        operation: Operation,
-        result: Result<T, scheduler::Error>,
-    ) -> Result<T, scheduler::Error> {
-        if result
-            .as_ref()
-            .err()
-            .is_none_or(|error| !error.is_transient())
-        {
-            self.runtime.operations.lock().await.remove(&operation);
-        }
-        result
-    }
 }
 
 fn header_value(value: &str) -> bool {
@@ -190,6 +157,10 @@ fn header_value(value: &str) -> bool {
 }
 
 impl scheduler::Scheduler for Api {
+    fn requires_explicit_worker_id(&self) -> bool {
+        true
+    }
+
     fn lease(&self) -> Option<scheduler::Lease> {
         Some(self.lease)
     }
@@ -266,7 +237,6 @@ impl scheduler::Scheduler for Api {
         for worker in workers {
             let _ = worker.task.await;
         }
-        self.runtime.operations.lock().await.clear();
         self.runtime.traces.lock().await.clear();
         Ok(())
     }

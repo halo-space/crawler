@@ -97,6 +97,10 @@ impl Redis {
 }
 
 impl scheduler::Scheduler for Redis {
+    fn requires_explicit_worker_id(&self) -> bool {
+        true
+    }
+
     fn lease(&self) -> Option<scheduler::Lease> {
         Some(self.lease)
     }

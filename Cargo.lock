@@ -342,6 +342,7 @@ dependencies = [
  "spider",
  "thiserror",
  "tokio",
+ "tracing",
  "url",
  "uuid",
 ]

@@ -395,9 +395,9 @@ Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker I
 `fasttrace` 运行期链路追踪仍是独立工作；真实 Browser Downloader 与 HTTP/browser 混合端到端执行
 属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
 `ai::OpenAI` provider，Rules 只保留提示词。
-本地 Memory 运行时默认使用 `worker-1` 和 HTTP 模式。每个分布式 Worker 必须通过
-`with_worker_id(...)` 显式设置稳定且唯一的启动身份；`with_modes(...)` 冻结本次运行的下载能力。
-空 Worker ID 或空 mode 集合会在执行前被拒绝。
+本地 Memory 运行时默认使用 `worker-1` 和 HTTP 模式。分布式 Scheduler 要求 Worker 通过
+`with_worker_id(...)` 显式设置稳定且唯一的启动身份；缺少该配置时 Engine 会拒绝启动。
+`with_modes(...)` 冻结本次运行的下载能力。空 Worker ID 或空 mode 集合同样会在执行前被拒绝。
 
 媒体对象规范化不会下载文件。Item 附件下载规划为独立的 v5 变更；它与 Browser Downloader 并列，
 但不依赖 Browser 实现。

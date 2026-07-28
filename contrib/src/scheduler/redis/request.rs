@@ -217,23 +217,11 @@ impl Redis {
             let value = match serde_json::from_str::<Value>(&encoded) {
                 Ok(value) => value,
                 Err(error) => {
-                    recovery_error.get_or_insert_with(|| scheduler::Error::InvalidRequest {
+                    let error = scheduler::Error::InvalidRequest {
                         id: "unknown".to_string(),
                         message: format!("claimed Redis Request cannot be decoded: {error}"),
-                    });
-                    continue;
-                }
-            };
-            let token = match claim_field(&value, "token") {
-                Ok(token) => token,
-                Err(error) => {
-                    recovery_error.get_or_insert(error);
-                    continue;
-                }
-            };
-            let version = match claim_field(&value, "version") {
-                Ok(version) => version,
-                Err(error) => {
+                    };
+                    warn_recovery(worker_id, "unknown", "unknown", "unknown", &error);
                     recovery_error.get_or_insert(error);
                     continue;
                 }
@@ -244,6 +232,26 @@ impl Redis {
                 .filter(|value| !value.is_empty())
                 .unwrap_or("unknown")
                 .to_string();
+            let token = match claim_field(&value, "token") {
+                Ok(token) => token,
+                Err(error) => {
+                    let version = value
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    warn_recovery(worker_id, &id, "unknown", version, &error);
+                    recovery_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            let version = match claim_field(&value, "version") {
+                Ok(version) => version,
+                Err(error) => {
+                    warn_recovery(worker_id, &id, &token, "unknown", &error);
+                    recovery_error.get_or_insert(error);
+                    continue;
+                }
+            };
             match serde_json::from_value::<Claimed>(value) {
                 Ok(claimed) if key::token(&claimed.id) == token => match Self::restore(&claimed) {
                     Ok(request) => requests.push(request),
@@ -293,6 +301,13 @@ impl Redis {
                 )
                 .await
             {
+                warn_recovery(
+                    worker_id,
+                    &recovery.id,
+                    &recovery.token,
+                    &recovery.version,
+                    &error,
+                );
                 recovery_error.get_or_insert(error);
             }
         }
@@ -523,4 +538,21 @@ fn claim_field(value: &Value, field: &str) -> Result<String, scheduler::Error> {
             id: "unknown".to_string(),
             message: format!("claimed Redis Request has no valid {field}"),
         })
+}
+
+fn warn_recovery(
+    worker_id: &str,
+    id: &str,
+    token: &str,
+    version: &str,
+    error: &dyn std::fmt::Display,
+) {
+    tracing::warn!(
+        request_id = %id,
+        token = %token,
+        version = %version,
+        worker_id = %worker_id,
+        error = %error,
+        "failed to recover damaged Redis Request"
+    );
 }
