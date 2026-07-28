@@ -114,13 +114,28 @@ where
         }
 
         if let Err(error) = self.downloader.open().await {
-            let _ = self.scheduler.close().await;
+            if let Err(close_error) = self.scheduler.close().await {
+                tracing::warn!(
+                    error = %close_error,
+                    "failed to close Scheduler after Downloader open failed"
+                );
+            }
             return Err(crate::Error::Download(error));
         }
 
         if let Err(error) = self.store.open().await {
-            let _ = self.downloader.close().await;
-            let _ = self.scheduler.close().await;
+            if let Err(close_error) = self.downloader.close().await {
+                tracing::warn!(
+                    error = %close_error,
+                    "failed to close Downloader after Item Store open failed"
+                );
+            }
+            if let Err(close_error) = self.scheduler.close().await {
+                tracing::warn!(
+                    error = %close_error,
+                    "failed to close Scheduler after Item Store open failed"
+                );
+            }
             return Err(crate::Error::Item(error));
         }
 

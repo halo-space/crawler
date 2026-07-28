@@ -3,18 +3,16 @@
 [简体中文](README.zh-CN.md) | English
 
 `crawler` is a Rust crawler runtime for code-driven and YAML Rules-driven workloads. The same Engine
-contract supports local execution, durable Redis scheduling, and remote Workers connected through the
-Master API.
+contract supports local execution and durable Redis scheduling.
 
 ## Highlights
 
 - Code mode and YAML Rules mode share the same Spider, Request, Response, Item, Middleware, and Engine.
-- Memory, Redis, and HTTP API Scheduler implementations use one scheduling contract.
+- Memory and Redis Scheduler implementations use one scheduling contract.
 - HTTP downloading includes retries, bounded bodies, redirects, cookies, proxy/TLS settings, and
   deterministic response decoding.
 - CSS selection, deterministic CSS healing, RFC 9535 JSONPath, and explicit OpenAI-compatible JSON-object extraction are built in.
 - Items use an independent Store contract; JSONL is the default local implementation.
-- The Axum/MySQL `master` crate provides Task dispatch and control-plane APIs for remote Workers.
 
 ## Quick Start
 
@@ -43,7 +41,7 @@ engine.start().await?;
 ```
 
 The default runtime uses the in-memory Scheduler and writes Items as JSONL below `./data/items/`.
-Redis and API Schedulers replace only the scheduling dependency; Item persistence remains independently
+Redis replaces only the scheduling dependency; Item persistence remains independently
 replaceable.
 
 ## Workspace
@@ -52,8 +50,7 @@ replaceable.
 | --- | --- |
 | `spider` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
 | `macros` | Spider, handler, and Item derive macros |
-| `contrib` | Redis/API Schedulers and distributed middleware implementations |
-| `master` | Axum/MySQL control plane used by the API Scheduler |
+| `contrib` | Redis Scheduler and distributed middleware implementations |
 | `examples` | Executable code-mode and Rules-mode examples |
 
 ## Documentation
@@ -62,7 +59,6 @@ replaceable.
 - [Architecture and current capabilities](docs/architecture.md)
 - [Code-mode example](examples/src/bin/basic.rs)
 - [Rules example](examples/src/bin/rules.rs) and [Rules configuration](examples/rules-newspaper.yaml)
-- [Master configuration template](master/etc/master-api.yaml)
 
 ## Development
 

@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CRAWLER_MYSQL_URL: mysql://crawler:123456@127.0.0.1:3306/crawler
   CRAWLER_REDIS_URL: redis://127.0.0.1:6379
 
 jobs:
@@ -16,20 +15,6 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_DATABASE: crawler
-          MYSQL_USER: crawler
-          MYSQL_PASSWORD: "123456"
-          MYSQL_ROOT_PASSWORD: "123456"
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -p123456 --silent"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
       redis:
         image: redis/redis-stack-server:7.4.0-v8
         ports:

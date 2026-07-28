@@ -1,2 +1,0 @@
-ALTER TABLE request_completions
-    MODIFY COLUMN error LONGTEXT CHARACTER SET utf8mb4 NULL;

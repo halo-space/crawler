@@ -4,9 +4,8 @@
 
 `crawler` is a Rust crawler runtime. Its default single-process topology uses the in-memory
 Scheduler, HTTP downloader, middleware hooks, async Spider handlers, CSS healing, explicit AI
-selectors, and local JSONL item output. `contrib` also provides Redis and Worker-side HTTP API
-Schedulers for durable multi-Worker queues while preserving the same Engine contract. The `master`
-crate is an Axum/MySQL control plane, not a Scheduler. The runtime includes Task/Trace run seeds,
+selectors, and local JSONL item output. `contrib` provides a Redis Scheduler and distributed
+middleware while preserving the same Engine contract. The runtime includes Task/Trace run seeds,
 capability-aware Scheduler claims, and deterministic response charset decoding.
 
 See the [architecture and feature overview](architecture.md) for the complete runtime model,
@@ -225,109 +224,6 @@ and decoded content, is independently limited to 1 MiB. The provider HTTP body i
 after HTTP content decoding and before `async-openai` buffers it. Each provider attempt has a
 60-second timeout; retries remain controlled by the existing `error_parse` policy.
 
-## API Scheduler and Master
-
-`contrib::scheduler::api::Api` is the Scheduler that a remote Worker passes to
-`Engine::with_scheduler(...)`. It translates the existing Scheduler and Init contracts into the
-Master Worker API; it is not a thin MySQL client. `Api::initializes_run()` is `false`, so a remote
-code Worker consumes runs already dispatched by Master rather than creating a local Trace or calling
-`Spider.start()`. It still needs its local Rust Spider to resolve stable code nodes and run business
-handlers.
-
-```rust
-use contrib::scheduler::api::Api;
-use spider::{engine, net};
-
-let scheduler = Api::new(master_url, worker_token)?
-    .with_namespace("crawler")?;
-
-let mut engine = engine::Engine::new()
-    .with_worker_id("worker-01")
-    .with_modes([net::Mode::Http])
-    .with_scheduler(scheduler)
-    .with_spider(Newspaper::new())
-    .build();
-
-engine.start().await?;
-```
-
-`master` is a separate Axum service backed by private MySQL 8.0.19+ storage. Configure its database
-URL, namespace, Worker token, control token, and runtime limits in the strict YAML template at
-`master/etc/master-api.yaml`, then start it explicitly with that file:
-
-```bash
-cargo run -p master -- --config master/etc/master-api.yaml
-```
-
-Master serves plain HTTP. Production deployments must terminate TLS in a trusted reverse proxy or
-load balancer before traffic reaches this listener; bearer tokens must never cross an untrusted
-network in plaintext.
-
-The checked-in template leaves both tokens empty and will not start until deployment supplies distinct
-credentials. Runtime capacities and retention use integers with fixed units:
-
-```yaml
-api:
-  max_size: 67108864
-history:
-  ttl: 172800
-  cleanup_limit: 1000
-```
-
-`api.max_size` is a byte count and `history.ttl` is a second count. Both fields accept only positive
-YAML integers; strings, including values such as `"64MiB"`, `"48h"`, or `"67108864"`, are rejected.
-
-The control plane is split by responsibility: `master/src/handler/` contains Axum extraction and
-route handlers, `master/src/logic/` contains resource operations, `master/src/svc.rs` owns the
-shared service context, and `master/src/types/` contains the unified Worker/control DTOs. Handlers
-do not call MySQL directly. `master/src/config/` loads and validates runtime YAML, while
-`master/src/store/mysql/` remains the private persistence implementation.
-
-Both sides default to a 64 MiB API message limit. Set a Worker's receive capacity with
-`Api::with_max_response_bytes(...)` before opening it, and set Master's request/response limit with
-YAML `api.max_size` as an integer byte count or use `master::Config::with_api(...)`. Master accepts
-values from 1 KiB through 4 GiB minus one byte. Startup rejects a
-Master limit larger than the Worker's configured capacity, so 64 MiB is a default rather than a
-fixed system-wide limit. The Worker serializes every outbound JSON message into the same bounded
-capacity before network I/O and reuses those immutable bytes across transport retries. Master checks
-the applicable bearer credential and namespace before it reads or parses a request body, so an
-unauthorized malformed or oversized body is rejected as unauthorized rather than consuming the JSON
-body path.
-
-The Worker and control tokens are distinct, valid HTTP bearer credentials. A Worker token may use
-only the Scheduler Worker API. A control token publishes Task definitions and reads the control
-plane through `/v1/control/tasks`, `/v1/control/traces`, `/v1/control/requests`,
-`/v1/control/workers`, and `/v1/control/items`; list responses
-use bounded keyset pagination, and large snapshots or Item data appear only in detail responses.
-Workers never receive direct MySQL access, and Master itself cannot be passed to
-`Engine::with_scheduler(...)`.
-
-Master uses private MySQL connections at `READ COMMITTED`. Namespace and identity columns use
-binary `utf8mb4_0900_bin` collations, so identifiers and idempotency keys remain byte-sensitive.
-
-Master stores a Task as either Rules DSL or serialized code seeds, never Rust handlers. Its Cron
-creates a fresh Trace and initial Requests for up to the configured dispatch limit of due Tasks,
-recovers expired or offline-Worker leases through the normal retry state machine, and does not
-start, stop, or supervise Workers. Task publication performs static validation only; Cron materializes
-the persisted Rules or code seed and queues it directly, without running a Worker's
-`before_scheduler`, Middleware, or Dedup during seed dispatch. A deterministically invalid stored Task
-is quarantined as `failed` with its error exposed through the control API; it does not block later due
-Tasks, and publishing a corrected definition makes it schedulable again. Claim validates candidates
-in 128-row storage pages before assigning one lease timestamp to the accepted result. One call
-quarantines at most 128 invalid candidates and then yields; later claims continue cleanup. Valid-only
-scans may cross pages until the requested count or response capacity is reached. A response includes
-a Trace Snapshot at most
-once per `trace_id`. A Worker fetches and caches an omitted Trace independently, so a transportable Request is
-not rejected merely because its Trace would exceed the combined response limit. Unresolved local Init/Item operation
-keys have a fixed five-minute lifetime from creation. Master requires `history.ttl` of at least
-`max(lease timeout, 5m30s)` so persistent operation and completion replay records outlive that window.
-The configured retention values then drive bounded cleanup of terminal Request, completion, and
-operation history; Item, Trace, Task, and trace-stat retention remain separate work. A remote Worker
-is a finite Engine lifecycle: it registers immediately on first use, only rewrites its modes when they
-change, refreshes a stale heartbeat while it claims work, exits after its compatible work is drained,
-and stops its local heartbeat on Scheduler close. Browser downloading, a direct
-MySQL Scheduler, and `fasttrace` runtime tracing are not part of this topology.
-
 ## Rules Mode
 
 Rules loads task seeds, a request graph, extraction, bindings, and Item Schema from YAML, while the
@@ -504,15 +400,14 @@ cargo doc --workspace --no-deps
 ```
 
 The Scheduler contract receives the Engine-owned Worker ID and supported download modes for
-`next_requests` and pending-work checks; filtering must be atomic with claim. Redis and the
-Worker-side API Scheduler are available persistent Scheduler implementations. Master is the separate
-Axum/MySQL control plane behind the API Scheduler, not another Scheduler implementation. A direct
-MySQL Scheduler and `fasttrace` runtime tracing remain separate work; a real Browser
-Downloader and mixed HTTP/browser end-to-end execution remain v5 work. AI provider configuration is
-already Worker-local: one reusable `ai::OpenAI` provider is injected through `Engine::with_ai`, while
-Rules retain only the prompt. Redis is covered by the shared Scheduler conformance suite.
-Engine defaults to `worker-1` and HTTP mode. `with_worker_id(...)` and `with_modes(...)` replace
-those frozen startup values; an empty Worker ID or mode set is rejected before execution.
+`next_requests` and pending-work checks; filtering must be atomic with claim. Redis is the available
+persistent Scheduler implementation and is covered by the shared Scheduler conformance suite.
+`fasttrace` runtime tracing remains separate work; a real Browser Downloader and mixed HTTP/browser
+end-to-end execution remain v5 work. AI provider configuration is already Worker-local: one reusable
+`ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.
+The local Memory runtime defaults to `worker-1` and HTTP mode. Every distributed Worker must set a
+stable, unique startup identity with `with_worker_id(...)`; `with_modes(...)` freezes its download
+capabilities for that run. An empty Worker ID or mode set is rejected before execution.
 
 Media normalization does not download files. Item attachment downloading is planned as an
 independent v5 change alongside, but not dependent on, the Browser Downloader.

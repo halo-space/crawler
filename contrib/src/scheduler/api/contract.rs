@@ -34,6 +34,11 @@ impl Api {
                 "base_url must not contain a query or fragment".to_string(),
             ));
         }
+        if !base_url.username().is_empty() || base_url.password().is_some() {
+            return Err(Error::Config(
+                "base_url must not contain embedded credentials".to_string(),
+            ));
+        }
         if !base_url.path().ends_with('/') {
             let path = format!("{}/", base_url.path());
             base_url.set_path(&path);

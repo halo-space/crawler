@@ -17,6 +17,8 @@ fn construction_exposes_the_lease_before_open() {
 #[test]
 fn construction_rejects_invalid_transport_configuration() {
     assert!(Api::new("file:///tmp/master", "token").is_err());
+    assert!(Api::new("https://user@master.example.com", "token").is_err());
+    assert!(Api::new("https://user:password@master.example.com", "token").is_err());
     assert!(Api::new("https://master.example.com", " ").is_err());
     assert!(Api::new("https://master.example.com", "token\ninjected").is_err());
     assert!(Api::new("https://master.example.com", "令牌").is_err());

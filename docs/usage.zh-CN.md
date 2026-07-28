@@ -4,9 +4,8 @@
 
 `crawler` 是一个使用 Rust 编写的爬虫运行时。默认单进程形态提供内存调度器、HTTP 下载器、中间件
 生命周期、异步 Spider 处理器、规则模式、CSS Healing、AI Selector 和本地 JSONL 数据输出；`contrib`
-还提供 Redis 与 Worker 侧 HTTP API Scheduler，用同一套 Engine 合同支持持久化的多 Worker 队列。
-`master` crate 是基于 Axum/MySQL 的控制面，不是 Scheduler。运行时已完成 Task/Trace 运行种子、按
-Worker 能力领取 Request，以及确定性的响应字符集解码。
+提供 Redis Scheduler 和分布式中间件，并保持同一套 Engine 合同。运行时已完成 Task/Trace 运行种子、
+按 Worker 能力领取 Request，以及确定性的响应字符集解码。
 
 完整的当前功能、运行模型与扩展边界见[架构与功能说明](architecture.zh-CN.md)。
 
@@ -216,97 +215,6 @@ let mut engine = engine::Engine::new()
 另行限制为 1 MiB。provider HTTP body 在 HTTP 内容解码后、`async-openai` 完整缓冲前限制为
 4 MiB。每次 provider 调用超时为 60 秒；重试继续只使用已有 `error_parse` 策略。
 
-## API Scheduler 与 Master
-
-`contrib::scheduler::api::Api` 是远程 Worker 传给 `Engine::with_scheduler(...)` 的 Scheduler。
-它把既有的 Scheduler 和 Init 合同转换为 Master Worker API，而不是对 MySQL client 的薄包装。
-`Api::initializes_run()` 返回 `false`：远程代码 Worker 只消费 Master 已派发的运行，不会本地创建
-Trace，也不会调用 `Spider.start()`；但它仍需要本地 Rust Spider，用稳定 node 解析代码 handler 并
-执行业务逻辑。
-
-```rust
-use contrib::scheduler::api::Api;
-use spider::{engine, net};
-
-let scheduler = Api::new(master_url, worker_token)?
-    .with_namespace("crawler")?;
-
-let mut engine = engine::Engine::new()
-    .with_worker_id("worker-01")
-    .with_modes([net::Mode::Http])
-    .with_scheduler(scheduler)
-    .with_spider(Newspaper::new())
-    .build();
-
-engine.start().await?;
-```
-
-`master` 是一个独立的 Axum 服务，使用私有 MySQL 8.0.19+ 存储。数据库 URL、namespace、Worker
-token、control token 和运行限制统一写入严格校验的 `master/etc/master-api.yaml`，启动时显式传入该文件：
-
-```bash
-cargo run -p master -- --config master/etc/master-api.yaml
-```
-
-Master 自身监听明文 HTTP。生产环境必须由可信反向代理或负载均衡器在流量到达该监听端口前终止 TLS；
-Bearer token 不能通过不可信网络明文传输。
-
-仓库中的模板将两项 token 留空，部署方填入两套不同凭据前 Master 会拒绝启动。容量和保留时间使用固定单位的整数：
-
-```yaml
-api:
-  max_size: 67108864
-history:
-  ttl: 172800
-  cleanup_limit: 1000
-```
-
-`api.max_size` 的单位固定为字节，`history.ttl` 的单位固定为秒。两个字段只接受 YAML 正整数；
-`"64MiB"`、`"48h"`、`"67108864"` 等字符串均会被拒绝。
-
-控制面按职责分层：`master/src/handler/` 负责 Axum 提取器和路由 handler，
-`master/src/logic/` 负责资源业务操作，`master/src/svc.rs` 持有共享 service context，
-`master/src/types/` 统一 Worker/control DTO。Handler 不直接调用 MySQL；
-`master/src/config/` 负责加载并校验运行时 YAML，`master/src/store/mysql/` 保持为控制面的私有持久化实现。
-
-两端的 API 消息上限默认都是 64 MiB。Worker 在打开前通过
-`Api::with_max_response_bytes(...)` 设置接收容量；Master 通过
-YAML 的 `api.max_size` 字节整数或 `master::Config::with_api(...)` 设置请求/响应上限，允许范围为 1 KiB 到
-4 GiB 减一字节。
-启动时若 Master 上限大于 Worker 已配置的容量会被拒绝，因此 64 MiB 是默认值，不是全局固定上限。
-Worker 会在发起网络请求前，把每条出站 JSON 消息序列化到同一个有界容量中，并在传输重试时复用这份
-不可变 bytes。Master 在读取或解析请求体前先校验对应的 bearer 凭据与 namespace，因此未认证的非法或
-超大 JSON 会先返回未认证错误，不会进入 JSON body 处理路径。
-
-Worker token 与 control token 必须是两套不同且可组成 HTTP Bearer Header 的凭据。Worker token
-只能调用 Scheduler Worker API；control token 用于发布 Task，并通过 `/v1/control/tasks`、
-`/v1/control/traces`、`/v1/control/requests`、`/v1/control/workers` 和 `/v1/control/items` 读取控制面状态。
-列表使用有上限的 keyset 分页，
-大体积 Snapshot 与 Item data 只在详情响应返回。Worker 不会获得 MySQL 直连权限，Master 本身也
-不能传给 `Engine::with_scheduler(...)`。
-
-Master 的私有 MySQL 连接使用 `READ COMMITTED` 隔离级别；namespace 与身份类列使用二进制
-`utf8mb4_0900_bin` collation，保证标识符和幂等 key 按字节区分。
-
-Master 把 Task 保存为 Rules DSL 或序列化的代码 seeds，从不保存 Rust handler。它的 Cron 每次最多为
-配置的派发上限内的到期 Task 创建新的 Trace 和初始 Request，通过正常重试状态机恢复过期租约或离线
-Worker 的租约，但不启动、停止或监督 Worker。Task 发布只做静态校验；Cron 直接将保存的 Rules 或
-代码 seed 实例化并入队，seed 派发期间不会执行任何 Worker 的 `before_scheduler`、Middleware 或 Dedup。
-确定性损坏的持久化 Task 会被隔离为 `failed`，并通过 control API 暴露错误；它不会阻塞后续到期 Task，
-重新发布修正后的定义即可再次进入调度。Claim 按 128 行的存储页完成候选校验，再为接受结果统一生成
-租约时间；单次调用最多隔离 128 条非法候选后让出，后续领取继续清理。全部合法时可以持续跨页，直到达到
-请求数量或响应容量。
-一个响应对同一
-`trace_id` 最多内嵌一次 Trace Snapshot。Worker 会独立读取并缓存省略的 Trace，因此不能仅因 Request
-与 Trace 合并后超过响应上限，就把本可单独传输的 Request 判为坏数据。
-未决的本地 Init/Item operation key 从创建起固定保留五分钟；Master 要求 `history.ttl` 至少为
-`max(lease timeout, 5m30s)`，保证持久化的 operation 与 completion 重放记录覆盖该窗口。配置中的保留期
-参数随后会驱动终态 Request、completion 和 operation 历史的有上限清理；Item、Trace、Task 和
-trace-stat 的保留仍是独立工作。远程 Worker 是有限生命周期的 Engine：首次使用立即注册，只在能力
-变化时重写 modes，在领取期间刷新过期心跳，兼容工作排空后退出，Scheduler close 时停止本地心跳。
-Browser 下载、直接 MySQL Scheduler 与
-`fasttrace` 运行期链路追踪不属于这套拓扑。
-
 ## 规则模式
 
 规则模式从 YAML 加载任务入口、请求图、解析规则、数据绑定和 Item Schema，但运行时仍装载一份
@@ -483,12 +391,12 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 - 本地 JSONL Item 输出
 
 Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker ID 和支持的下载模式，能力筛选
-必须和领取原子完成。Redis 与 Worker 侧 API Scheduler 是当前可用的持久化 Scheduler 实现；Master
-是 API Scheduler 背后的独立 Axum/MySQL 控制面，不是另一个 Scheduler 实现。直接 MySQL Scheduler
-和 `fasttrace` 运行期链路追踪仍是独立工作；真实 Browser Downloader 与 HTTP/browser 混合
-端到端执行属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个
-可复用的 `ai::OpenAI` provider，Rules 只保留提示词。Redis 已通过共享 Scheduler 一致性测试。
-Engine 默认使用 `worker-1` 和 HTTP 模式；`with_worker_id(...)` 与 `with_modes(...)` 可替换这些启动时冻结的值，
+必须和领取原子完成。Redis 是当前可用的持久化 Scheduler 实现，并已通过共享 Scheduler 一致性测试。
+`fasttrace` 运行期链路追踪仍是独立工作；真实 Browser Downloader 与 HTTP/browser 混合端到端执行
+属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
+`ai::OpenAI` provider，Rules 只保留提示词。
+本地 Memory 运行时默认使用 `worker-1` 和 HTTP 模式。每个分布式 Worker 必须通过
+`with_worker_id(...)` 显式设置稳定且唯一的启动身份；`with_modes(...)` 冻结本次运行的下载能力。
 空 Worker ID 或空 mode 集合会在执行前被拒绝。
 
 媒体对象规范化不会下载文件。Item 附件下载规划为独立的 v5 变更；它与 Browser Downloader 并列，

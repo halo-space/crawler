@@ -4,6 +4,7 @@ mod key;
 mod request;
 mod script;
 mod settle;
+mod trace;
 mod validate;
 
 pub use contract::Redis;
