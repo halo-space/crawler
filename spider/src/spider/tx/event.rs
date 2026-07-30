@@ -76,18 +76,27 @@ impl Target {
 
 pub(crate) struct Event {
     kind: Kind,
+    parent: Option<crate::trace::RuntimeContext>,
     permit: Permit,
 }
 
 impl Event {
     pub(super) fn new(kind: Kind, permit: Permit) -> Self {
-        Self { kind, permit }
+        Self {
+            kind,
+            parent: crate::trace::current_context(),
+            permit,
+        }
     }
 
-    pub(crate) fn accept(self) -> Kind {
-        let Self { kind, permit } = self;
+    pub(crate) fn accept(self) -> (Kind, Option<crate::trace::RuntimeContext>) {
+        let Self {
+            kind,
+            parent,
+            permit,
+        } = self;
         drop(permit);
-        kind
+        (kind, parent)
     }
 }
 
@@ -100,4 +109,60 @@ pub(crate) enum Kind {
         items: Vec<Box<dyn item::Item>>,
         context: Option<Context>,
     },
+}
+
+impl Kind {
+    pub(crate) fn output(&self) -> (&'static str, usize) {
+        match self {
+            Self::Requests { requests, .. } => ("output.requests", requests.len()),
+            Self::Items { items, .. } => ("output.items", items.len()),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "runtime-tracing"))]
+mod tests {
+    use fastrace::future::FutureExt as _;
+    use fastrace::prelude::{Span, SpanContext};
+
+    use super::*;
+
+    async fn permit() -> Permit {
+        Capacity::new(1).acquire().await
+    }
+
+    #[tokio::test]
+    async fn event_captures_the_active_runtime_trace() {
+        let root_context = SpanContext::random();
+        let root = Span::root("test.request", root_context);
+        let event = async {
+            Event::new(
+                Kind::Requests {
+                    requests: Vec::new(),
+                    context: None,
+                },
+                permit().await,
+            )
+        }
+        .in_span(root)
+        .await;
+
+        let (_, captured) = event.accept();
+        let captured = captured.expect("active runtime context");
+        assert_eq!(captured.trace_id, root_context.trace_id);
+    }
+
+    #[tokio::test]
+    async fn detached_event_does_not_create_a_runtime_trace() {
+        let event = Event::new(
+            Kind::Requests {
+                requests: Vec::new(),
+                context: None,
+            },
+            permit().await,
+        );
+
+        let (_, captured) = event.accept();
+        assert!(captured.is_none());
+    }
 }

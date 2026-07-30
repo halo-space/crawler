@@ -32,6 +32,7 @@ pub struct Runtime<S, D, E, N = engine::NoInit, O = crate::item::Jsonl> {
     concurrency: usize,
     claim_limit: Option<usize>,
     event_limit: usize,
+    tracing: crate::trace::Tracing,
     worker: Worker,
     init: N,
 }
@@ -52,6 +53,7 @@ where
             concurrency: MAX_REQUEST_CONCURRENCY,
             claim_limit: None,
             event_limit: MAX_EVENTS,
+            tracing: crate::trace::Tracing::default(),
             worker: setup.worker,
             init: engine::NoInit,
         }
@@ -71,9 +73,16 @@ impl<S, D, E, N, O> Runtime<S, D, E, N, O> {
             concurrency: self.concurrency,
             claim_limit: self.claim_limit,
             event_limit: self.event_limit,
+            tracing: self.tracing,
             worker: self.worker,
             init,
         }
+    }
+
+    /// Selects runtime tracing for subsequent Request execution.
+    pub fn with_tracing(mut self, tracing: crate::trace::Tracing) -> Self {
+        self.tracing = tracing;
+        self
     }
 }
 
@@ -199,6 +208,7 @@ where
             engine::actor::Config::new(
                 self.concurrency,
                 self.claim_limit.unwrap_or(self.concurrency),
+                self.tracing,
                 self.worker.clone(),
             ),
         );

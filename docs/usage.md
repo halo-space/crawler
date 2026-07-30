@@ -108,8 +108,9 @@ There is no separate `select` option. Media fields are declared with
 before validator processes `item.schema`.
 
 Code mode parses HTML through `response.css()?` and uses the native `scrape_core::Soup` and `Tag`
-APIs. Deterministic CSS healing is opt-in and scans the current document only; it does not persist
-node fingerprints or invoke AI. Rules mode enables the same implementation with:
+APIs. Healing is a CSS-only, opt-in capability that scans the current HTML document; it does not
+persist node fingerprints, apply to JSONPath, or invoke AI. Rules mode enables the same CSS
+implementation with:
 
 ```yaml
 args:
@@ -183,7 +184,7 @@ field-validation contract.
 For example, `$.data.diff[*].f12` selects security codes from the EastMoney quote response. A valid miss
 continues to the next extractor. One match remains its JSON value and multiple matches become an
 array under the existing Rules cardinality contract. Invalid JSON and invalid JSONPath expressions
-are errors; JSON selection has no Healing or AI fallback.
+are errors. There is no generic Healing stage: JSON selection has no Healing or AI fallback.
 
 AI is an independent extractor that sends the current Response text and `expr` prompt through an
 OpenAI-compatible Chat Completion endpoint. Its result is strictly one JSON object:
@@ -390,19 +391,56 @@ meta declaration within the first 1024 bytes for HTML or a missing MIME type, th
 sequences use Unicode replacement semantics; the runtime performs no statistical charset guessing.
 `Response::json<T>()` uses the same decoded text path.
 
+## Runtime Tracing
+
+Enable the `runtime-tracing` Cargo feature and opt in per Engine run:
+
+```rust
+fastrace::set_reporter(
+    fastrace::collector::ConsoleReporter,
+    fastrace::collector::Config::default(),
+);
+
+let mut engine = spider::engine::Engine::new()
+    .with_spider(BasicSpider::new())
+    .build()
+    .with_tracing(spider::trace::Tracing::all());
+
+engine.start().await?;
+fastrace::flush();
+```
+
+`Tracing::sample(ratio)?` selects Requests deterministically with a ratio in `0.0..=1.0`.
+Configuration is frozen for that run. Every sampled Request owns an independent
+`crawler.request` root; its properties include bounded business identifiers, but the fastrace
+TraceId never replaces or persists as crawler `trace_id`. Identity values longer than 128 bytes or
+containing control characters are represented by a stable SHA-256 token in span properties.
+
+The executable owns the process-global Reporter and calls `fastrace::flush()` during its shutdown.
+Engine works normally without a Reporter, when unsampled, and when the feature is disabled. Runtime
+context is preserved across awaited Tx Request and Item output. Only Worker-side API Scheduler calls
+to the trusted Master endpoint receive W3C `traceparent`; crawled HTTP targets, AI providers, Redis,
+Payloads, snapshots, bodies, Items, prompts, credentials, full URLs, and raw errors do not receive or
+persist tracing context.
+
 ## Development
 
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
+cargo test --workspace --all-targets --features runtime-tracing
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --features runtime-tracing -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
 The Scheduler contract receives the Engine-owned Worker ID and supported download modes for
 `next_requests` and pending-work checks; filtering must be atomic with claim. Redis is the available
 persistent Scheduler implementation and is covered by the shared Scheduler conformance suite.
-`fasttrace` runtime tracing remains separate work; a real Browser Downloader and mixed HTTP/browser
+The Worker-side `contrib::scheduler::api::Api` adapter is also implemented. Its corresponding Master
+service is not part of this workspace: this repository maintains only the Master feature and protocol
+design, while another project owns the server, database, Cron, Control API, and frontend.
+Optional `fastrace` runtime tracing is implemented; a real Browser Downloader and mixed HTTP/browser
 end-to-end execution remain v5 work. AI provider configuration is already Worker-local: one reusable
 `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.
 The local Memory runtime defaults to `worker-1` and HTTP mode. Distributed Scheduler

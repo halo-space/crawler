@@ -106,8 +106,8 @@ Rules 模式中，extractor 表达式直接决定结果数量：零个匹配为 
 `item.schema` 前将其规范化为固定 media object 数组。
 
 代码模式通过 `response.css()?` 获得原生 `scrape_core::Soup`，业务代码继续直接使用 Soup 和
-Tag。确定性 CSS Healing 需要显式开启，只扫描当前文档，不保存历史节点指纹，也不会调用 AI。
-Rules 模式使用同一实现：
+Tag。Healing 只是 CSS 专属且需要显式开启的能力，只扫描当前 HTML 文档，不保存历史节点指纹，
+不作用于 JSONPath，也不会调用 AI。Rules 模式使用同一套 CSS 实现：
 
 ```yaml
 args:
@@ -177,7 +177,7 @@ Item edge 会把解析结果交给 Rust Spider 注册的 `save` Item 处理函�
 
 例如 `$.data.diff[*].f12` 会从东方财富行情响应中选择证券代码。合法路径未命中时继续当前字段的下一个 extractor；
 一个匹配保留原始 JSON 值，多个匹配按现有 Rules 数量合同折叠为数组。正文非法或 JSONPath 非法都
-直接报错；JSON 选择没有 Healing，也不会触发 AI fallback。
+直接报错。框架不存在通用 Healing 阶段；JSON 选择没有 Healing，也不会触发 AI fallback。
 
 AI 是与 CSS 并列的独立 extractor。它通过 OpenAI-compatible Chat Completion API 发送当前
 Response 文本和 `expr` 提示词，结果严格限定为一个 JSON 对象：
@@ -377,6 +377,35 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 1024 bytes 内的 HTML meta，最后回退 UTF-8。非法字节使用 Unicode replacement 语义，运行时不做
 统计字符集猜测；`Response::json<T>()` 复用同一条文本解码路径。
 
+## 运行期追踪
+
+启用 `runtime-tracing` Cargo feature，并在每次 Engine 运行时显式开启：
+
+```rust
+fastrace::set_reporter(
+    fastrace::collector::ConsoleReporter,
+    fastrace::collector::Config::default(),
+);
+
+let mut engine = spider::engine::Engine::new()
+    .with_spider(BasicSpider::new())
+    .build()
+    .with_tracing(spider::trace::Tracing::all());
+
+engine.start().await?;
+fastrace::flush();
+```
+
+`Tracing::sample(ratio)?` 接受 `0.0..=1.0`，并确定性选择 Request；配置在本次运行启动后冻结。
+每条被采样 Request 都有独立的 `crawler.request` 根 span。span 可以携带有界的业务标识，但
+fastrace TraceId 永远不会替代业务 `trace_id`，也不会写入持久化对象。超过 128 bytes 或包含控制
+字符的标识会在 span 属性中转换成稳定的 SHA-256 标记。
+
+可执行程序负责安装进程级 Reporter，并在自身关闭阶段调用 `fastrace::flush()`。未安装 Reporter、
+未采样或未启用 feature 都不能改变 Engine 行为。运行期上下文会跨越 awaited Tx Request/Item 输出；
+只有 Worker 侧 API Scheduler 访问可信 Master 时传播 W3C `traceparent`。目标站点 HTTP 请求、AI
+provider、Redis、Payload、快照、正文、Item、prompt、凭据、完整 URL 和原始错误均不接收或保存该上下文。
+
 ## 当前范围
 
 当前核心运行时包含：
@@ -392,7 +421,9 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 
 Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker ID 和支持的下载模式，能力筛选
 必须和领取原子完成。Redis 是当前可用的持久化 Scheduler 实现，并已通过共享 Scheduler 一致性测试。
-`fasttrace` 运行期链路追踪仍是独立工作；真实 Browser Downloader 与 HTTP/browser 混合端到端执行
+Worker 侧 `contrib::scheduler::api::Api` 适配器也已经实现；对应 Master 服务不属于这个 workspace。
+本仓库只维护 Master 功能和协议设计，服务端、数据库、Cron、Control API 与前端由独立项目负责。
+可选 `fastrace` 运行期链路追踪已经实现；真实 Browser Downloader 与 HTTP/browser 混合端到端执行
 属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
 `ai::OpenAI` provider，Rules 只保留提示词。
 本地 Memory 运行时默认使用 `worker-1` 和 HTTP 模式。分布式 Scheduler 要求 Worker 通过
@@ -410,6 +441,8 @@ Scheduler 合同由 Engine 向 `next_requests` 与待处理判断传入 Worker I
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
+cargo test --workspace --all-targets --features runtime-tracing
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --features runtime-tracing -- -D warnings
 cargo doc --workspace --no-deps
 ```

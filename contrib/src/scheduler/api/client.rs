@@ -244,6 +244,10 @@ impl Client {
                 .request(method.clone(), url.clone())
                 .bearer_auth(&self.token)
                 .header("X-Crawler-Namespace", &self.namespace);
+            #[cfg(feature = "runtime-tracing")]
+            if let Some(traceparent) = traceparent() {
+                request = request.header("traceparent", traceparent);
+            }
             if let Some(operation_key) = operation_key {
                 request = request.header("Idempotency-Key", operation_key);
             }
@@ -369,6 +373,12 @@ async fn retry(attempt: usize) {
 
 fn retryable(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+#[cfg(feature = "runtime-tracing")]
+fn traceparent() -> Option<String> {
+    fastrace::collector::SpanContext::current_local_parent()
+        .map(|context| context.encode_w3c_traceparent())
 }
 
 #[cfg(test)]

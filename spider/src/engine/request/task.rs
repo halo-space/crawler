@@ -59,16 +59,25 @@ where
     let stats = Arc::new(stats::Delta::default());
     stats.total(request.node_key(), 1);
     let execution = async {
-        let result = AssertUnwindSafe(engine::request::execute(
-            &request,
-            downloader,
-            executor,
-            registry,
-            stats.clone(),
-        ))
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|panic| Err(crate::Error::message(panic_message(panic))));
+        let execution = async {
+            AssertUnwindSafe(engine::request::execute(
+                &request,
+                downloader,
+                executor,
+                registry,
+                stats.clone(),
+            ))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| Err(crate::Error::message(panic_message(panic))))
+        };
+        let result = crate::trace::operation(
+            "crawler.execute",
+            None,
+            execution,
+            crate::trace::error_class,
+        )
+        .await;
 
         let mut payload = payload::Payload::for_request(&request, request.leased_by.clone());
         payload.start_time = Some(start_time);
@@ -147,7 +156,7 @@ async fn retry_success<S: scheduler::Scheduler>(
     scheduler: &S,
     payload: &payload::Payload,
 ) -> Result<(), crate::Error> {
-    retry(|| scheduler.success(payload))
+    retry("scheduler.success", || scheduler.success(payload))
         .await
         .map_err(crate::Error::Scheduler)
 }
@@ -156,7 +165,7 @@ async fn retry_failure<S: scheduler::Scheduler>(
     scheduler: &S,
     payload: &payload::Payload,
 ) -> Result<(), crate::Error> {
-    retry(|| scheduler.failure(payload))
+    retry("scheduler.failure", || scheduler.failure(payload))
         .await
         .map_err(crate::Error::Scheduler)
 }
@@ -165,22 +174,32 @@ async fn retry_ack<S: scheduler::Scheduler>(
     scheduler: &S,
     payload: &payload::Payload,
 ) -> Result<(), scheduler::Error> {
-    retry(|| scheduler.ack(payload)).await
+    retry("scheduler.ack", || scheduler.ack(payload)).await
 }
 
 async fn retry_release<S: scheduler::Scheduler>(
     scheduler: &S,
     payload: &payload::Payload,
 ) -> Result<(), scheduler::Error> {
-    retry(|| scheduler.release(payload)).await
+    retry("scheduler.release", || scheduler.release(payload)).await
 }
 
-async fn retry<Fut>(mut operation: impl FnMut() -> Fut) -> Result<(), scheduler::Error>
+async fn retry<Fut>(
+    name: &'static str,
+    mut operation: impl FnMut() -> Fut,
+) -> Result<(), scheduler::Error>
 where
     Fut: std::future::Future<Output = Result<(), scheduler::Error>>,
 {
     for attempt in 0..MAX_ATTEMPTS {
-        match operation().await {
+        match crate::trace::operation(
+            name,
+            Some(attempt + 1),
+            operation(),
+            crate::trace::scheduler_error_class,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(error) if error.is_transient() && attempt + 1 < MAX_ATTEMPTS => {
                 tokio::time::sleep(RETRY_DELAY).await;

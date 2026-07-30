@@ -8,11 +8,14 @@ contract supports local execution and durable Redis scheduling.
 ## Highlights
 
 - Code mode and YAML Rules mode share the same Spider, Request, Response, Item, Middleware, and Engine.
-- Memory and Redis Scheduler implementations use one scheduling contract.
+- Memory and Redis Scheduler implementations, plus the Worker-side API Scheduler adapter, use one
+  scheduling contract.
 - HTTP downloading includes retries, bounded bodies, redirects, cookies, proxy/TLS settings, and
   deterministic response decoding.
 - CSS selection, deterministic CSS healing, RFC 9535 JSONPath, and explicit OpenAI-compatible JSON-object extraction are built in.
 - Items use an independent Store contract; JSONL is the default local implementation.
+- Optional `fastrace` instrumentation traces each Request independently without changing business
+  `trace_id` or crawler control flow.
 
 ## Quick Start
 
@@ -50,7 +53,7 @@ replaceable.
 | --- | --- |
 | `spider` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
 | `macros` | Spider, handler, and Item derive macros |
-| `contrib` | Redis Scheduler and distributed middleware implementations |
+| `contrib` | Redis Scheduler, the Worker-side API Scheduler adapter, and distributed middleware implementations |
 | `examples` | Executable code-mode and Rules-mode examples |
 
 ## Documentation
@@ -65,6 +68,7 @@ replaceable.
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
+cargo test --workspace --all-targets --features runtime-tracing
 cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```

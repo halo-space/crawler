@@ -85,28 +85,40 @@ async fn refresh_until<S>(
 where
     S: scheduler::Scheduler,
 {
+    let mut attempt = 1;
     loop {
         let started_at = tokio::time::Instant::now();
         if started_at >= deadline {
             return Err(scheduler::Error::LeaseExpired(payload.id.clone()));
         }
-        let result = tokio::time::timeout_at(deadline, scheduler.refresh_lease(payload)).await;
+        let refresh = async {
+            tokio::time::timeout_at(deadline, scheduler.refresh_lease(payload))
+                .await
+                .unwrap_or_else(|_| Err(scheduler::Error::LeaseExpired(payload.id.clone())))
+        };
+        let result = crate::trace::operation(
+            "scheduler.refresh_lease",
+            Some(attempt),
+            refresh,
+            crate::trace::scheduler_error_class,
+        )
+        .await;
         match result {
-            Ok(Ok(())) => return Ok(started_at),
-            Ok(Err(error)) if error.is_ownership_loss() => return Err(error),
-            Ok(Err(error)) if error.is_transient() => {
+            Ok(()) => return Ok(started_at),
+            Err(error) if error.is_ownership_loss() => return Err(error),
+            Err(error) if error.is_transient() => {
                 let now = tokio::time::Instant::now();
                 if now >= deadline {
                     return Err(scheduler::Error::LeaseExpired(payload.id.clone()));
                 }
+                attempt += 1;
                 let retry_at = now
                     .checked_add(RETRY_DELAY.min(interval))
                     .unwrap_or(deadline)
                     .min(deadline);
                 tokio::time::sleep_until(retry_at).await;
             }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Err(scheduler::Error::LeaseExpired(payload.id.clone())),
+            Err(error) => return Err(error),
         }
     }
 }

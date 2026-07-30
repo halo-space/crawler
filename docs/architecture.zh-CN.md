@@ -12,7 +12,7 @@
 | --- | --- |
 | `spider` | 核心运行时、公共数据对象、扩展合同，以及默认 Memory Scheduler 和 HTTP Downloader |
 | `macros` | `#[spider]` 过程宏；生成代码模式 Spider 的构造、node 注册和分发连接代码 |
-| `contrib` | 基于 Redis 的可替换外部 Scheduler 与 Middleware 实现 |
+| `contrib` | Redis Scheduler、Worker 侧 API Scheduler 适配器与分布式 Middleware 实现 |
 | `examples` | 可运行的代码模式和 Rules 模式示例 |
 
 ### 1.1 能力状态
@@ -26,17 +26,26 @@
 | Response 字符集解码 | 已实现 | `Response::text()` 按 BOM/header/HTML meta/UTF-8 确定性选择，并保留 HTTP 内容解码后 bytes |
 | Browser Downloader | 未实现 | 当前为明确返回 `UnsupportedMode("browser")` 的占位实现，计划在 v5 完成 |
 | CSS Selector | 已实现 | `Response::css()` 返回原生 `scrape_core::Soup` |
-| CSS Healing | 已实现 | 普通 CSS 失败后执行确定性全文档候选评分；需要显式开启 |
-| Regex 与 JSON | 已实现 | Regex 选择、完整正文 `Response::json<T>()`，以及代码与 Rules 共用的 RFC 9535 JSONPath 选择 |
+| CSS Healing | 已实现 | CSS 专属；普通 CSS 未命中后执行确定性全文档候选评分，需要显式开启 |
+| Regex 与 JSON | 已实现 | Regex 选择、完整正文 `Response::json<T>()`，以及不带 Healing 的精确 RFC 9535 JSONPath 选择 |
 | AI Selector | 已实现 | 独立的 OpenAI-compatible JSON 对象提取，不属于 CSS Healing fallback |
 | AI 运行时配置 | 已实现 | 通过 `Engine::with_ai` 注入一个 Worker 本地可复用的 `ai::OpenAI` provider；provider 配置不进入 Rules 或 Trace Snapshot |
 | Middleware | 已实现 | 生命周期 Registry、Worker 本地 Memory 实现，以及可选 RedisBloom Dedup 和共享 Redis RateLimit |
 | Item Store | 已实现 | 独立的 `open / close / submit(&Payload)` 持久化合同；默认 JSONL 输出与 Jsonl 自管失败快照；附件下载计划在 v5 实现 |
 | Worker 能力领取 | 已实现 | Memory 只在当前 Worker 配置的 Request mode 范围内领取并判断待处理工作 |
 | Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；按 namespace 隔离，完整实现 Request Scheduler/Init 合同与 Lua 原子转换 |
-| 运行期链路追踪 | 规划中 | v4 使用 `fasttrace`；与业务 `trace_id` 是两个概念 |
+| API Scheduler 适配器 | 已实现 | Worker 侧 `contrib::scheduler::api::Api`；Master 服务只在本仓库设计，在独立项目实现 |
+| 运行期链路追踪 | 已实现 | 可选的逐 Request `fastrace` 根链路与有界生命周期 span；不等于业务 `trace_id` |
 
 XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护不完整的 XPath 子集。
+Healing 不是通用 selector 阶段。目前只有 CSS 提供 Healing；Regex 与 JSON 保持各自的精确选择
+语义，XML selector 当前也没有实现。
+
+crawler workspace 不包含、也不实现 Master 服务。本仓库只负责 Worker 侧 API Scheduler 适配器和
+双方使用的爬虫合同；本地 `docs/master/` 只记录 Master 的功能、协议、数据库和前端设计。Master
+服务端、Migration、Cron、Control API 与管理前端均在独立项目实现和验证。
+Master-backed `item::Store` 不属于 API Scheduler，也不是 API Scheduler 的“部分完成”能力；它只
+能作为后续单独确认的可选 Store 适配器。
 
 ## 2. 核心设计原则
 
@@ -228,6 +237,20 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 改变了工作状态，Actor 会把该结果视为过期，并在退出前重新领取确认。
 
 这一条件保证列表页产生的详情 Request、延迟到达的 Item，以及 handler 内克隆 Tx 后产生的输出都不会被提前丢弃。
+
+### 5.3 运行期追踪
+
+可选 `runtime-tracing` feature 为每条被采样且已领取的 Request 建立独立 `crawler.request` 根 span。
+框架不建立 Engine 级根链路，避免常驻 Worker 形成一条无限增长的 trace。采样由 Request ID、version
+和 Worker ID 确定性决定。根 span 只把有界业务标识作为属性；fastrace TraceId 只是运行期观测数据，
+不会替代业务 `trace_id`，也不会进入 Request、Payload、Item、Trace Snapshot 或 DSL。超过 128
+bytes 或包含控制字符的标识在追踪边界转换成稳定的 SHA-256 标记。
+
+固定名称的子 span 覆盖 ack、执行、Middleware、下载、解析、Tx Request/Item 输出、Store 提交、
+续租、release 与最终结算。异步上下文跟随 Request task 和 awaited Tx 输出 task。可执行程序负责安装
+进程级 fastrace Reporter 并在自身关闭时 flush；追踪不能让爬虫业务失败。W3C `traceparent` 仅传播给
+Worker 侧 API Scheduler 访问的可信 Master；目标站点 Downloader、AI provider 和 Redis 不接收框架
+生成的追踪上下文，span 也不记录正文、凭据、完整 URL 或原始错误。
 
 ## 6. Scheduler 合同与 Memory 实现
 
@@ -748,6 +771,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `spider/src/engine/request/task.rs` | 单条 Request 的 ack、租约维护和最终结算 |
 | `spider/src/engine/admission.rs` | Request 输出进入 Scheduler 前统一执行 `before_scheduler` 准入 |
 | `spider/src/engine/request.rs` | 单条已领取 Request 的下载、Middleware、Worker 本地重试与解析生命周期 |
+| `spider/src/trace/tracing.rs` | 运行期追踪配置、确定性采样、有界 span helper 与错误分类 |
 | `spider/src/engine/event/request.rs` | 处理 Tx 产生的 Request 输出 |
 | `spider/src/engine/event/item.rs` | 执行 Item Middleware、Store 重试与 `error_item` 编排 |
 | `spider/src/spider/tx/identity.rs` | 为当前 Request 输出派生可重放的稳定 ID |
@@ -810,7 +834,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 ### 版本边界
 
 - v3：按 Worker 能力范围原子领取 Request；确定性响应字符集解码，以及基于 fixture 的更完整页面回归。这些合同均已实现。
-- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler、RedisBloom Dedup、共享 Redis RateLimit，以及 Engine 级 Worker 本地 `ai::OpenAI` provider 注入均已实现。`fasttrace` 运行期链路追踪仍是独立工作。
+- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler、RedisBloom Dedup、共享 Redis RateLimit、Engine 级 Worker 本地 `ai::OpenAI` provider 注入，以及可选的逐 Request `fastrace` 运行期追踪均已实现。
 - v5：真实 Browser Downloader、HTTP/browser 混合端到端 Engine 验收，以及独立的 Item 附件下载。附件下载和 Browser 下载是互不依赖的两个交付项；按能力领取的语义仍属于 v3 合同。
 
 这些能力必须沿用当前核心合同：
@@ -820,7 +844,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 - 替换 Item Store 不能改变 Request 调度、租约或结算；替换 Scheduler 也不能替换或重新配置 Store；
 - Worker 能力筛选必须在 Scheduler 领取时原子完成，不能先领取不兼容 Request 再由 Downloader 丢弃；
 - Browser 必须实现现有 `Download` 合同，输出同一个 `Response` 模型；
-- `fasttrace` 的 span context 只用于运行期观测，不能替代业务 `task_id / trace_id`。
+- `fastrace` 的 span context 只用于运行期观测，不能替代业务 `task_id / trace_id`。
 
 ### 当前明确不做
 

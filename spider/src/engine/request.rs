@@ -20,10 +20,19 @@ where
 {
     require_snapshot(claimed)?;
 
-    let mut request = match registry
-        .before_download(claimed.clone())
-        .await
-        .map_err(crate::Error::Middleware)?
+    let before_download = async {
+        registry
+            .before_download(claimed.clone())
+            .await
+            .map_err(crate::Error::Middleware)
+    };
+    let mut request = match crate::trace::operation(
+        "middleware.before_download",
+        None,
+        before_download,
+        crate::trace::error_class,
+    )
+    .await?
     {
         middleware::registry::Output::Continue(request) => request,
         middleware::registry::Output::Skip { .. } => {
@@ -47,7 +56,22 @@ where
         .map_err(crate::Error::Middleware)?;
     let mut download_attempt = 0;
     let response = loop {
-        match downloader.fetch(request.clone()).await {
+        let fetch = async {
+            crate::trace::record_http_method(&request.method);
+            let result = downloader.fetch(request.clone()).await;
+            if let Ok(response) = &result {
+                crate::trace::record_http_status(response.status);
+            }
+            result
+        };
+        match crate::trace::operation(
+            "downloader.fetch",
+            Some(download_attempt + 1),
+            fetch,
+            |_| "download",
+        )
+        .await
+        {
             Ok(response) => break response,
             Err(downloader::Error::DisallowedRedirect(_)) => {
                 stats.filter(claimed.node_key(), 1);
@@ -59,20 +83,34 @@ where
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                registry
-                    .error_download(&request, &error.to_string())
-                    .await
-                    .map_err(crate::Error::Middleware)?;
+                let message = error.to_string();
+                crate::trace::operation(
+                    "middleware.error_download",
+                    None,
+                    registry.error_download(&request, &message),
+                    |_| "middleware",
+                )
+                .await
+                .map_err(crate::Error::Middleware)?;
                 stats.download(claimed.node_key(), 1);
                 return Err(crate::Error::Download(error));
             }
         }
     };
 
-    let response = match registry
-        .after_download(response)
-        .await
-        .map_err(crate::Error::Middleware)?
+    let after_download = async {
+        registry
+            .after_download(response)
+            .await
+            .map_err(crate::Error::Middleware)
+    };
+    let response = match crate::trace::operation(
+        "middleware.after_download",
+        None,
+        after_download,
+        crate::trace::error_class,
+    )
+    .await?
     {
         middleware::registry::Output::Continue(response) => response,
         middleware::registry::Output::Skip { .. } => {
@@ -81,10 +119,19 @@ where
         }
     };
 
-    let response = match registry
-        .before_parse(response)
-        .await
-        .map_err(crate::Error::Middleware)?
+    let before_parse = async {
+        registry
+            .before_parse(response)
+            .await
+            .map_err(crate::Error::Middleware)
+    };
+    let response = match crate::trace::operation(
+        "middleware.before_parse",
+        None,
+        before_parse,
+        crate::trace::error_class,
+    )
+    .await?
     {
         middleware::registry::Output::Continue(response) => response,
         middleware::registry::Output::Skip { .. } => {
@@ -99,9 +146,14 @@ where
     let mut parse_attempt = 0;
     loop {
         let error_response = response.clone();
-        let parsing = tx::scope(claimed, stats.clone(), async {
-            executor.parse(request.clone(), response.clone()).await
-        })
+        let parsing = crate::trace::operation(
+            "executor.parse",
+            Some(parse_attempt + 1),
+            tx::scope(claimed, stats.clone(), async {
+                executor.parse(request.clone(), response.clone()).await
+            }),
+            crate::trace::error_class,
+        )
         .await;
 
         match parsing {
@@ -123,10 +175,15 @@ where
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                registry
-                    .error_parse(&error_response, &error.to_string())
-                    .await
-                    .map_err(crate::Error::Middleware)?;
+                let message = error.to_string();
+                crate::trace::operation(
+                    "middleware.error_parse",
+                    None,
+                    registry.error_parse(&error_response, &message),
+                    |_| "middleware",
+                )
+                .await
+                .map_err(crate::Error::Middleware)?;
                 return Err(error);
             }
             Err(error) => return Err(error),

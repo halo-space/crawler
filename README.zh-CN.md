@@ -8,10 +8,11 @@
 ## 核心能力
 
 - 代码模式与 Rules 模式共用 Spider、Request、Response、Item、Middleware 和 Engine。
-- Memory 与 Redis Scheduler 实现同一套调度合同。
+- Memory、Redis Scheduler 与 Worker 侧 API Scheduler 适配器使用同一套调度合同。
 - HTTP 下载支持重试、响应体上限、重定向、Cookie、Proxy/TLS 和确定性字符集解码。
 - 内置 CSS Selector、确定性 CSS Healing、RFC 9535 JSONPath，以及显式的 OpenAI-compatible JSON 对象提取。
 - Item 使用独立 Store 合同，默认实现为本地 JSONL。
+- 可选 `fastrace` 运行期追踪为每条 Request 建立独立链路，不改变业务 `trace_id` 或爬虫控制流。
 
 ## 快速开始
 
@@ -48,7 +49,7 @@ engine.start().await?;
 | --- | --- |
 | `spider` | 核心运行时、Engine、Scheduler 合同、HTTP 下载、Rules、Selector 与 Item Store |
 | `macros` | Spider、处理函数与 Item 派生宏 |
-| `contrib` | Redis Scheduler 与分布式中间件实现 |
+| `contrib` | Redis Scheduler、Worker 侧 API Scheduler 适配器与分布式中间件实现 |
 | `examples` | 可直接运行的代码模式与 Rules 模式示例 |
 
 ## 文档
@@ -63,6 +64,7 @@ engine.start().await?;
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
+cargo test --workspace --all-targets --features runtime-tracing
 cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```

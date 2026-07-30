@@ -65,6 +65,55 @@ async fn open_preserves_the_base_path_and_sends_required_headers() {
             .map(String::as_str),
         Some("crawler")
     );
+    assert!(!requests[0].headers.contains_key("traceparent"));
+}
+
+#[cfg(feature = "runtime-tracing")]
+#[tokio::test]
+async fn propagates_one_traceparent_across_api_retries() {
+    use fastrace::future::FutureExt as _;
+    use fastrace::prelude::SpanContext;
+
+    let (base_url, received, server) = server(vec![
+        unavailable("retry"),
+        Response::json(
+            "200 OK",
+            json!({
+                "lease_timeout_ms": 30000,
+                "lease_interval_ms": 10000,
+                "heartbeat_interval_ms": 10000,
+                "max_response_bytes": 67108864
+            }),
+        ),
+        Response::json("200 OK", json!(null)),
+    ]);
+    let api = Api::new(base_url, "token").unwrap();
+    let root = fastrace::Span::root("test.api", SpanContext::random());
+    async {
+        api.open().await.unwrap();
+    }
+    .in_span(fastrace::Span::enter_with_parent("test.open", &root))
+    .await;
+    async {
+        api.trace("trace-1").await.unwrap();
+        api.close().await.unwrap();
+    }
+    .in_span(fastrace::Span::enter_with_parent("test.trace", &root))
+    .await;
+
+    let requests = received.recv().unwrap();
+    server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    let first = requests[0].headers.get("traceparent").unwrap();
+    let second = requests[1].headers.get("traceparent").unwrap();
+    assert_eq!(first, second);
+    let third = requests[2].headers.get("traceparent").unwrap();
+    let first = SpanContext::decode_w3c_traceparent(first).unwrap();
+    let second = SpanContext::decode_w3c_traceparent(second).unwrap();
+    let third = SpanContext::decode_w3c_traceparent(third).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.trace_id, third.trace_id);
+    assert_ne!(first.span_id, third.span_id);
 }
 
 #[tokio::test]

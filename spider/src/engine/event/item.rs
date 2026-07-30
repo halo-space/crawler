@@ -16,26 +16,35 @@ where
         stats.total("items", items.len());
     }
 
-    let mut ready = Vec::with_capacity(items.len());
-    for item in items {
-        let item = match registry
-            .before_item(item)
-            .await
-            .map_err(crate::Error::Middleware)?
-        {
-            middleware::registry::Output::Continue(item) => item,
-            middleware::registry::Output::Skip { middleware } => {
-                if let Some(context) = context
-                    && let Some(stats) = context.stats()
+    let ready = crate::trace::operation(
+        "middleware.before_item",
+        None,
+        async {
+            let mut ready = Vec::with_capacity(items.len());
+            for item in items {
+                let item = match registry
+                    .before_item(item)
+                    .await
+                    .map_err(crate::Error::Middleware)?
                 {
-                    super::record_skip(stats, "items", &middleware);
-                }
-                continue;
-            }
-        };
+                    middleware::registry::Output::Continue(item) => item,
+                    middleware::registry::Output::Skip { middleware } => {
+                        if let Some(context) = context
+                            && let Some(stats) = context.stats()
+                        {
+                            super::record_skip(stats, "items", &middleware);
+                        }
+                        continue;
+                    }
+                };
 
-        ready.push(item);
-    }
+                ready.push(item);
+            }
+            Ok(ready)
+        },
+        crate::trace::error_class,
+    )
+    .await?;
 
     if ready.is_empty() {
         return Ok(());
@@ -48,7 +57,14 @@ where
     let retry = retry_policy(&payload, &registry)?;
     let mut attempt = 0;
     loop {
-        match store.submit(&payload).await {
+        match crate::trace::operation(
+            "item_store.submit",
+            Some(attempt + 1),
+            store.submit(&payload),
+            |_| "item_store",
+        )
+        .await
+        {
             Ok(()) => {
                 break;
             }
@@ -60,8 +76,13 @@ where
                     continue;
                 }
                 for item in &payload.items {
-                    if let Err(callback_error) =
-                        registry.error_item(item.as_ref(), &submit_error).await
+                    if let Err(callback_error) = crate::trace::operation(
+                        "middleware.error_item",
+                        None,
+                        registry.error_item(item.as_ref(), &submit_error),
+                        |_| "middleware",
+                    )
+                    .await
                     {
                         tracing::error!(
                             item_id = %item.id(),

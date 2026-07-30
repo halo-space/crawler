@@ -15,7 +15,13 @@ where
     let ids = context
         .map(|context| context.assign_ids(&mut requests))
         .transpose()?;
-    let requests = crate::engine::admission::apply(requests, context, registry.as_ref()).await?;
+    let requests = crate::trace::operation(
+        "middleware.before_scheduler",
+        None,
+        crate::engine::admission::apply(requests, context, registry.as_ref()),
+        crate::trace::error_class,
+    )
+    .await?;
     if requests.is_empty() {
         if let Some(ids) = ids {
             ids.commit();
@@ -28,10 +34,14 @@ where
         .unwrap_or_default()
         .requests(requests);
 
-    scheduler
-        .push(payload)
-        .await
-        .map_err(crate::Error::Scheduler)?;
+    crate::trace::operation(
+        "scheduler.push",
+        None,
+        scheduler.push(payload),
+        crate::trace::scheduler_error_class,
+    )
+    .await
+    .map_err(crate::Error::Scheduler)?;
     if let Some(ids) = ids {
         ids.commit();
     }

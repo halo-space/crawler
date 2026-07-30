@@ -12,7 +12,7 @@ The workspace contains four crates:
 | --- | --- |
 | `spider` | Core runtime, public data objects, extension contracts, default Memory Scheduler, and HTTP Downloader |
 | `macros` | The `#[spider]` procedural macro, including code-mode construction, node registration, and dispatch bindings |
-| `contrib` | Replaceable external Scheduler and Middleware implementations backed by Redis |
+| `contrib` | Replaceable Redis Scheduler, Worker-side API Scheduler adapter, and distributed Middleware implementations |
 | `examples` | Runnable code-mode and Rules-mode examples |
 
 ### 1.1 Capability Status
@@ -26,17 +26,27 @@ The workspace contains four crates:
 | Response charset decoding | Implemented | Deterministic BOM/header/HTML-meta/UTF-8 selection in `Response::text()` while preserving post-content-decoding bytes |
 | Browser Downloader | Not implemented | The current stub returns `UnsupportedMode("browser")`; implementation is planned for v5 |
 | CSS Selector | Implemented | `Response::css()` returns the native `scrape_core::Soup` |
-| CSS Healing | Implemented | Deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
-| Regex and JSON | Implemented | Regex selection, full-body `Response::json<T>()`, and shared RFC 9535 JSONPath selection for code and Rules modes |
+| CSS Healing | Implemented | CSS-only deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
+| Regex and JSON | Implemented | Regex selection, full-body `Response::json<T>()`, and exact RFC 9535 JSONPath selection without Healing |
 | AI Selector | Implemented | Explicit OpenAI-compatible JSON-object extraction, independent of CSS Healing |
 | AI runtime configuration | Implemented | One reusable Worker-local `ai::OpenAI` provider is injected with `Engine::with_ai`; provider configuration does not enter Rules or Trace snapshots |
 | Middleware | Implemented | Lifecycle Registry, Worker-local Memory implementations, and optional RedisBloom Dedup/shared Redis RateLimit implementations |
 | Item Store | Implemented | Independent `open / close / submit(&Payload)` persistence contract; default JSONL output and Jsonl-owned failure snapshots; attachment download is planned for v5 |
 | Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
 | Redis Scheduler | Implemented | Redis 7+ standalone only; namespaced complete Request Scheduler/Init contract and Lua-atomic transitions |
-| Runtime tracing | Planned | v4 will use `fasttrace`; this is separate from the business `trace_id` |
+| API Scheduler adapter | Implemented | Worker-side `contrib::scheduler::api::Api`; the Master service is designed here but implemented in a separate project |
+| Runtime tracing | Implemented | Optional per-Request `fastrace` roots and bounded lifecycle spans; distinct from business `trace_id` |
 
 XPath has been removed from the roadmap. CSS is the sole HTML selector path; the project does not maintain a partial XPath implementation.
+Healing is not a generic selector stage. Only CSS exposes Healing; Regex and JSON keep their exact
+selection semantics, and XML selection is not currently implemented.
+
+The crawler workspace does not contain or implement the Master service. It owns only the Worker-side
+API Scheduler adapter and the crawler contracts consumed over HTTP. The local `docs/master/` files
+record the Master feature, wire, database, and frontend design; the server, migrations, Cron, Control
+API, and frontend are implemented and verified in a separate project.
+A Master-backed `item::Store` is not part of the API Scheduler and is not a partially implemented
+API Scheduler feature. It remains an optional, separately decided Store adapter.
 
 ## 2. Core Design Principles
 
@@ -232,6 +242,24 @@ output Event, or Tx producer changes work while the claim is in flight, the Acto
 result as stale and claims again before it can terminate.
 
 This prevents early termination while a list page is producing detail Requests, an Item Event arrives late, or a handler has cloned its Tx for delayed output.
+
+### 5.3 Runtime Tracing
+
+The optional `runtime-tracing` feature instruments each sampled claimed Request as one independent
+`crawler.request` root. There is no Engine-wide root, so a long-lived Worker cannot accumulate one
+unbounded trace. Sampling is deterministic from Request ID, version, and Worker ID. The root carries
+bounded business identifiers as properties, while its fastrace TraceId remains operational data and
+never replaces business `trace_id` or enters Request, Payload, Item, Trace Snapshot, or DSL state.
+Identifiers longer than 128 bytes or containing control characters are represented by stable
+SHA-256 tokens at the tracing boundary.
+
+Stable child spans cover acknowledgement, execution, Middleware, download, parse, Tx Request/Item
+output, Store submission, lease refresh, release, and settlement. Async context follows Request tasks
+and awaited Tx output tasks. The application executable owns the process-global fastrace Reporter and
+flush lifecycle; tracing cannot make crawler work fail. W3C `traceparent` propagation is restricted to
+the Worker-side API Scheduler's trusted Master calls. Downloader targets, AI providers, and Redis do
+not receive synthesized tracing context, and spans exclude content, credentials, complete URLs, and
+raw errors.
 
 ## 6. Scheduler Contract and Memory Implementation
 
@@ -807,6 +835,7 @@ the Store contract.
 | `spider/src/engine/request/task.rs` | Ack, lease maintenance, and final settlement for one Request |
 | `spider/src/engine/admission.rs` | Apply `before_scheduler` to Request output before it enters the Scheduler |
 | `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse lifecycle for one claimed Request |
+| `spider/src/trace/tracing.rs` | Runtime tracing configuration, deterministic sampling, bounded span helpers, and error classes |
 | `spider/src/engine/event/request.rs` | Handle Request output emitted by Tx |
 | `spider/src/engine/event/item.rs` | Run Item middleware, Store retries, and `error_item` orchestration |
 | `spider/src/spider/tx/identity.rs` | Derive replay-stable IDs for current-Request output |
@@ -869,7 +898,7 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 ### Release Boundaries
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
-- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, RedisBloom Dedup, shared Redis RateLimit, and Engine-level Worker-local `ai::OpenAI` provider injection are implemented. `fasttrace` runtime tracing remains separate work.
+- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, RedisBloom Dedup, shared Redis RateLimit, Engine-level Worker-local `ai::OpenAI` provider injection, and optional per-Request `fastrace` runtime tracing are implemented.
 - v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance, and a separate Item attachment downloader. Attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:
@@ -879,7 +908,7 @@ These capabilities must preserve the existing core contracts:
 - replacing the Item Store must not change Request scheduling, leasing, or settlement, and replacing the Scheduler must not replace or reconfigure the Store;
 - Worker capability filtering must be atomic with the Scheduler claim, rather than claiming an incompatible Request and dropping it in the Downloader;
 - Browser must implement the existing `Download` contract and produce the same `Response` model;
-- `fasttrace` span context is operational telemetry and must not replace business `task_id / trace_id`.
+- `fastrace` span context is operational telemetry and must not replace business `task_id / trace_id`.
 
 ### Explicit Non-Goals Today
 

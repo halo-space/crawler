@@ -21,7 +21,7 @@ where
 
     async fn handle(&mut self, event: Event, ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.invalidate_claim();
-        let event = event.accept();
+        let (event, parent) = event.accept();
         let scheduler = self.scheduler.clone();
         let store = self.store.clone();
         let registry = self.registry.clone();
@@ -29,8 +29,10 @@ where
         let (delegated, reply) = ctx.reply_sender();
 
         let handle = tokio::spawn(async move {
-            let result =
-                task::protect(engine::event::handle(event, scheduler, store, registry)).await;
+            let result = task::protect(engine::event::handle(
+                event, parent, scheduler, store, registry,
+            ))
+            .await;
             let error = match (result, reply) {
                 (Ok(()), Some(reply)) => {
                     let _ = send_reply(reply.boxed(), Ok(()));

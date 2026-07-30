@@ -1,3 +1,5 @@
+#[cfg(feature = "runtime-tracing")]
+use fastrace::future::FutureExt as _;
 use kameo::actor::ActorRef;
 use kameo::message::{Context, Message};
 use tokio::time::Instant;
@@ -25,7 +27,14 @@ pub(super) fn spawn<S, D, E, O>(
     let downloader = engine.downloader.clone();
     let executor = engine.executor.clone();
     let registry = engine.registry.clone();
-    let handle = tokio::spawn(async move {
+    #[cfg(feature = "runtime-tracing")]
+    let span = engine
+        .config
+        .tracing
+        .request_span(&request, &engine.config.worker.id);
+    #[cfg(not(feature = "runtime-tracing"))]
+    let _ = engine.config.tracing;
+    let future = async move {
         let result = task::protect(engine::request::task::execute(
             request,
             claim_started,
@@ -35,9 +44,14 @@ pub(super) fn spawn<S, D, E, O>(
             registry,
         ))
         .await;
+        crate::trace::record_result(&result, crate::trace::error_class);
         let id = tokio::task::id();
         let _ = actor_ref.tell(Done { id, result }).await;
-    });
+    };
+    #[cfg(feature = "runtime-tracing")]
+    let handle = tokio::spawn(future.in_span(span));
+    #[cfg(not(feature = "runtime-tracing"))]
+    let handle = tokio::spawn(future);
     engine.requests.insert(handle);
 }
 

@@ -206,7 +206,7 @@ mod tests {
             event: Event,
             ctx: &mut ActorContext<Self, Self::Reply>,
         ) -> Self::Reply {
-            let kind = event.accept();
+            let (kind, _) = event.accept();
             let (delegated, reply) = ctx.reply_sender();
             let _ = self.accepted.send(Accepted { kind, reply });
             delegated

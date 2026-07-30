@@ -15,6 +15,7 @@ mod wait;
 pub(super) struct Config {
     concurrency: usize,
     claim_limit: usize,
+    tracing: crate::trace::Tracing,
     worker: super::worker::Worker,
 }
 
@@ -22,11 +23,13 @@ impl Config {
     pub(super) fn new(
         concurrency: usize,
         claim_limit: usize,
+        tracing: crate::trace::Tracing,
         worker: super::worker::Worker,
     ) -> Self {
         Self {
             concurrency,
             claim_limit,
+            tracing,
             worker,
         }
     }

@@ -5,6 +5,14 @@ use serde_json::Value;
 
 use crate::config;
 
+mod tracing;
+
+pub use tracing::Tracing;
+pub(crate) use tracing::{
+    RuntimeContext, current_context, error_class, operation, output, record_http_method,
+    record_http_status, record_result, scheduler_error_class,
+};
+
 pub fn next_id() -> String {
     format!("trace_{}", uuid::Uuid::now_v7())
 }
