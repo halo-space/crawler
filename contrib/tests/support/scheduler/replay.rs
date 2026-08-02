@@ -3,7 +3,7 @@ use std::sync::Arc;
 use spider::{Scheduler, payload};
 
 use super::{
-    fixture::{HTTP, WORKER_A, close, open_run, race},
+    fixture::{close, open_run, race},
     payload::{failure, processing, request},
     settlement::succeed,
 };
@@ -29,19 +29,8 @@ where
             .await
             .is_err()
     );
-    assert!(
-        scheduler
-            .next_requests(2, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        !scheduler
-            .has_pending_requests(WORKER_A, HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(scheduler.next_requests(2).await.unwrap().is_empty());
+    assert!(!scheduler.has_pending_requests().await.unwrap());
     close(&scheduler).await;
 }
 
@@ -70,13 +59,7 @@ where
         assert!(error.to_string().contains(field));
     }
 
-    assert!(
-        scheduler
-            .next_requests(2, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(2).await.unwrap().is_empty());
     close(&scheduler).await;
 }
 
@@ -103,7 +86,7 @@ where
         .push(payload::Payload::new().requests(vec![original.clone(), added.clone()]))
         .await
         .unwrap();
-    let claimed = scheduler.next_requests(2, WORKER_A, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(2).await.unwrap();
     assert_eq!(claimed.len(), 2);
     let ids = claimed
         .iter()
@@ -122,12 +105,7 @@ where
         .push(payload::Payload::new().requests(vec![original.clone()]))
         .await
         .unwrap();
-    assert!(
-        !scheduler
-            .has_pending_requests(WORKER_A, HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(!scheduler.has_pending_requests().await.unwrap());
 
     let mut first_map = request("replay-map", "https://example.com/replay/map");
     first_map.vals.insert("first".to_string(), "one".into());
@@ -147,7 +125,7 @@ where
         .push(payload::Payload::new().requests(vec![second_map]))
         .await
         .unwrap();
-    let replayed = scheduler.next_requests(2, WORKER_A, HTTP).await.unwrap();
+    let replayed = scheduler.next_requests(2).await.unwrap();
     assert_eq!(replayed.len(), 1);
     assert_eq!(replayed[0].id, "replay-map");
     succeed(scheduler.as_ref(), &replayed[0]).await;
@@ -158,12 +136,7 @@ where
         .push(payload::Payload::new().requests(vec![failed.clone()]))
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, WORKER_A, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     scheduler.ack(&processing(&claimed)).await.unwrap();
     scheduler
         .failure(&failure(&claimed, "terminal replay"))
@@ -173,13 +146,7 @@ where
         .push(payload::Payload::new().requests(vec![failed]))
         .await
         .unwrap();
-    assert!(
-        scheduler
-            .next_requests(1, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
 
     let conflict = request("replay", "https://example.com/conflict");
     let new = request("new-after-conflict", "https://example.com/new");
@@ -189,13 +156,7 @@ where
             .await
             .is_err()
     );
-    assert!(
-        scheduler
-            .next_requests(2, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(2).await.unwrap().is_empty());
 
     let duplicate = request("duplicate", "https://example.com/duplicate");
     assert!(
@@ -204,13 +165,7 @@ where
             .await
             .is_err()
     );
-    assert!(
-        scheduler
-            .next_requests(1, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
 
     let valid = request("invalid-collection-valid", "https://example.com/valid");
     let mut invalid = request("invalid-collection-invalid", "https://example.com/invalid");
@@ -221,12 +176,6 @@ where
             .await
             .is_err()
     );
-    assert!(
-        scheduler
-            .next_requests(1, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     close(scheduler.as_ref()).await;
 }

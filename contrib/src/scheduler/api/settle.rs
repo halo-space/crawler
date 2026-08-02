@@ -14,7 +14,7 @@ impl Api {
         self.client
             .post_empty(
                 "v1/worker/requests/ack",
-                &wire::Identity::from_payload(payload),
+                &wire::Lease::from_payload(payload),
                 None,
             )
             .await
@@ -28,7 +28,7 @@ impl Api {
         payload
             .validate_release()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
-        let identity = wire::Identity::from_payload(payload);
+        let identity = wire::Lease::from_payload(payload);
         let key = Self::invocation_key();
         self.client
             .post_empty("v1/worker/requests/release", &identity, Some(&key))
@@ -43,7 +43,7 @@ impl Api {
         self.client
             .post_empty(
                 "v1/worker/requests/refresh",
-                &wire::Identity::from_payload(payload),
+                &wire::Lease::from_payload(payload),
                 None,
             )
             .await
@@ -55,7 +55,7 @@ impl Api {
             .validate_success()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
         let body = wire::Success {
-            identity: wire::Identity::from_payload(payload),
+            identity: wire::Lease::from_payload(payload),
             stats: payload.stats.clone(),
             start_time: payload.start_time.expect("validated success start time"),
             end_time: payload.end_time.expect("validated success end time"),
@@ -71,7 +71,7 @@ impl Api {
             .validate_failure()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
         let body = wire::Failure {
-            identity: wire::Identity::from_payload(payload),
+            identity: wire::Lease::from_payload(payload),
             error: payload.error.clone().expect("validated failure error"),
             stats: payload.stats.clone(),
             start_time: payload.start_time.expect("validated failure start time"),

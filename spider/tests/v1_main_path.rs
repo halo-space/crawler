@@ -66,8 +66,8 @@ impl Scheduler for RecordingScheduler {
         self.inner.lease()
     }
 
-    async fn open(&self) -> Result<(), spider::scheduler::Error> {
-        self.inner.open().await
+    async fn open(&self, concurrency: usize) -> Result<(), spider::scheduler::Error> {
+        self.inner.open(concurrency).await
     }
 
     async fn close(&self) -> Result<(), spider::scheduler::Error> {
@@ -88,18 +88,12 @@ impl Scheduler for RecordingScheduler {
     async fn next_requests(
         &self,
         limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
-        self.inner.next_requests(limit, worker_id, modes).await
+        self.inner.next_requests(limit).await
     }
 
-    async fn has_pending_requests(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests(worker_id, modes).await
+    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests().await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -647,7 +641,7 @@ async fn payload_contains_request_and_item_stats() {
         .with_spider(ItemSpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let records = records.lock().unwrap();
     let record = records
@@ -679,7 +673,7 @@ async fn default_validate_filters_response_before_parse_and_records_stats() {
         .with_spider(NoopSpider::new(calls.clone()))
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let records = records.lock().unwrap();
@@ -709,7 +703,7 @@ async fn download_retry_recovers_without_recording_final_download_failure() {
         .with_spider(NoopSpider::new(Arc::new(AtomicUsize::new(0))))
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     let records = records.lock().unwrap();
@@ -736,7 +730,7 @@ async fn final_download_failure_records_download_stats() {
         .with_spider(NoopSpider::new(Arc::new(AtomicUsize::new(0))))
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let records = records.lock().unwrap();
     assert_eq!(records[0].state, payload::State::Failed);
@@ -756,7 +750,7 @@ async fn dedup_skips_duplicate_request_and_memory_accumulates_stats() {
         .with_spider(DedupSpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let stats = engine.scheduler().trace_stats();
     assert_eq!(stats["index"].total, 1);
@@ -781,7 +775,7 @@ async fn item_validate_skip_does_not_fail_current_request() {
         .with_spider(ValidateItemSpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let records = records.lock().unwrap();
     assert_eq!(records[0].state, payload::State::Done);
@@ -806,7 +800,7 @@ async fn request_validate_skip_does_not_fail_current_request() {
         .with_spider(ValidateRequestSpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let records = records.lock().unwrap();
     assert_eq!(records.len(), 1);
@@ -834,7 +828,7 @@ async fn parse_retry_reinvokes_handler_until_it_succeeds() {
         .with_spider(ParseRetrySpider::new(attempts.clone()))
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     assert_eq!(engine.scheduler().inner.done_len(), 2);
@@ -857,7 +851,7 @@ async fn queue_retry_replays_the_same_child_request() {
         .with_spider(QueueRetrySpider::new(attempts.clone()))
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(engine.scheduler().inner.done_len(), 1);
@@ -894,7 +888,7 @@ async fn item_retry_removes_failure_snapshot_after_recovery() {
         .with_spider(RetryItemSpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert!(snapshot_files(&runtime_dir, "task").await.is_empty());
@@ -933,7 +927,7 @@ async fn final_item_failure_keeps_complete_local_snapshot() {
         .with_spider(RetryItemSpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     assert_eq!(records.lock().unwrap()[0].state, payload::State::Failed);
@@ -987,7 +981,7 @@ async fn snapshot_write_failure_preserves_original_submit_error() {
         .with_spider(ItemSpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     {
         let records = records.lock().unwrap();
@@ -1017,7 +1011,7 @@ async fn spider_lifecycle_wraps_start_and_request_processing() {
         .with_spider_middleware(Spec::new("lifecycle"))
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
@@ -1043,7 +1037,7 @@ async fn after_spider_runs_when_before_spider_fails() {
         .with_spider_middleware(Spec::new("lifecycle"))
         .build();
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(matches!(error, spider::Error::Middleware(_)));
     assert_eq!(
@@ -1067,7 +1061,7 @@ async fn after_spider_runs_when_spider_start_fails() {
         .with_spider_middleware(Spec::new("lifecycle"))
         .build();
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(error.to_string().contains("start failed"));
     assert_eq!(

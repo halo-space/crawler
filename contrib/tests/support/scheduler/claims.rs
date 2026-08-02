@@ -3,12 +3,12 @@ use std::sync::Arc;
 use spider::{Scheduler, net, payload};
 
 use super::{
-    fixture::{ALL, BROWSER, HTTP, Timing, WORKER_A, WORKER_B, close, open_run, race},
+    fixture::{Timing, close, open_run, race},
     payload::request,
     settlement::succeed,
 };
 
-pub(super) async fn claims_are_capability_scoped<S>(scheduler: S)
+pub(super) async fn claims_use_frozen_capabilities_and_priority<S>(scheduler: S)
 where
     S: Scheduler + spider::scheduler::Init,
 {
@@ -26,37 +26,26 @@ where
         .await
         .unwrap();
 
-    assert!(
-        scheduler
-            .next_requests(0, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
+    assert!(scheduler.next_requests(0).await.unwrap().is_empty());
+    let claimed = scheduler.next_requests(4).await.unwrap();
+    assert_eq!(claimed.len(), 4);
+    assert_eq!(
+        claimed
+            .iter()
+            .map(|request| request.id.as_str())
+            .collect::<Vec<_>>(),
+        ["browser", "http-first", "http-second", "http-low"]
     );
-    assert!(scheduler.next_requests(1, " ", HTTP).await.is_err());
-    assert!(scheduler.next_requests(1, WORKER_A, &[]).await.is_err());
-    assert!(scheduler.has_pending_requests(" ", HTTP).await.is_err());
-    assert!(scheduler.has_pending_requests(WORKER_A, &[]).await.is_err());
-
-    let http = scheduler.next_requests(2, WORKER_A, HTTP).await.unwrap();
-    assert_eq!(http.len(), 2);
-    assert_eq!(http[0].id, "http-first");
-    assert_eq!(http[1].id, "http-second");
-    assert!(http.iter().all(|request| {
-        request.mode == net::Mode::Http
-            && request.state == net::State::Processing
-            && request.leased_by == WORKER_A
+    let worker_id = claimed[0].leased_by.clone();
+    assert!(!worker_id.is_empty());
+    assert!(claimed.iter().all(|request| {
+        request.state == net::State::Processing
+            && request.leased_by == worker_id
             && request.version == 1
             && request.lease_time > 0
     }));
-    let remaining = scheduler.next_requests(2, WORKER_A, HTTP).await.unwrap();
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].id, "http-low");
-    let browser = scheduler.next_requests(1, WORKER_B, BROWSER).await.unwrap();
-    assert_eq!(browser.len(), 1);
-    assert_eq!(browser[0].id, "browser");
 
-    for request in http.iter().chain(&remaining).chain(&browser) {
+    for request in &claimed {
         succeed(&scheduler, request).await;
     }
 
@@ -71,7 +60,7 @@ where
         .push(payload::Payload::new().requests(vec![http, browser, low]))
         .await
         .unwrap();
-    let all = scheduler.next_requests(3, WORKER_A, ALL).await.unwrap();
+    let all = scheduler.next_requests(3).await.unwrap();
     assert_eq!(
         all.iter()
             .map(|request| request.id.as_str())
@@ -87,35 +76,14 @@ where
         .push(payload::Payload::new().requests(vec![pending]))
         .await
         .unwrap();
-    let processing = scheduler
-        .next_requests(1, WORKER_A, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert!(
-        scheduler
-            .has_pending_requests(WORKER_B, HTTP)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !scheduler
-            .has_pending_requests(WORKER_B, BROWSER)
-            .await
-            .unwrap()
-    );
+    let processing = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    assert!(scheduler.has_pending_requests().await.unwrap());
     succeed(&scheduler, &processing).await;
-    assert!(
-        !scheduler
-            .has_pending_requests(WORKER_B, HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(!scheduler.has_pending_requests().await.unwrap());
     close(&scheduler).await;
 }
 
-pub(super) async fn concurrent_capability_claims_are_atomic<S>(scheduler: S)
+pub(super) async fn concurrent_claims_are_atomic<S>(scheduler: S)
 where
     S: Scheduler + spider::scheduler::Init + 'static,
 {
@@ -135,23 +103,26 @@ where
     let scheduler = Arc::new(scheduler);
     let (claimed_by_a, claimed_by_b) = race(
         scheduler.clone(),
-        |scheduler| async move { scheduler.next_requests(16, WORKER_A, HTTP).await },
-        |scheduler| async move { scheduler.next_requests(16, WORKER_B, HTTP).await },
+        |scheduler| async move { scheduler.next_requests(16).await },
+        |scheduler| async move { scheduler.next_requests(16).await },
     )
     .await;
     let mut claimed_by_a = claimed_by_a.unwrap();
     let claimed_by_b = claimed_by_b.unwrap();
     assert!(claimed_by_a.len() <= 16);
     assert!(claimed_by_b.len() <= 16);
+    let worker_id = claimed_by_a
+        .first()
+        .or_else(|| claimed_by_b.first())
+        .expect("concurrent claims must return queued Requests")
+        .leased_by
+        .clone();
+    assert!(!worker_id.is_empty());
     assert!(
         claimed_by_a
             .iter()
-            .all(|request| { request.mode == net::Mode::Http && request.leased_by == WORKER_A })
-    );
-    assert!(
-        claimed_by_b
-            .iter()
-            .all(|request| { request.mode == net::Mode::Http && request.leased_by == WORKER_B })
+            .chain(&claimed_by_b)
+            .all(|request| request.mode == net::Mode::Http && request.leased_by == worker_id)
     );
     let mut ids = claimed_by_a
         .iter()
@@ -160,13 +131,12 @@ where
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(ids.len(), claimed_by_a.len() + claimed_by_b.len());
     while ids.len() < 32 {
-        let next = scheduler.next_requests(16, WORKER_A, HTTP).await.unwrap();
+        let next = scheduler.next_requests(16).await.unwrap();
         assert!(!next.is_empty(), "Scheduler lost unclaimed Requests");
         assert!(next.len() <= 16);
         assert!(
-            next.iter().all(|request| {
-                request.mode == net::Mode::Http && request.leased_by == WORKER_A
-            })
+            next.iter()
+                .all(|request| request.mode == net::Mode::Http && request.leased_by == worker_id)
         );
         for request in &next {
             assert!(
@@ -195,27 +165,11 @@ where
         .push(payload::Payload::new().requests(vec![delayed]))
         .await
         .unwrap();
-    assert!(
-        scheduler
-            .next_requests(1, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        scheduler
-            .has_pending_requests(WORKER_A, HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
+    assert!(scheduler.has_pending_requests().await.unwrap());
 
     tokio::time::sleep(timing.after_delay()).await;
-    let claimed = scheduler
-        .next_requests(1, WORKER_A, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     succeed(&scheduler, &claimed).await;
     close(&scheduler).await;
 }

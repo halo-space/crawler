@@ -19,12 +19,18 @@ pub(super) fn spawn<S, D, E, O>(
     O: crate::item::Store + 'static,
 {
     let executor = engine.executor.clone();
+    let id = task::Id::new();
+    let done_id = id.clone();
     let handle = tokio::spawn(async move {
         let result = task::protect(async move { executor.start().await }).await;
-        let id = tokio::task::id();
-        let _ = actor_ref.tell(Done { id, result }).await;
+        let _ = actor_ref
+            .tell(Done {
+                id: done_id,
+                result,
+            })
+            .await;
     });
-    engine.startup = Some(task::Task::new(handle));
+    engine.startup = Some(task::Task::new(id, handle));
 }
 
 impl<S, D, E, O> Message<Done> for Engine<S, D, E, O>
@@ -40,12 +46,11 @@ where
         if !self
             .startup
             .as_ref()
-            .is_some_and(|task| task.matches(done.id))
+            .is_some_and(|task| task.matches(&done.id))
         {
             return;
         }
         self.startup = None;
-        self.exhausted = false;
         if let Err(error) = done.result {
             self.record_error(error);
         }

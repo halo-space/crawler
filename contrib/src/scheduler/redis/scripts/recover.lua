@@ -1,5 +1,5 @@
 local prefix = ARGV[1]
-local token = ARGV[2]
+local segment = ARGV[2]
 local worker_id = ARGV[3]
 local version = ARGV[4]
 local reason = ARGV[5]
@@ -21,7 +21,7 @@ local function parse_i32(value, minimum, maximum)
     return parsed
 end
 
-local function worker_token(worker)
+local function worker_segment(worker)
     local encoded = {}
     for index = 1, string.len(worker) do
         encoded[index] = string.format('%02x', string.byte(worker, index))
@@ -79,8 +79,8 @@ if retry < max_retry then
     priority = parse_i32(redis.call('HGET', key, 'priority'), -2147483648, 2147483647)
     if not priority then return 'CORRUPT_REQUEST_PRIORITY' end
 end
-local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
-local completion = prefix .. 'request:' .. token .. ':completion:' .. version
+local failed_workers = prefix .. 'request:' .. segment .. ':failed_workers'
+local completion = prefix .. 'request:' .. segment .. ':completion:' .. version
 local processing = prefix .. 'processing:' .. mode
 local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser' or 'http')
 local exclusions = prefix .. 'pending_exclusions:' .. mode
@@ -119,8 +119,8 @@ redis.call('HSET', completion,
     'worker_id', worker_id,
     'state', 'failed',
     'error', reason)
-redis.call('ZREM', processing, token)
-redis.call('ZREM', other_processing, token)
+redis.call('ZREM', processing, segment)
+redis.call('ZREM', other_processing, segment)
 
 if retry < max_retry then
     local function pad(value, width)
@@ -128,13 +128,13 @@ if retry < max_retry then
         return string.rep('0', width - string.len(value)) .. value
     end
     local revision = pad(sequence, 32)
-    local member = revision .. '|' .. revision .. '|' .. token
+    local member = revision .. '|' .. revision .. '|' .. segment
     local event = revision .. '|' .. member
     redis.call('HSET', KEYS[2], 'enqueue_sequence', sequence)
     redis.call('ZADD', prefix .. 'queue:' .. mode .. ':ready', -priority, member)
     redis.call('ZADD', ready_events, 0, event)
     for _, worker in ipairs(redis.call('LRANGE', failed_workers, 0, MAX_RETRY_COUNT - 1)) do
-        redis.call('ZADD', exclusions, 0, worker_token(worker) .. '|' .. token)
+        redis.call('ZADD', exclusions, 0, worker_segment(worker) .. '|' .. segment)
     end
     redis.call('HSET', key,
         'state', 'pending', 'retry_count', retry, 'max_retry_count', max_retry, 'next_time', '0',

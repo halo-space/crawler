@@ -25,7 +25,7 @@ local function parse_retry(value)
     return parsed
 end
 
-local function worker_token(worker)
+local function worker_segment(worker)
     local encoded = {}
     for index = 1, string.len(worker) do
         encoded[index] = string.format('%02x', string.byte(worker, index))
@@ -61,7 +61,6 @@ if redis.call('EXISTS', key) == 0 then return 'REQUEST_NOT_FOUND' end
 if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
-if redis.call('HGET', key, 'leased_by') ~= payload.worker_id then return 'LEASE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
 if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
 
@@ -76,7 +75,7 @@ local function pad(value, width)
     return string.rep('0', width - string.len(value)) .. value
 end
 
-local token = ARGV[4]
+local segment = ARGV[4]
 local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
 local priority = parse_priority(redis.call('HGET', key, 'priority'))
@@ -90,7 +89,7 @@ if not retry_count or not max_retry_count
 end
 local processing = prefix .. 'processing:' .. mode
 local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser' or 'http')
-local failed_workers = prefix .. 'request:' .. token .. ':failed_workers'
+local failed_workers = prefix .. 'request:' .. segment .. ':failed_workers'
 local exclusions = prefix .. 'pending_exclusions:' .. mode
 local ready_events = prefix .. 'ready_events:' .. mode
 if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
@@ -106,16 +105,16 @@ end
 local sequence = next_sequence()
 if not sequence then return 'SEQUENCE_OVERFLOW' end
 local revision = pad(sequence, 32)
-local member = revision .. '|' .. revision .. '|' .. token
+local member = revision .. '|' .. revision .. '|' .. segment
 local event = revision .. '|' .. member
 
 redis.call('HSET', KEYS[2], 'enqueue_sequence', sequence)
-redis.call('ZREM', processing, token)
-redis.call('ZREM', other_processing, token)
+redis.call('ZREM', processing, segment)
+redis.call('ZREM', other_processing, segment)
 redis.call('ZADD', prefix .. 'queue:' .. mode .. ':ready', -priority, member)
 redis.call('ZADD', ready_events, 0, event)
 for _, worker in ipairs(redis.call('LRANGE', failed_workers, 0, MAX_RETRY_COUNT - 1)) do
-    redis.call('ZADD', exclusions, 0, worker_token(worker) .. '|' .. token)
+    redis.call('ZADD', exclusions, 0, worker_segment(worker) .. '|' .. segment)
 end
 redis.call('HSET', key,
     'state', 'pending', 'next_time', '0', 'leased_by', '', 'lease_time', '0',

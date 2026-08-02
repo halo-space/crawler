@@ -13,10 +13,9 @@ mod lease;
 pub(crate) mod request;
 pub mod rules;
 mod runtime;
-mod worker;
 
 pub use builder::Builder;
 pub use builder::Builder as Engine;
 #[doc(hidden)]
 pub use init::NoInit;
-pub use runtime::{MAX_EVENTS, MAX_REQUEST_CONCURRENCY, Runtime};
+pub use runtime::{DEFAULT_IDLE_INTERVAL, MAX_EVENTS, MAX_REQUEST_CONCURRENCY, Runtime};

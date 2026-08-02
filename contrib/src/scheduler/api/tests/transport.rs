@@ -33,27 +33,20 @@ fn generic_invalid_request_is_not_a_protocol_error() {
 
 #[tokio::test]
 async fn open_preserves_the_base_path_and_sends_required_headers() {
-    let (base_url, received, server) = server(vec![Response::json(
-        "200 OK",
-        json!({
-            "lease_timeout_ms": 30000,
-            "lease_interval_ms": 10000,
-            "heartbeat_interval_ms": 10000,
-        "max_response_bytes": 67108864
-        }),
-    )]);
-    let api = Api::new(format!("{base_url}/control"), "secret-token")
-        .unwrap()
+    let (base_url, received, server) = server(vec![policy(), registered(), offline()]);
+    let api = api(format!("{base_url}/control"), "secret-token")
         .with_namespace("crawler")
         .unwrap();
 
-    api.open().await.unwrap();
+    api.open(CONCURRENCY).await.unwrap();
     api.close().await.unwrap();
 
     let requests = received.recv().unwrap();
     server.join().unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].path, "/control/v1/worker/policy");
+    assert_eq!(requests[1].path, "/control/v1/worker/register");
+    assert_eq!(requests[2].path, "/control/v1/worker/offline");
     assert_eq!(
         requests[0].headers.get("authorization").map(String::as_str),
         Some("Bearer secret-token")
@@ -82,15 +75,17 @@ async fn propagates_one_traceparent_across_api_retries() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_response_bytes": 67108864
+                "max_request_bytes": 67108864
             }),
         ),
+        registered(),
         Response::json("200 OK", json!(null)),
+        offline(),
     ]);
-    let api = Api::new(base_url, "token").unwrap();
+    let api = api(base_url, "token");
     let root = fastrace::Span::root("test.api", SpanContext::random());
     async {
-        api.open().await.unwrap();
+        api.open(CONCURRENCY).await.unwrap();
     }
     .in_span(fastrace::Span::enter_with_parent("test.open", &root))
     .await;
@@ -103,38 +98,41 @@ async fn propagates_one_traceparent_across_api_retries() {
 
     let requests = received.recv().unwrap();
     server.join().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 5);
     let first = requests[0].headers.get("traceparent").unwrap();
     let second = requests[1].headers.get("traceparent").unwrap();
     assert_eq!(first, second);
-    let third = requests[2].headers.get("traceparent").unwrap();
+    let register = requests[2].headers.get("traceparent").unwrap();
+    let trace = requests[3].headers.get("traceparent").unwrap();
+    let offline = requests[4].headers.get("traceparent").unwrap();
     let first = SpanContext::decode_w3c_traceparent(first).unwrap();
     let second = SpanContext::decode_w3c_traceparent(second).unwrap();
-    let third = SpanContext::decode_w3c_traceparent(third).unwrap();
+    let register = SpanContext::decode_w3c_traceparent(register).unwrap();
+    let trace = SpanContext::decode_w3c_traceparent(trace).unwrap();
+    let offline = SpanContext::decode_w3c_traceparent(offline).unwrap();
     assert_eq!(first, second);
-    assert_eq!(first.trace_id, third.trace_id);
-    assert_ne!(first.span_id, third.span_id);
+    assert_eq!(first.trace_id, register.trace_id);
+    assert_eq!(first.trace_id, trace.trace_id);
+    assert_eq!(first.trace_id, offline.trace_id);
+    assert_ne!(first.span_id, trace.span_id);
 }
 
 #[tokio::test]
-async fn open_rejects_a_master_response_limit_above_the_client_capacity() {
+async fn open_rejects_a_zero_master_request_limit() {
     let (base_url, received, server) = server(vec![Response::json(
         "200 OK",
         json!({
             "lease_timeout_ms": 30000,
             "lease_interval_ms": 10000,
             "heartbeat_interval_ms": 10000,
-            "max_response_bytes": 1025
+            "max_request_bytes": 0
         }),
     )]);
-    let api = Api::new(base_url, "token")
-        .unwrap()
-        .with_max_response_bytes(1024)
-        .unwrap();
+    let api = api(base_url, "token");
 
-    let error = api.open().await.unwrap_err();
+    let error = api.open(CONCURRENCY).await.unwrap_err();
     assert!(
-        matches!(error, scheduler::Error::Message(message) if message.contains("exceeds API Scheduler capacity"))
+        matches!(error, scheduler::Error::Message(message) if message.contains("request limit must be positive"))
     );
 
     let requests = received.recv().unwrap();
@@ -143,18 +141,22 @@ async fn open_rejects_a_master_response_limit_above_the_client_capacity() {
 }
 
 #[tokio::test]
-async fn master_message_limit_is_applied_before_sending_requests() {
-    let (base_url, received, server) = server(vec![Response::json(
-        "200 OK",
-        json!({
-            "lease_timeout_ms": 30000,
-            "lease_interval_ms": 10000,
-            "heartbeat_interval_ms": 10000,
-            "max_response_bytes": 256
-        }),
-    )]);
-    let api = Api::new(base_url, "token").unwrap();
-    api.open().await.unwrap();
+async fn master_request_limit_is_applied_before_sending_requests() {
+    let (base_url, received, server) = server(vec![
+        Response::json(
+            "200 OK",
+            json!({
+                "lease_timeout_ms": 30000,
+                "lease_interval_ms": 10000,
+                "heartbeat_interval_ms": 10000,
+                "max_request_bytes": 256
+            }),
+        ),
+        registered(),
+        offline(),
+    ]);
+    let api = api(base_url, "token");
+    api.open(CONCURRENCY).await.unwrap();
     let request = bound_request(format!("https://example.com/{}", "segment".repeat(128)));
 
     let result = api
@@ -167,7 +169,7 @@ async fn master_message_limit_is_applied_before_sending_requests() {
     api.close().await.unwrap();
     let requests = received.recv().unwrap();
     server.join().unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 3);
 }
 
 #[tokio::test]
@@ -179,199 +181,217 @@ async fn trace_id_uses_one_escaped_path_segment() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-            "max_response_bytes": 67108864
+            "max_request_bytes": 67108864
             }),
         ),
+        registered(),
         Response::json("200 OK", json!(null)),
+        offline(),
     ]);
-    let api = Api::new(base_url, "token").unwrap();
+    let api = api(base_url, "token");
 
-    api.open().await.unwrap();
+    api.open(CONCURRENCY).await.unwrap();
     assert!(api.trace("trace/part name?query").await.unwrap().is_none());
     api.close().await.unwrap();
 
     let requests = received.recv().unwrap();
     server.join().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
     assert_eq!(
-        requests[1].path,
+        requests[2].path,
         "/v1/worker/traces/trace%2Fpart%20name%3Fquery"
     );
 }
 
 #[tokio::test]
-async fn empty_mutation_response_is_accepted() {
+async fn open_registers_once_and_requests_use_the_frozen_worker() {
     let (base_url, received, server) = server(vec![
+        policy(),
+        registered(),
+        Response::json("200 OK", json!({"requests": []})),
+        Response::json("200 OK", json!({"pending": true})),
+        offline(),
+    ]);
+    let api = api(base_url, "token");
+
+    api.open(CONCURRENCY).await.unwrap();
+    api.open(CONCURRENCY).await.unwrap();
+    assert!(api.next_requests(1).await.unwrap().is_empty());
+    assert!(api.has_pending_requests().await.unwrap());
+    api.close().await.unwrap();
+
+    let requests = received.recv().unwrap();
+    server.join().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[1].path, "/v1/worker/register");
+    assert_eq!(requests[2].path, "/v1/worker/requests/claim");
+    assert_eq!(requests[3].path, "/v1/worker/requests/pending");
+    assert_eq!(requests[4].path, "/v1/worker/offline");
+
+    let registration = serde_json::from_slice::<serde_json::Value>(&requests[1].body).unwrap();
+    assert_eq!(
+        registration,
+        json!({
+            "worker_id": WORKER_ID,
+            "host": WORKER_HOST,
+            "version": WORKER_VERSION,
+            "modes": ["http"],
+            "concurrency": CONCURRENCY
+        })
+    );
+    let claim = serde_json::from_slice::<serde_json::Value>(&requests[2].body).unwrap();
+    assert_eq!(
+        claim,
+        json!({"limit": 1, "worker_id": WORKER_ID, "modes": ["http"]})
+    );
+    let pending = serde_json::from_slice::<serde_json::Value>(&requests[3].body).unwrap();
+    assert_eq!(pending, json!({"worker_id": WORKER_ID, "modes": ["http"]}));
+    let offline = serde_json::from_slice::<serde_json::Value>(&requests[4].body).unwrap();
+    assert_eq!(
+        offline,
+        json!({"worker_id": WORKER_ID, "token": "worker-token"})
+    );
+}
+
+#[tokio::test]
+async fn worker_conflict_fails_open_without_starting_a_lifecycle() {
+    let (base_url, received, server) = server(vec![
+        policy(),
         Response::json(
             "200 OK",
-            json!({
-                "lease_timeout_ms": 30000,
-                "lease_interval_ms": 10000,
-                "heartbeat_interval_ms": 10000,
-            "max_response_bytes": 67108864
-            }),
+            json!({"code": 100, "message": "worker_id is already online", "data": null}),
         ),
-        Response::empty("204 No Content"),
     ]);
-    let api = Api::new(base_url, "token").unwrap();
-    api.open().await.unwrap();
-    assert!(
-        api.next_requests(0, "worker-1", &[net::Mode::Http])
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let api = api(base_url, "token");
+
+    let error = api.open(CONCURRENCY).await.unwrap_err();
+    assert!(matches!(error, scheduler::Error::Message(message) if message.contains("code 100")));
     api.close().await.unwrap();
 
     let requests = received.recv().unwrap();
     server.join().unwrap();
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].path.ends_with("/worker/heartbeat"));
-}
-
-#[tokio::test]
-async fn worker_registration_is_sent_only_for_first_use_and_mode_changes() {
-    let (base_url, received, server) = server(vec![
-        Response::json(
-            "200 OK",
-            json!({
-                "lease_timeout_ms": 30000,
-                "lease_interval_ms": 10000,
-                "heartbeat_interval_ms": 10000,
-                "max_response_bytes": 67108864
-            }),
-        ),
-        Response::json("200 OK", json!({})),
-        Response::json("200 OK", json!({})),
-    ]);
-    let api = Api::new(base_url, "token").unwrap();
-    api.open().await.unwrap();
-
-    api.next_requests(0, "worker-1", &[net::Mode::Http])
-        .await
-        .unwrap();
-    api.next_requests(0, "worker-1", &[net::Mode::Http])
-        .await
-        .unwrap();
-    api.next_requests(0, "worker-1", &[net::Mode::Browser])
-        .await
-        .unwrap();
-    api.close().await.unwrap();
-
-    let requests = received.recv().unwrap();
-    server.join().unwrap();
-    assert_eq!(requests.len(), 3);
     assert!(
-        requests[1..]
-            .iter()
-            .all(|request| request.path.ends_with("/worker/heartbeat"))
+        !api.runtime
+            .opened
+            .load(std::sync::atomic::Ordering::Acquire)
     );
+    assert!(api.runtime.heartbeat.lock().unwrap().is_none());
+    assert!(api.runtime.token.lock().unwrap().is_none());
 }
 
 #[tokio::test]
-async fn mode_updates_wait_for_an_older_heartbeat_before_advertising_new_modes() {
-    let (heartbeat_reached, heartbeat_started) = std::sync::mpsc::channel();
-    let (resume_heartbeat, heartbeat_continued) = std::sync::mpsc::channel();
-    let (base_url, received, server) = concurrent_server(vec![
-        Response::json(
-            "200 OK",
-            json!({
-                "lease_timeout_ms": 30000,
-                "lease_interval_ms": 10000,
-                "heartbeat_interval_ms": 100,
-                "max_response_bytes": 67108864
-            }),
-        ),
-        Response::empty("204 No Content"),
-        Response::held_json("200 OK", json!({}), heartbeat_reached, heartbeat_continued),
-        Response::empty("204 No Content"),
+async fn register_requires_a_non_empty_server_token() {
+    let (base_url, received, server) = server(vec![policy(), worker_ok(json!(null))]);
+    let api = api(base_url, "token");
+
+    let error = api.open(CONCURRENCY).await.unwrap_err();
+    assert!(
+        matches!(error, scheduler::Error::Message(message) if message.contains("non-empty token"))
+    );
+
+    let requests = received.recv().unwrap();
+    server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+}
+
+#[tokio::test]
+async fn register_retries_reuse_one_idempotency_key() {
+    let (base_url, received, server) = server(vec![
+        policy(),
+        unavailable("register unavailable"),
+        registered(),
+        offline(),
     ]);
-    let api = Arc::new(Api::new(base_url, "token").unwrap());
-    api.open().await.unwrap();
-    api.next_requests(0, "worker-1", &[net::Mode::Http])
-        .await
-        .unwrap();
-    wait_for_request(heartbeat_started).await;
+    let api = api(base_url, "token");
 
-    let updating = {
-        let api = api.clone();
-        tokio::spawn(async move {
-            api.next_requests(0, "worker-1", &[net::Mode::Browser])
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert!(!updating.is_finished());
-
-    resume_heartbeat.send(()).unwrap();
-    updating.await.unwrap().unwrap();
+    api.open(CONCURRENCY).await.unwrap();
     api.close().await.unwrap();
 
     let requests = received.recv().unwrap();
     server.join().unwrap();
-    assert_eq!(requests.len(), 4);
-    let heartbeat = serde_json::from_slice::<serde_json::Value>(&requests[2].body).unwrap();
-    let update = serde_json::from_slice::<serde_json::Value>(&requests[3].body).unwrap();
-    assert_eq!(heartbeat["modes"], json!(["http"]));
-    assert_eq!(update["modes"], json!(["browser"]));
+    let keys = operation_keys(&requests, "/v1/worker/register");
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1]);
 }
 
 #[tokio::test]
-async fn a_failed_heartbeat_forces_registration_before_the_next_claim() {
+async fn heartbeat_failure_pauses_claim_and_recovery_resumes_it() {
     let (base_url, received, server) = server(vec![
         Response::json(
             "200 OK",
             json!({
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
-                "heartbeat_interval_ms": 100,
-                "max_response_bytes": 67108864
+                "heartbeat_interval_ms": 200,
+                "max_request_bytes": 67108864
             }),
         ),
-        Response::empty("204 No Content"),
+        registered(),
         unavailable("heartbeat unavailable"),
-        unavailable("heartbeat unavailable"),
-        unavailable("heartbeat unavailable"),
-        Response::empty("204 No Content"),
+        worker_ok(json!(null)),
+        Response::json("200 OK", json!({"requests": []})),
+        offline(),
     ]);
-    let api = Api::new(base_url, "token").unwrap();
-    api.open().await.unwrap();
-    api.next_requests(0, "worker-1", &[net::Mode::Http])
-        .await
-        .unwrap();
-    let registration = api
-        .runtime
-        .workers
-        .lock()
-        .await
-        .get("worker-1")
-        .unwrap()
-        .registration
-        .clone();
+    let api = api(base_url, "token");
+    api.open(CONCURRENCY).await.unwrap();
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if !registration.lock().await.confirmed {
-                break;
-            }
+        while api
+            .runtime
+            .can_claim
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
+    assert!(api.next_requests(1).await.unwrap().is_empty());
 
-    api.next_requests(0, "worker-1", &[net::Mode::Http])
-        .await
-        .unwrap();
-    assert!(registration.lock().await.confirmed);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !api
+            .runtime
+            .can_claim
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(api.next_requests(1).await.unwrap().is_empty());
     api.close().await.unwrap();
 
     let requests = received.recv().unwrap();
     server.join().unwrap();
-    assert_eq!(requests.len(), 6);
-    assert!(
-        requests[1..]
+    assert_eq!(
+        requests
             .iter()
-            .all(|request| request.path.ends_with("/worker/heartbeat"))
+            .filter(|request| request.path.ends_with("/worker/register"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.path.ends_with("/worker/heartbeat"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.path.ends_with("/requests/claim"))
+            .count(),
+        1
+    );
+    let heartbeat = requests
+        .iter()
+        .find(|request| request.path.ends_with("/worker/heartbeat"))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&heartbeat.body).unwrap(),
+        json!({"worker_id": WORKER_ID, "token": "worker-token"})
     );
 }

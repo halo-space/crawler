@@ -72,13 +72,8 @@ async fn traced_request(scheduler: &spider::Memory, node: &str) -> net::Request 
 async fn released_code_request_resolves_its_stable_node_again() {
     let scheduler = spider::Memory::new();
     traced_request(&scheduler, "detail").await;
-    let claimed = scheduler
-        .next_requests(1, "worker-1", &[net::Mode::Http])
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let mut release = payload::Payload::for_request(&claimed, "worker-1");
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut release = payload::Payload::for_request(&claimed, claimed.leased_by.clone());
     release.state = net::State::Processing;
     scheduler.release(&release).await.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -88,7 +83,7 @@ async fn released_code_request_resolves_its_stable_node_again() {
         .with_spider(RecoverySpider::new(calls.clone()))
         .build();
 
-    runtime.start().await.unwrap();
+    runtime.start_until_idle().await.unwrap();
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.scheduler().done_len(), 1);
@@ -104,7 +99,7 @@ async fn missing_code_node_uses_request_failure_settlement() {
         .with_spider(RecoverySpider::new(Arc::new(AtomicUsize::new(0))))
         .build();
 
-    runtime.start().await.unwrap();
+    runtime.start_until_idle().await.unwrap();
 
     assert_eq!(runtime.scheduler().done_len(), 0);
     assert_eq!(runtime.scheduler().failed_len(), 1);

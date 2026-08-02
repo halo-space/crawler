@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::runtime::MAX_EVENTS;
 use crate::spider::tx;
-use crate::{config, downloader, middleware, net, scheduler, spider};
+use crate::{config, downloader, middleware, scheduler, spider};
 
 /// Rules 模式装配完成后的 Engine 类型。
 pub type Runtime<S, D, F, O = crate::item::Jsonl> = super::runtime::Runtime<
@@ -26,7 +26,6 @@ pub struct Builder<S, D, F, O = crate::item::Jsonl> {
     pub(super) schemas: Arc<crate::item::schema::Store>,
     pub(super) ai: Option<Arc<crate::ai::OpenAI>>,
     pub(super) middlewares: Vec<middleware::Spec>,
-    pub(super) worker: super::worker::Worker,
 }
 
 impl<S, D, F, O> Builder<S, D, F, O> {
@@ -41,7 +40,6 @@ impl<S, D, F, O> Builder<S, D, F, O> {
             schemas: self.schemas,
             ai: self.ai,
             middlewares: self.middlewares,
-            worker: self.worker,
         }
     }
 
@@ -56,7 +54,6 @@ impl<S, D, F, O> Builder<S, D, F, O> {
             schemas: self.schemas,
             ai: self.ai,
             middlewares: self.middlewares,
-            worker: self.worker,
         }
     }
 
@@ -71,7 +68,6 @@ impl<S, D, F, O> Builder<S, D, F, O> {
             schemas: self.schemas,
             ai: self.ai,
             middlewares: self.middlewares,
-            worker: self.worker,
         }
     }
 
@@ -86,23 +82,12 @@ impl<S, D, F, O> Builder<S, D, F, O> {
             schemas: self.schemas,
             ai: self.ai,
             middlewares: self.middlewares,
-            worker: self.worker,
         }
-    }
-
-    pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
-        self.worker.set_id(worker_id);
-        self
     }
 
     /// Selects the Worker-local OpenAI provider used by every parsed Response.
     pub fn with_ai(mut self, openai: crate::ai::OpenAI) -> Self {
         self.ai = Some(Arc::new(openai));
-        self
-    }
-
-    pub fn with_modes(mut self, modes: impl IntoIterator<Item = net::Mode>) -> Self {
-        self.worker.set_modes(modes);
         self
     }
 
@@ -146,7 +131,6 @@ where
             events,
             registry: self.registry,
             middlewares: self.middlewares,
-            worker: self.worker,
         })
         .with_init(Init::new(config, trace_id, schemas))
     }

@@ -1,7 +1,7 @@
 use spider::{Scheduler, payload};
 
 use super::{
-    fixture::{HTTP, WORKER_A, close, open_run},
+    fixture::{close, open_run},
     payload::request,
     settlement::succeed,
 };
@@ -18,12 +18,7 @@ where
         .push(payload::Payload::new().requests(vec![accepted]))
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, WORKER_A, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     assert_eq!(
         claimed.max_retry_count,
         spider::net::request::MAX_RETRY_COUNT
@@ -38,12 +33,7 @@ where
             .await
             .is_err()
     );
-    assert!(
-        !scheduler
-            .has_pending_requests(WORKER_A, HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(!scheduler.has_pending_requests().await.unwrap());
 
     close(&scheduler).await;
 }

@@ -3,15 +3,9 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use spider::scheduler::Init;
-use spider::{Scheduler, net, trace};
+use spider::{Scheduler, trace};
 
 use super::payload::{TASK_ID, TRACE_ID};
-
-pub(crate) const WORKER_A: &str = "worker-a";
-pub(crate) const WORKER_B: &str = "worker-b";
-pub(crate) const HTTP: &[net::Mode] = &[net::Mode::Http];
-pub(super) const BROWSER: &[net::Mode] = &[net::Mode::Browser];
-pub(super) const ALL: &[net::Mode] = &[net::Mode::Http, net::Mode::Browser];
 
 /// Timing chosen by a Scheduler conformance fixture.
 ///
@@ -78,7 +72,7 @@ pub(super) async fn open<S>(scheduler: &S)
 where
     S: Scheduler,
 {
-    scheduler.open().await.unwrap();
+    scheduler.open(16).await.unwrap();
 }
 
 pub(super) async fn open_run<S>(scheduler: &S)

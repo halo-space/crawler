@@ -1,141 +1,220 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use spider::{net, scheduler};
-use tokio::sync::Mutex;
 
-use super::{Api, client, state, wire};
+use super::{client, state, wire};
 
-impl Api {
-    pub(super) async fn register(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<Vec<net::Mode>, scheduler::Error> {
-        let epoch = self.require_open()?;
-        let modes = canonical_modes(worker_id, modes)?;
-        let registration = {
-            let mut workers = self.runtime.workers.lock().await;
-            if let Some(worker) = workers.get(worker_id) {
-                worker.registration.clone()
-            } else {
-                let registration = Arc::new(Mutex::new(state::Registration::new(modes.clone())));
-                let task = tokio::spawn(heartbeat(
-                    self.client.clone(),
-                    self.runtime.clone(),
-                    epoch,
-                    worker_id.to_string(),
-                    registration.clone(),
-                ));
-                workers.insert(
-                    worker_id.to_string(),
-                    state::Worker {
-                        registration: registration.clone(),
-                        task,
-                    },
-                );
-                registration
-            }
-        };
+const SUCCESS: i32 = 200;
 
-        synchronize(&self.client, worker_id, &registration, &modes).await?;
-        self.require_epoch(epoch)?;
-        Ok(modes)
+pub(super) struct Config {
+    id: Option<String>,
+    host: Option<String>,
+    version: Option<String>,
+    modes: Vec<net::Mode>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            id: None,
+            host: None,
+            version: None,
+            modes: vec![net::Mode::Http],
+        }
     }
 }
 
-async fn synchronize(
+impl Config {
+    pub(super) fn set_id(&mut self, id: String) {
+        self.id = Some(id);
+    }
+
+    pub(super) fn set_host(&mut self, host: String) {
+        self.host = Some(host);
+    }
+
+    pub(super) fn set_version(&mut self, version: String) {
+        self.version = Some(version);
+    }
+
+    pub(super) fn set_modes(&mut self, modes: impl IntoIterator<Item = net::Mode>) {
+        self.modes = canonical_modes(modes);
+    }
+
+    pub(super) fn validate(&self, concurrency: usize) -> Result<(), scheduler::Error> {
+        required("worker_id", self.id.as_deref())?;
+        required("worker_host", self.host.as_deref())?;
+        required("worker_version", self.version.as_deref())?;
+        if concurrency == 0 {
+            return Err(scheduler::Error::Message(
+                "worker concurrency must be positive".to_string(),
+            ));
+        }
+        if self.modes.is_empty() {
+            return Err(scheduler::Error::Message(
+                "worker modes must not be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn id(&self) -> Result<&str, scheduler::Error> {
+        required("worker_id", self.id.as_deref())
+    }
+
+    pub(super) fn modes(&self) -> &[net::Mode] {
+        &self.modes
+    }
+
+    fn registration(&self, concurrency: usize) -> Result<wire::Register, scheduler::Error> {
+        self.validate(concurrency)?;
+        Ok(wire::Register {
+            worker_id: self.id()?.to_string(),
+            host: required("worker_host", self.host.as_deref())?.to_string(),
+            version: required("worker_version", self.version.as_deref())?.to_string(),
+            modes: self.modes.clone(),
+            concurrency,
+        })
+    }
+}
+
+pub(super) async fn register(
     client: &client::Client,
-    worker_id: &str,
-    registration: &Mutex<state::Registration>,
-    modes: &[net::Mode],
-) -> Result<(), scheduler::Error> {
-    let mut registration = registration.lock().await;
-    if registration.confirmed && registration.modes == modes {
-        return Ok(());
-    }
-
-    registration.modes = modes.to_vec();
-    let body = wire::Worker {
-        worker_id: worker_id.to_string(),
-        modes: registration.modes.clone(),
-    };
-    match client.post_empty("v1/worker/heartbeat", &body, None).await {
-        Ok(()) => {
-            registration.confirmed = true;
-            Ok(())
-        }
-        Err(error) => {
-            registration.confirmed = false;
-            Err(error)
-        }
-    }
+    config: &Config,
+    concurrency: usize,
+    operation_key: &str,
+) -> Result<String, scheduler::Error> {
+    let body = config.registration(concurrency)?;
+    let response = client
+        .post::<_, wire::WorkerResponse>("v1/worker/register", &body, Some(operation_key))
+        .await?;
+    success("register", &response)?;
+    response
+        .data
+        .as_str()
+        .filter(|token| !token.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            scheduler::Error::Message(
+                "Worker register response data must be a non-empty token".to_string(),
+            )
+        })
 }
 
-async fn heartbeat(
+pub(super) fn start_heartbeat(
     client: client::Client,
     runtime: Arc<state::Runtime>,
     epoch: u64,
     worker_id: String,
-    registration: Arc<Mutex<state::Registration>>,
-) {
-    loop {
-        let interval = *runtime.heartbeat_interval.read().await;
-        tokio::time::sleep(interval).await;
-        if !runtime.is_open(epoch) {
-            return;
-        }
-        let mut registration = registration.lock().await;
-        let body = wire::Worker {
-            worker_id: worker_id.clone(),
-            modes: registration.modes.clone(),
-        };
-        let was_confirmed = registration.confirmed;
-        match client.post_empty("v1/worker/heartbeat", &body, None).await {
-            Ok(()) => registration.confirmed = true,
-            Err(error) => {
-                registration.confirmed = false;
-                if was_confirmed {
+    token: String,
+    interval: Duration,
+) -> state::Heartbeat {
+    let (stop, mut stopping) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut stopping => return,
+                _ = tokio::time::sleep(interval) => {}
+            }
+            if !runtime.is_open(epoch) {
+                return;
+            }
+
+            let body = wire::Worker {
+                worker_id: worker_id.clone(),
+                token: token.clone(),
+            };
+            let result = client
+                .post_once::<_, wire::WorkerResponse>("v1/worker/heartbeat", &body)
+                .await
+                .and_then(|response| success("heartbeat", &response));
+            if !runtime.is_open(epoch) {
+                return;
+            }
+            match result {
+                Ok(()) => {
+                    if !runtime.can_claim.swap(true, Ordering::AcqRel) {
+                        tracing::info!(
+                            worker_id = %worker_id,
+                            "API Scheduler Worker heartbeat recovered"
+                        );
+                    }
+                }
+                Err(error) => {
+                    runtime.can_claim.store(false, Ordering::Release);
                     tracing::warn!(
                         worker_id = %worker_id,
                         error = %error,
-                        "API Scheduler Worker heartbeat failed"
+                        "API Scheduler Worker heartbeat failed; Request claims are paused"
                     );
                 }
             }
         }
+    });
+    state::Heartbeat { stop, task }
+}
+
+pub(super) async fn offline(
+    client: &client::Client,
+    worker_id: &str,
+    token: String,
+) -> Result<(), scheduler::Error> {
+    let body = wire::Worker {
+        worker_id: worker_id.to_string(),
+        token,
+    };
+    let response = client
+        .post_once::<_, wire::WorkerResponse>("v1/worker/offline", &body)
+        .await?;
+    success("offline", &response)
+}
+
+fn success(operation: &str, response: &wire::WorkerResponse) -> Result<(), scheduler::Error> {
+    if response.code == SUCCESS {
+        Ok(())
+    } else {
+        Err(scheduler::Error::Message(format!(
+            "Worker {operation} failed with code {}: {}",
+            response.code, response.message
+        )))
     }
 }
 
-pub(super) fn canonical_modes(
-    worker_id: &str,
-    modes: &[net::Mode],
-) -> Result<Vec<net::Mode>, scheduler::Error> {
-    if worker_id.trim().is_empty() {
-        return Err(scheduler::Error::Message(
-            "worker_id must not be empty".to_string(),
-        ));
-    }
-    if modes.is_empty() {
-        return Err(scheduler::Error::Message(
-            "worker modes must not be empty".to_string(),
-        ));
-    }
+fn required<'a>(name: &str, value: Option<&'a str>) -> Result<&'a str, scheduler::Error> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            scheduler::Error::Message(format!(
+                "API Scheduler requires {name}; configure it before open"
+            ))
+        })
+}
 
-    let mut http = false;
-    let mut browser = false;
+fn canonical_modes(modes: impl IntoIterator<Item = net::Mode>) -> Vec<net::Mode> {
+    let mut values = Vec::with_capacity(2);
     for mode in modes {
-        match mode {
-            net::Mode::Http => http = true,
-            net::Mode::Browser => browser = true,
+        if !values.contains(&mode) {
+            values.push(mode);
         }
     }
+    values.sort_by_key(|mode| match mode {
+        net::Mode::Http => 0,
+        net::Mode::Browser => 1,
+    });
+    values
+}
 
-    let mut values = Vec::with_capacity(2);
-    if http {
-        values.push(net::Mode::Http);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modes_are_canonical() {
+        assert_eq!(
+            canonical_modes([net::Mode::Browser, net::Mode::Http, net::Mode::Browser]),
+            [net::Mode::Http, net::Mode::Browser]
+        );
     }
-    if browser {
-        values.push(net::Mode::Browser);
-    }
-    Ok(values)
 }

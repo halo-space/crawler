@@ -49,11 +49,11 @@ impl Keys {
     }
 
     pub(super) fn request(&self, id: &str) -> String {
-        self.request_token(&token(id))
+        self.request_segment(&segment(id))
     }
 
-    pub(super) fn request_token(&self, token: &str) -> String {
-        self.key(&format!("request:{token}"))
+    pub(super) fn request_segment(&self, segment: &str) -> String {
+        self.key(&format!("request:{segment}"))
     }
 
     pub(super) fn completion(&self, id: &str, version: i64) -> String {
@@ -61,7 +61,11 @@ impl Keys {
     }
 
     pub(super) fn stats(&self, trace_id: &str) -> String {
-        self.key(&format!("trace:{}:stats", token(trace_id)))
+        self.key(&format!("trace:{}:stats", segment(trace_id)))
+    }
+
+    pub(super) fn worker(&self, worker_id: &str) -> String {
+        self.key(&format!("worker:{}", segment(worker_id)))
     }
 
     fn key(&self, suffix: &str) -> String {
@@ -69,7 +73,7 @@ impl Keys {
     }
 }
 
-pub(super) fn token(value: &str) -> String {
+pub(super) fn segment(value: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value)
 }
 

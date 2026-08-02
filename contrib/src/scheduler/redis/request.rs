@@ -49,7 +49,7 @@ fn parse_mode(value: &str) -> Result<net::Mode, scheduler::Error> {
 
 #[derive(Serialize)]
 struct Queued {
-    token: String,
+    segment: String,
     id: String,
     task_id: String,
     trace_id: String,
@@ -86,7 +86,7 @@ struct Claimed {
 }
 
 struct Recovery {
-    token: String,
+    segment: String,
     version: String,
     id: String,
     message: String,
@@ -102,7 +102,7 @@ impl Redis {
             .map_err(|error| scheduler::Error::Message(error.to_string()))?;
         let id = snapshot.id.clone();
         Ok(Queued {
-            token: key::token(&id),
+            segment: key::segment(&id),
             id,
             task_id: snapshot.task_id.clone(),
             trace_id: snapshot.trace_id.clone(),
@@ -152,9 +152,10 @@ impl Redis {
         let modes = modes.iter().map(mode).collect::<Vec<_>>();
         let modes = Self::encode(&modes)?;
         let mut connection = self.connection().await?;
-        // These cursors bound excluded-Request scans without writing Worker-local state to Redis.
-        let mut cursors = self.claim_cursors.lock().await;
-        let mut position = cursors.get(worker_id).cloned().unwrap_or_default();
+        // This cursor bounds excluded-Request scans without writing Worker-local state to Redis.
+        // A Redis Scheduler lifecycle is bound to one Worker, so it needs only one cursor.
+        let mut cursor = self.claim_cursor.lock().await;
+        let mut position = cursor.clone();
         let encoded = loop {
             let (
                 http_revision,
@@ -169,6 +170,7 @@ impl Redis {
                 .prepare_invoke()
                 .key(self.keys.meta())
                 .key(self.keys.traces())
+                .key(self.keys.worker(worker_id))
                 .arg(self.keys.prefix())
                 .arg(limit)
                 .arg(worker_id)
@@ -202,12 +204,12 @@ impl Redis {
             }
             position = next;
         };
-        if position.has_member() {
-            cursors.insert(worker_id.to_string(), position);
+        *cursor = if position.has_member() {
+            position
         } else {
-            cursors.remove(worker_id);
-        }
-        drop(cursors);
+            Cursor::default()
+        };
+        drop(cursor);
         drop(connection);
 
         let mut requests = Vec::with_capacity(encoded.len());
@@ -232,8 +234,8 @@ impl Redis {
                 .filter(|value| !value.is_empty())
                 .unwrap_or("unknown")
                 .to_string();
-            let token = match claim_field(&value, "token") {
-                Ok(token) => token,
+            let segment = match claim_field(&value, "segment") {
+                Ok(segment) => segment,
                 Err(error) => {
                     let version = value
                         .get("version")
@@ -247,36 +249,38 @@ impl Redis {
             let version = match claim_field(&value, "version") {
                 Ok(version) => version,
                 Err(error) => {
-                    warn_recovery(worker_id, &id, &token, "unknown", &error);
+                    warn_recovery(worker_id, &id, &segment, "unknown", &error);
                     recovery_error.get_or_insert(error);
                     continue;
                 }
             };
             match serde_json::from_value::<Claimed>(value) {
-                Ok(claimed) if key::token(&claimed.id) == token => match Self::restore(&claimed) {
-                    Ok(request) => requests.push(request),
-                    Err(error) => recoveries.push(Recovery {
-                        token,
-                        version,
-                        id,
-                        message: error.to_string(),
-                        max_retry_count: snapshot_retry_limit(&claimed),
-                    }),
-                },
+                Ok(claimed) if key::segment(&claimed.id) == segment => {
+                    match Self::restore(&claimed) {
+                        Ok(request) => requests.push(request),
+                        Err(error) => recoveries.push(Recovery {
+                            segment,
+                            version,
+                            id,
+                            message: error.to_string(),
+                            max_retry_count: snapshot_retry_limit(&claimed),
+                        }),
+                    }
+                }
                 Ok(_) => recoveries.push(Recovery {
-                    token,
+                    segment,
                     version,
                     id: id.clone(),
                     message: scheduler::Error::InvalidRequest {
                         id,
-                        message: "claimed Redis Request id does not match its queue token"
+                        message: "claimed Redis Request id does not match its queue segment"
                             .to_string(),
                     }
                     .to_string(),
                     max_retry_count: None,
                 }),
                 Err(error) => recoveries.push(Recovery {
-                    token,
+                    segment,
                     version,
                     id: id.clone(),
                     message: scheduler::Error::InvalidRequest {
@@ -292,7 +296,7 @@ impl Redis {
         for recovery in recoveries {
             if let Err(error) = self
                 .recover(
-                    &recovery.token,
+                    &recovery.segment,
                     worker_id,
                     &recovery.version,
                     &recovery.id,
@@ -304,7 +308,7 @@ impl Redis {
                 warn_recovery(
                     worker_id,
                     &recovery.id,
-                    &recovery.token,
+                    &recovery.segment,
                     &recovery.version,
                     &error,
                 );
@@ -483,7 +487,7 @@ impl Redis {
 
     async fn recover(
         &self,
-        token: &str,
+        segment: &str,
         worker_id: &str,
         version: &str,
         id: &str,
@@ -495,10 +499,10 @@ impl Redis {
             .scripts
             .recover
             .prepare_invoke()
-            .key(self.keys.request_token(token))
+            .key(self.keys.request_segment(segment))
             .key(self.keys.meta())
             .arg(self.keys.prefix())
-            .arg(token)
+            .arg(segment)
             .arg(worker_id)
             .arg(version)
             .arg(reason)
@@ -543,13 +547,13 @@ fn claim_field(value: &Value, field: &str) -> Result<String, scheduler::Error> {
 fn warn_recovery(
     worker_id: &str,
     id: &str,
-    token: &str,
+    segment: &str,
     version: &str,
     error: &dyn std::fmt::Display,
 ) {
     tracing::warn!(
         request_id = %id,
-        token = %token,
+        segment = %segment,
         version = %version,
         worker_id = %worker_id,
         error = %error,

@@ -2,7 +2,7 @@ use spider::scheduler::{Error, Init};
 use spider::{Scheduler, net, payload, trace};
 
 use super::{
-    fixture::{HTTP, WORKER_A, close, open},
+    fixture::{close, open},
     payload::owned_request,
     settlement::succeed,
 };
@@ -37,12 +37,7 @@ where
         7
     );
     assert!(scheduler.trace("missing").await.unwrap().is_none());
-    assert!(
-        !scheduler
-            .has_pending_requests(WORKER_A, HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(!scheduler.has_pending_requests().await.unwrap());
 
     let replacement = trace::Snapshot::code("task-trace");
     assert!(
@@ -89,7 +84,7 @@ graph:
         .unwrap();
     let stored = scheduler.trace("trace-rules").await.unwrap().unwrap();
     assert_eq!(stored.dsl.unwrap().spider.name, "rules-trace");
-    let claimed = scheduler.next_requests(2, WORKER_A, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(2).await.unwrap();
     assert_eq!(claimed.len(), 2);
     assert!(claimed.iter().all(|request| {
         request.task_id == "task-rules"
@@ -141,13 +136,7 @@ where
             .is_err()
     );
     assert!(scheduler.trace("trace-init").await.unwrap().is_none());
-    assert!(
-        scheduler
-            .next_requests(2, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(2).await.unwrap().is_empty());
     close(&scheduler).await;
 }
 
@@ -192,13 +181,7 @@ where
         assert!(scheduler.trace(trace_id).await.unwrap().is_none());
     }
 
-    assert!(
-        scheduler
-            .next_requests(2, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(2).await.unwrap().is_empty());
     close(&scheduler).await;
 }
 
@@ -233,13 +216,7 @@ where
         .await
         .unwrap_err();
     assert!(matches!(error, Error::IdentityMismatch { .. }));
-    assert!(
-        scheduler
-            .next_requests(2, WORKER_A, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(2).await.unwrap().is_empty());
 
     let missing = owned_request(
         "owner-missing",

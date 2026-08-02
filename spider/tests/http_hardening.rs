@@ -271,7 +271,7 @@ async fn engine_download_retry_starts_with_a_fresh_timeout_budget() {
         .build()
         .with_concurrency(1);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
     server.join().unwrap();
 
     assert_eq!(parses.load(Ordering::SeqCst), 1);

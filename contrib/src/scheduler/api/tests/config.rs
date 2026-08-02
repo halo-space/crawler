@@ -3,17 +3,14 @@ use super::*;
 #[test]
 fn construction_exposes_the_lease_before_open() {
     let lease = scheduler::Lease::new(Duration::from_secs(12), Duration::from_secs(3)).unwrap();
-    let api = Api::new("https://master.example.com/control", "token")
-        .unwrap()
+    let api = api("https://master.example.com/control", "token")
         .with_namespace("crawler")
         .unwrap()
         .with_lease(lease)
-        .unwrap()
-        .with_max_response_bytes(1024)
         .unwrap();
 
     assert_eq!(api.lease(), Some(lease));
-    assert!(api.requires_explicit_worker_id());
+    assert!(api.worker.validate(CONCURRENCY).is_ok());
 }
 #[test]
 fn construction_rejects_invalid_transport_configuration() {
@@ -41,16 +38,10 @@ fn construction_rejects_invalid_transport_configuration() {
             .with_namespace("x".repeat(129))
             .is_err()
     );
-    assert!(
-        Api::new("https://master.example.com", "token")
-            .unwrap()
-            .with_max_response_bytes(0)
-            .is_err()
-    );
 }
 
 #[test]
-fn execution_identity_is_the_direct_ack_release_and_refresh_body() {
+fn execution_lease_is_the_direct_ack_release_and_refresh_body() {
     let mut request = net::Request::follow("https://example.com")
         .unwrap()
         .node("detail");
@@ -60,7 +51,7 @@ fn execution_identity_is_the_direct_ack_release_and_refresh_body() {
     request.version = 2;
     request.leased_by = "worker-1".to_string();
     let identity =
-        wire::Identity::from_payload(&payload::Payload::for_request(&request, "worker-1"));
+        wire::Lease::from_payload(&payload::Payload::for_request(&request, "reported-worker"));
 
     assert_eq!(
         serde_json::to_value(identity).unwrap(),
@@ -69,24 +60,57 @@ fn execution_identity_is_the_direct_ack_release_and_refresh_body() {
             "task_id": "task-1",
             "trace_id": "trace-1",
             "version": 2,
-            "worker_id": "worker-1",
             "node": "detail"
         })
     );
 }
 
 #[test]
-fn modes_are_canonical_and_worker_validation_is_stable() {
-    assert_eq!(
-        canonical_modes(
-            "worker-1",
-            &[net::Mode::Browser, net::Mode::Http, net::Mode::Browser]
-        )
-        .unwrap(),
-        [net::Mode::Http, net::Mode::Browser]
+fn worker_builders_validate_and_canonicalize_configuration() {
+    let api = Api::new("https://master.example.com", "token")
+        .unwrap()
+        .with_worker_id(WORKER_ID)
+        .unwrap()
+        .with_worker_host(WORKER_HOST)
+        .unwrap()
+        .with_worker_version(WORKER_VERSION)
+        .unwrap()
+        .with_modes([net::Mode::Browser, net::Mode::Http, net::Mode::Browser])
+        .unwrap();
+
+    assert!(api.worker.validate(CONCURRENCY).is_ok());
+    assert_eq!(api.worker.modes(), [net::Mode::Http, net::Mode::Browser]);
+    assert!(
+        Api::new("https://master.example.com", "token")
+            .unwrap()
+            .with_worker_id(" ")
+            .is_err()
     );
-    assert!(canonical_modes(" ", &[net::Mode::Http]).is_err());
-    assert!(canonical_modes("worker-1", &[]).is_err());
+    assert!(
+        Api::new("https://master.example.com", "token")
+            .unwrap()
+            .with_worker_host(" ")
+            .is_err()
+    );
+    assert!(
+        Api::new("https://master.example.com", "token")
+            .unwrap()
+            .with_worker_version(" ")
+            .is_err()
+    );
+    assert!(
+        Api::new("https://master.example.com", "token")
+            .unwrap()
+            .with_modes([])
+            .is_err()
+    );
+    assert!(
+        Api::new("https://master.example.com", "token")
+            .unwrap()
+            .worker
+            .validate(CONCURRENCY)
+            .is_err()
+    );
 }
 
 #[test]
@@ -145,10 +169,20 @@ fn configuration_is_frozen_while_the_scheduler_is_open() {
         .store(true, std::sync::atomic::Ordering::Release);
     assert!(configured_lease.with_lease(lease).is_err());
 
-    let response_limit = Api::new("https://master.example.com", "token").unwrap();
-    response_limit
+    let worker = Api::new("https://master.example.com", "token").unwrap();
+    worker
         .runtime
         .opened
         .store(true, std::sync::atomic::Ordering::Release);
-    assert!(response_limit.with_max_response_bytes(1024).is_err());
+    assert!(worker.with_worker_id(WORKER_ID).is_err());
+
+    let pending_registration = Api::new("https://master.example.com", "token").unwrap();
+    pending_registration.runtime.open_key(CONCURRENCY).unwrap();
+    assert!(pending_registration.with_namespace("other").is_err());
+
+    let pending_offline = Api::new("https://master.example.com", "token").unwrap();
+    pending_offline
+        .runtime
+        .set_token("worker-token".to_string());
+    assert!(pending_offline.with_worker_id("other-worker").is_err());
 }

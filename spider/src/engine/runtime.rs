@@ -1,14 +1,17 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use kameo::actor::Spawn;
 
-use super::worker::Worker;
 use crate::spider::tx::{Event, Events};
 use crate::{downloader, engine, middleware, scheduler};
 
 pub const MAX_REQUEST_CONCURRENCY: usize = 16;
 pub const MAX_EVENTS: usize = 32;
-pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+pub const DEFAULT_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+type ShutdownSignal = Pin<Box<dyn Future<Output = Result<(), crate::Error>> + Send>>;
 
 pub(super) struct Setup<S, D, E, O> {
     pub(super) scheduler: S,
@@ -18,7 +21,6 @@ pub(super) struct Setup<S, D, E, O> {
     pub(super) events: Events,
     pub(super) registry: middleware::Registry,
     pub(super) middlewares: Vec<middleware::Spec>,
-    pub(super) worker: Worker,
 }
 
 pub struct Runtime<S, D, E, N = engine::NoInit, O = crate::item::Jsonl> {
@@ -32,8 +34,8 @@ pub struct Runtime<S, D, E, N = engine::NoInit, O = crate::item::Jsonl> {
     concurrency: usize,
     claim_limit: Option<usize>,
     event_limit: usize,
+    idle_interval: std::time::Duration,
     tracing: crate::trace::Tracing,
-    worker: Worker,
     init: N,
 }
 
@@ -53,8 +55,8 @@ where
             concurrency: MAX_REQUEST_CONCURRENCY,
             claim_limit: None,
             event_limit: MAX_EVENTS,
+            idle_interval: DEFAULT_IDLE_INTERVAL,
             tracing: crate::trace::Tracing::default(),
-            worker: setup.worker,
             init: engine::NoInit,
         }
     }
@@ -73,8 +75,8 @@ impl<S, D, E, N, O> Runtime<S, D, E, N, O> {
             concurrency: self.concurrency,
             claim_limit: self.claim_limit,
             event_limit: self.event_limit,
+            idle_interval: self.idle_interval,
             tracing: self.tracing,
-            worker: self.worker,
             init,
         }
     }
@@ -109,6 +111,11 @@ where
         self
     }
 
+    pub fn with_idle_interval(mut self, interval: std::time::Duration) -> Self {
+        self.idle_interval = interval;
+        self
+    }
+
     pub fn scheduler(&self) -> &S {
         self.scheduler.as_ref()
     }
@@ -118,7 +125,7 @@ where
     }
 
     pub async fn open(&self) -> Result<(), crate::Error> {
-        if let Err(error) = self.scheduler.open().await {
+        if let Err(error) = self.scheduler.open(self.concurrency).await {
             return Err(crate::Error::Scheduler(error));
         }
 
@@ -166,10 +173,35 @@ where
     }
 
     pub async fn start(&mut self) -> Result<(), crate::Error> {
-        self.validate()?;
-        self.open().await?;
+        self.start_with(false).await
+    }
 
-        let execution = self.execute_lifecycle().await;
+    #[doc(hidden)]
+    pub async fn start_until_idle(&mut self) -> Result<(), crate::Error> {
+        self.start_with(true).await
+    }
+
+    async fn start_with(&mut self, exit_when_idle: bool) -> Result<(), crate::Error> {
+        let mut shutdown: ShutdownSignal = Box::pin(shutdown_signal());
+        self.start_with_shutdown(exit_when_idle, &mut shutdown)
+            .await
+    }
+
+    async fn start_with_shutdown(
+        &mut self,
+        exit_when_idle: bool,
+        shutdown: &mut ShutdownSignal,
+    ) -> Result<(), crate::Error> {
+        self.validate()?;
+        let Some(shutdown_requested) = open_while_listening(self.open(), shutdown).await? else {
+            return Ok(());
+        };
+
+        let execution = if shutdown_requested {
+            Ok(())
+        } else {
+            self.execute_lifecycle(exit_when_idle, shutdown).await
+        };
         let closing = self.close().await;
 
         match (execution, closing) {
@@ -179,10 +211,26 @@ where
         }
     }
 
-    async fn execute_lifecycle(&mut self) -> Result<(), crate::Error> {
-        let execution = match self.registry.before_spider(&self.middlewares).await {
-            Ok(()) => self.coordinate().await,
-            Err(error) => Err(crate::Error::Middleware(error)),
+    async fn execute_lifecycle(
+        &mut self,
+        exit_when_idle: bool,
+        shutdown: &mut ShutdownSignal,
+    ) -> Result<(), crate::Error> {
+        let before_spider = complete_while_listening(
+            async {
+                self.registry
+                    .before_spider(&self.middlewares)
+                    .await
+                    .map_err(crate::Error::Middleware)
+            },
+            shutdown,
+        )
+        .await;
+        let execution = match before_spider {
+            Ok((Some(()), false)) => self.coordinate(exit_when_idle, shutdown).await,
+            Ok((_, true)) => Ok(()),
+            Ok((None, false)) => unreachable!(),
+            Err(error) => Err(error),
         };
         let after_spider = self
             .registry
@@ -192,12 +240,23 @@ where
         execution.and(after_spider)
     }
 
-    async fn coordinate(&mut self) -> Result<(), crate::Error> {
+    async fn coordinate(
+        &mut self,
+        exit_when_idle: bool,
+        shutdown: &mut ShutdownSignal,
+    ) -> Result<(), crate::Error> {
         let Some(events) = self.events.take() else {
             return Err(crate::Error::message("engine already started"));
         };
         events.set_limit(self.event_limit);
-        let init = self.init.init(self.scheduler.clone()).await?;
+        let (init, shutdown_requested) =
+            complete_while_listening(self.init.init(self.scheduler.clone()), shutdown).await?;
+        if shutdown_requested {
+            return Ok(());
+        }
+        let Some(init) = init else {
+            return Ok(());
+        };
         let actor = engine::actor::Engine::new(
             self.scheduler.clone(),
             self.downloader.clone(),
@@ -208,16 +267,30 @@ where
             engine::actor::Config::new(
                 self.concurrency,
                 self.claim_limit.unwrap_or(self.concurrency),
+                self.idle_interval,
                 self.tracing,
-                self.worker.clone(),
+                exit_when_idle,
             ),
         );
         let prepared =
             engine::actor::Engine::<S, D, E, O>::prepare_with_mailbox(kameo::mailbox::unbounded());
-        events.bind(prepared.actor_ref().clone().reply_recipient::<Event>())?;
-        let handle = prepared.spawn((actor, init));
-        let (actor, reason) = handle
-            .await
+        let actor_ref = prepared.actor_ref().clone();
+        events.bind(actor_ref.clone().reply_recipient::<Event>())?;
+        let mut handle = prepared.spawn((actor, init));
+        let stopped = tokio::select! {
+            stopped = &mut handle => stopped,
+            signal = shutdown.as_mut() => {
+                if let Err(error) = actor_ref.tell(engine::actor::Shutdown).await
+                    && !actor_ref.is_alive()
+                {
+                    tracing::debug!(error = %error, "Engine Actor stopped before shutdown signal was delivered");
+                }
+                let stopped = handle.await;
+                signal?;
+                stopped
+            }
+        };
+        let (actor, reason) = stopped
             .map_err(|error| crate::Error::message(error.to_string()))?
             .map_err(|error| crate::Error::message(error.to_string()))?;
         if !reason.is_normal() {
@@ -240,7 +313,68 @@ where
         if self.event_limit == 0 {
             return Err(crate::Error::message("Event limit must be positive"));
         }
-        self.worker
-            .validate(self.scheduler.requires_explicit_worker_id())
+        if self.idle_interval.is_zero() {
+            return Err(crate::Error::message("Idle interval must be positive"));
+        }
+        Ok(())
     }
 }
+
+async fn open_while_listening(
+    opening: impl Future<Output = Result<(), crate::Error>>,
+    shutdown: &mut ShutdownSignal,
+) -> Result<Option<bool>, crate::Error> {
+    let (opened, shutdown_requested) = complete_while_listening(opening, shutdown).await?;
+    Ok(opened.map(|()| shutdown_requested))
+}
+
+async fn complete_while_listening<T>(
+    stage: impl Future<Output = Result<T, crate::Error>>,
+    shutdown: &mut ShutdownSignal,
+) -> Result<(Option<T>, bool), crate::Error> {
+    tokio::pin!(stage);
+    let started = std::sync::atomic::AtomicBool::new(false);
+    let tracked = std::future::poll_fn(|context| {
+        started.store(true, std::sync::atomic::Ordering::Relaxed);
+        stage.as_mut().poll(context)
+    });
+    tokio::pin!(tracked);
+
+    tokio::select! {
+        biased;
+        signal = shutdown.as_mut() => {
+            signal?;
+            if started.load(std::sync::atomic::Ordering::Relaxed) {
+                Ok((Some(tracked.await?), true))
+            } else {
+                Ok((None, true))
+            }
+        }
+        result = &mut tracked => Ok((Some(result?), false)),
+    }
+}
+
+async fn shutdown_signal() -> Result<(), crate::Error> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|error| crate::Error::message(error.to_string()))?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|error| crate::Error::message(error.to_string()))
+            }
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|error| crate::Error::message(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests;

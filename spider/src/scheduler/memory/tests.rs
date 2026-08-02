@@ -3,9 +3,8 @@ use std::sync::Arc;
 use super::*;
 use crate::scheduler::{Init, Scheduler};
 
-const WORKER: &str = "worker-1";
+const WORKER: &str = "local";
 const HTTP: &[net::Mode] = &[net::Mode::Http];
-const BROWSER_WORKER: &str = "browser-worker";
 const BROWSER: &[net::Mode] = &[net::Mode::Browser];
 const TASK: &str = "task-1";
 const TRACE: &str = "trace-1";
@@ -34,6 +33,12 @@ fn memory() -> Memory {
 
 fn memory_with_lease(lease: scheduler::Lease) -> Memory {
     let scheduler = Memory::new().with_lease(lease);
+    add_trace(&scheduler);
+    scheduler
+}
+
+fn browser_memory() -> Memory {
+    let scheduler = Memory::new().with_modes(BROWSER.iter().cloned());
     add_trace(&scheduler);
     scheduler
 }

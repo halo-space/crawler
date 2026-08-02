@@ -2,7 +2,7 @@ local key = KEYS[1]
 local prefix = ARGV[1]
 local payload = cjson.decode(ARGV[2])
 local lease_timeout = tonumber(ARGV[3])
-local token = ARGV[4]
+local segment = ARGV[4]
 
 local function has_type(key, expected)
     local actual = redis.call('TYPE', key).ok
@@ -14,7 +14,6 @@ if redis.call('EXISTS', key) == 0 then return 'REQUEST_NOT_FOUND' end
 if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
-if redis.call('HGET', key, 'leased_by') ~= payload.worker_id then return 'LEASE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
 if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
 
@@ -33,7 +32,7 @@ local other_processing = prefix .. 'processing:' .. (mode == 'http' and 'browser
 if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
 if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
 
-redis.call('ZREM', other_processing, token)
+redis.call('ZREM', other_processing, segment)
 redis.call('HSET', key, 'lease_time', now, 'updated_time', now)
-redis.call('ZADD', processing, now, token)
+redis.call('ZADD', processing, now, segment)
 return 'OK'

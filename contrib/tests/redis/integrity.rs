@@ -74,10 +74,7 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
     )
     .await;
 
-    let claimed = scheduler
-        .next_requests(2, worker::A, worker::HTTP)
-        .await
-        .unwrap();
+    let claimed = scheduler.next_requests(2).await.unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, "valid-alongside-tampered");
     settlement::succeed(&scheduler, &claimed[0]).await;
@@ -104,12 +101,7 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
         .await
         .unwrap();
     assert!(error.contains("digest does not match its content"));
-    assert!(
-        !scheduler
-            .has_pending_requests(worker::A, worker::HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(!scheduler.has_pending_requests().await.unwrap());
 
     scheduler.close().await.unwrap();
     server.clear(&namespace).await;
@@ -122,7 +114,9 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
     };
     let namespace = server::namespace("snapshot-integrity-retry");
     let scheduler = server.redis(&namespace);
+    let worker_b = server.redis_as(&namespace, worker::B);
     server::open(&scheduler).await;
+    server::open(&worker_b).await;
     super::run::init(&scheduler).await;
 
     let mut tampered = request::new("tampered-retry", "https://example.com/original");
@@ -141,13 +135,7 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
     )
     .await;
 
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     let key = key::request(&namespace, "tampered-retry");
     let state: String = redis::cmd("HGET")
         .arg(&key)
@@ -163,20 +151,9 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
         .await
         .unwrap();
     assert_eq!(retry_count, "1");
-    assert!(
-        scheduler
-            .has_pending_requests(worker::B, worker::HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(worker_b.has_pending_requests().await.unwrap());
 
-    assert!(
-        scheduler
-            .next_requests(1, worker::B, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(worker_b.next_requests(1).await.unwrap().is_empty());
     let terminal_state: String = redis::cmd("HGET")
         .arg(&key)
         .arg("state")
@@ -191,14 +168,10 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
         .await
         .unwrap();
     assert_eq!(terminal_retry, "2");
-    assert!(
-        !scheduler
-            .has_pending_requests(worker::A, worker::HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(!scheduler.has_pending_requests().await.unwrap());
 
     scheduler.close().await.unwrap();
+    worker_b.close().await.unwrap();
     server.clear(&namespace).await;
 }
 
@@ -228,13 +201,7 @@ async fn mutable_hash_cannot_override_the_snapshot_retry_limit() {
         .await
         .unwrap();
 
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     let key = key::request(&namespace, "retry-limit");
     let state: String = redis::cmd("HGET")
         .arg(&key)
@@ -303,13 +270,7 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
         .await
         .unwrap();
 
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     let (state, max_retry_count): (String, i32) = redis::cmd("HMGET")
         .arg(&target_key)
         .arg("state")

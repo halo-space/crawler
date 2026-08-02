@@ -5,7 +5,7 @@ use spider::Memory;
 use spider::scheduler::Lease;
 
 fn new() -> Memory {
-    Memory::new()
+    Memory::new().with_modes([spider::net::Mode::Http, spider::net::Mode::Browser])
 }
 
 fn short_lease() -> Memory {
@@ -16,6 +16,6 @@ fn short_lease() -> Memory {
 
 #[tokio::test]
 async fn conforms_to_the_contract() {
-    conformance::run(new, true, None, conformance::Timing::memory()).await;
-    conformance::lease(short_lease(), conformance::Timing::memory()).await;
+    conformance::run(new, true, conformance::Timing::memory()).await;
+    conformance::lease(short_lease(), true, conformance::Timing::memory()).await;
 }

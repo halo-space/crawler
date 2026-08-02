@@ -12,7 +12,9 @@ async fn worker_cursors_pass_excluded_pages_and_finish_when_none_are_eligible() 
     };
     let namespace = server::namespace("worker-cursors");
     let scheduler = server.redis(&namespace);
+    let worker_b = server.redis_as(&namespace, worker::B);
     server::open(&scheduler).await;
+    server::open(&worker_b).await;
     super::run::init(&scheduler).await;
 
     let mut requests = (0..EXCLUDED_READY)
@@ -51,11 +53,7 @@ async fn worker_cursors_pass_excluded_pages_and_finish_when_none_are_eligible() 
     pipe.query_async::<()>(&mut connection).await.unwrap();
 
     assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty(),
+        scheduler.next_requests(1).await.unwrap().is_empty(),
         "the first bounded scan must stop after one excluded page"
     );
     let mut later = request::new("later-low-priority", "https://example.com/later");
@@ -65,7 +63,7 @@ async fn worker_cursors_pass_excluded_pages_and_finish_when_none_are_eligible() 
         .await
         .unwrap();
     let eligible = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
@@ -74,7 +72,7 @@ async fn worker_cursors_pass_excluded_pages_and_finish_when_none_are_eligible() 
     settlement::succeed(&scheduler, &eligible).await;
 
     let later = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
@@ -83,23 +81,21 @@ async fn worker_cursors_pass_excluded_pages_and_finish_when_none_are_eligible() 
     settlement::succeed(&scheduler, &later).await;
 
     assert!(
-        !scheduler
-            .has_pending_requests(worker::A, worker::HTTP)
-            .await
-            .unwrap(),
+        !scheduler.has_pending_requests().await.unwrap(),
         "pending must compare the queue with failed-Worker exclusions exactly"
     );
 
-    let available_to_b = scheduler
-        .next_requests(1, worker::B, worker::HTTP)
+    let available_to_b = worker_b
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
         .expect("another Worker must be able to claim an excluded Request");
     assert_eq!(available_to_b.failed_workers, [worker::A]);
-    settlement::succeed(&scheduler, &available_to_b).await;
+    settlement::succeed(&worker_b, &available_to_b).await;
 
     scheduler.close().await.unwrap();
+    worker_b.close().await.unwrap();
     server.clear(&namespace).await;
 }
 
@@ -142,13 +138,7 @@ async fn a_new_high_priority_request_invalidates_an_exclusion_cursor() {
     }
     pipe.query_async::<()>(&mut connection).await.unwrap();
 
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
 
     let mut urgent = request::new("urgent", "https://example.com/urgent");
     urgent.priority = 100;
@@ -157,7 +147,7 @@ async fn a_new_high_priority_request_invalidates_an_exclusion_cursor() {
         .await
         .unwrap();
     let claimed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
@@ -192,13 +182,7 @@ async fn an_invalid_ready_event_resets_the_cursor_before_claiming() {
         "http",
     )
     .await;
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
 
     let mut urgent = request::new("invalid-event-urgent", "https://example.com/urgent");
     urgent.priority = 100;
@@ -231,7 +215,7 @@ async fn an_invalid_ready_event_resets_the_cursor_before_claiming() {
         .unwrap();
 
     let claimed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
@@ -270,7 +254,10 @@ async fn an_unresolved_mode_cannot_be_skipped_for_a_lower_priority_mode() {
         return;
     };
     let namespace = server::namespace("cross-mode-priority");
-    let scheduler = server.redis(&namespace);
+    let scheduler = server
+        .redis(&namespace)
+        .with_modes([net::Mode::Http, net::Mode::Browser])
+        .unwrap();
     server::open(&scheduler).await;
     super::run::init(&scheduler).await;
 
@@ -307,17 +294,12 @@ async fn an_unresolved_mode_cannot_be_skipped_for_a_lower_priority_mode() {
     }
     pipe.query_async::<()>(&mut connection).await.unwrap();
 
-    const MODES: &[net::Mode] = &[net::Mode::Http, net::Mode::Browser];
     assert!(
-        scheduler
-            .next_requests(1, worker::A, MODES)
-            .await
-            .unwrap()
-            .is_empty(),
+        scheduler.next_requests(1).await.unwrap().is_empty(),
         "Browser cannot win until the higher-priority HTTP prefix is resolved"
     );
     let claimed = scheduler
-        .next_requests(1, worker::A, MODES)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
@@ -356,13 +338,7 @@ async fn low_priority_event_pages_do_not_starve_existing_work() {
         "http",
     )
     .await;
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
 
     let low = (0..EVENT_PAGE * 2)
         .map(|index| {
@@ -380,7 +356,7 @@ async fn low_priority_event_pages_do_not_starve_existing_work() {
         .unwrap();
 
     let claimed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
@@ -419,13 +395,7 @@ async fn browser_events_do_not_reset_an_http_cursor() {
         "http",
     )
     .await;
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
 
     let browser = (0..EVENT_PAGE)
         .map(|index| {
@@ -444,7 +414,7 @@ async fn browser_events_do_not_reset_an_http_cursor() {
         .unwrap();
 
     let claimed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
@@ -497,13 +467,7 @@ async fn delayed_promotion_crossing_an_event_page_preserves_priority() {
         "http",
     )
     .await;
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
 
     let mut low = request::new("promotion-page-prefix", "https://example.com/page-prefix");
     low.priority = -10;
@@ -514,7 +478,7 @@ async fn delayed_promotion_crossing_an_event_page_preserves_priority() {
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
 
     let claimed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()
@@ -558,8 +522,8 @@ async fn exclude_all(
 
 fn exclude(pipe: &mut redis::Pipeline, namespace: &str, id: &str, mode: &str) {
     let request = key::request(namespace, id);
-    let token = key::token(id);
-    let worker_token = worker::A
+    let segment = key::segment(id);
+    let worker_segment = worker::A
         .as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -576,7 +540,7 @@ fn exclude(pipe: &mut redis::Pipeline, namespace: &str, id: &str, mode: &str) {
         .cmd("ZADD")
         .arg(format!("{namespace}:pending_exclusions:{mode}"))
         .arg(0)
-        .arg(format!("{worker_token}|{token}"))
+        .arg(format!("{worker_segment}|{segment}"))
         .ignore();
 }
 

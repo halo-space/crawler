@@ -32,9 +32,9 @@
 | AI 运行时配置 | 已实现 | 通过 `Engine::with_ai` 注入一个 Worker 本地可复用的 `ai::OpenAI` provider；provider 配置不进入 Rules 或 Trace Snapshot |
 | Middleware | 已实现 | 生命周期 Registry、Worker 本地 Memory 实现，以及可选 RedisBloom Dedup 和共享 Redis RateLimit |
 | Item Store | 已实现 | 独立的 `open / close / submit(&Payload)` 持久化合同；默认 JSONL 输出与 Jsonl 自管失败快照；附件下载计划在 v5 实现 |
-| Worker 能力领取 | 已实现 | Memory 只在当前 Worker 配置的 Request mode 范围内领取并判断待处理工作 |
-| Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；按 namespace 隔离，完整实现 Request Scheduler/Init 合同与 Lua 原子转换 |
-| API Scheduler 适配器 | 已实现 | Worker 侧 `contrib::scheduler::api::Api`；Master 服务只在本仓库设计，在独立项目实现 |
+| Worker 能力领取 | 已实现 | 每个 Scheduler 自己持有冻结的 Request modes，能力筛选与后端领取保持原子 |
+| Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；完整实现 namespace Scheduler/Init、Worker 注册/心跳与 Lua 原子转换 |
+| API Scheduler 适配器 | 已实现 | 通过规划中的 Master API 完成注册/心跳的 Worker 侧 Scheduler；Master 服务属于独立项目 |
 | 运行期链路追踪 | 已实现 | 可选的逐 Request `fastrace` 根链路与有界生命周期 span；不等于业务 `trace_id` |
 
 XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护不完整的 XPath 子集。
@@ -43,20 +43,23 @@ Healing 不是通用 selector 阶段。目前只有 CSS 提供 Healing；Regex �
 
 crawler workspace 不包含、也不实现 Master 服务。本仓库只负责 Worker 侧 API Scheduler 适配器和
 双方使用的爬虫合同；本地 `docs/master/` 只记录 Master 的功能、协议、数据库和前端设计。Master
-服务端、Migration、Cron、Control API 与管理前端均在独立项目实现和验证。
-Master-backed `item::Store` 不属于 API Scheduler，也不是 API Scheduler 的“部分完成”能力；它只
-能作为后续单独确认的可选 Store 适配器。
+服务端、Migration、Cron、Control API 与管理前端规划在独立项目实现。
+Item 持久化严格属于 Worker：默认使用 `item::Jsonl`，`.with_store(...)` 只用于替换为 Worker
+自己的业务存储后端。一次 Engine 运行只能在启动时绑定一个 Store；运行时不在多个 Store 之间
+路由 Item，也不维护 Store 注册表。Master 不参与 Item 持久化，本 workspace 及其路线图也不定义
+远程 Store 适配器。`persister_id` 不属于框架合同，也不属于任何持久化的 Item 上下文。
 
 ## 2. 核心设计原则
 
 1. **统一运行时**：代码模式和 Rules 模式使用同一个 Executor；Trace Snapshot 决定进入代码 handler 还是 Rules 解释路径，只有运行种子的初始化方式不同。
 2. **Scheduler 是 Request 分布式边界**：从 Memory 切换到其他实现时，装配层只替换 `.with_scheduler(...)`；新实现必须承担完整 Request 调度语义，不能只是把一个存储客户端包起来。
-3. **Store 是 Item 持久化边界**：`.with_store(...)` 独立替换 Item 持久化；Store 不领取、不续租，也不结算 Request。
+3. **Store 是 Item 持久化边界**：`.with_store(...)` 为本次 Engine 运行选择唯一 Store。框架不提供
+   `persister_id`、Store 注册表、按 Task 路由 Store 或按 Store 能力筛选；Store 不领取、不续租，也不结算 Request。
 4. **输出即时提交**：解析产生的 Request 和 Item 通过 `Tx` 立即进入 Engine；Request Payload 交给 Scheduler，Item Payload 交给 Store，两者都不等待整条 Trace 或整棵请求图结束。
 5. **身份与执行权分离**：Request ID 在重试和恢复中不变；`version`、`leased_by` 和 `lease_time` 描述某一次执行权。
 6. **不可变运行快照**：一个 Trace 对应一份不可变 Trace Snapshot；Rules 保存完整 DSL，代码模式不持久化 Rust handler。
 7. **恢复必须显式**：租约、续租、归还、成功和失败分别使用独立接口，不用一个多义的 `finish` 覆盖不同状态变化。
-8. **模块职责单一**：Actor 只协调，启动时冻结的 Worker 状态只持有身份与能力，Request task 持有单次执行权，Executor 只解析，Scheduler 只负责 Request 调度，Store 只负责 Item 持久化。
+8. **模块职责单一**：Actor 只协调，各分布式 Scheduler 持有自身启动时冻结的 Worker 身份与能力，Request task 持有单次执行权，Executor 只解析，Scheduler 只负责 Request 调度，Store 只负责 Item 持久化。
 
 ## 3. 系统总览
 
@@ -70,7 +73,7 @@ flowchart LR
     S["Scheduler 合同"]
     M["Memory Scheduler"]
     Z["Redis 7 Scheduler"]
-    W["Request Worker"]
+    W["Request 执行任务"]
     MW["Middleware Registry"]
     D["Downloader"]
     H["HTTP"]
@@ -186,8 +189,8 @@ Request 上保存的 Middleware 仍可用于后续生命周期，但其中的 `b
 `Runtime::start()` 的外层顺序固定为：
 
 ```text
-校验运行限制
--> open Scheduler / Downloader / Item Store
+校验运行设置
+-> 使用冻结的 concurrency 打开 Scheduler / Downloader / Item Store
 -> before_spider
 -> 初始化或接入运行
 -> 启动并排空 Engine Actor
@@ -201,20 +204,21 @@ Request 上保存的 Middleware 仍可用于后续生命周期，但其中的 `b
 - 至多一个正在进行的 Scheduler 领取任务；
 - 当前 Request 任务集合；
 - 当前 Tx 输出处理任务集合；
-- Tx Event 容量、producer 活跃状态和第一个终态错误；
+- Tx Event 容量、producer 活跃状态、关闭状态和第一个终态错误；
 - Scheduler、Item Store、Downloader、Executor 和 Middleware Registry 的共享引用。
 
 启动、领取、Request、输出、轮询和 producer 空闲分别通过独立 Actor 消息报告完成。所有派生任务都会捕获 panic 并报告完成。已接受的输出失败通常返回正在等待的 `Tx` 调用方；如果调用方已取消，输出完成消息会把无法交付的错误报告给 Engine，不能静默成功。Kameo mailbox 对内部消息使用无界队列；显式 Event 容量只限制外部 `Tx` 输出，不会把内部完成消息计入用户配置的容量。
 
-### 5.1 三个独立限制
+### 5.1 运行限制与空闲间隔
 
 | 设置 | 默认值 | 含义 |
 | --- | ---: | --- |
 | `with_concurrency(n)` | `16` | 同时运行的 Request 任务上限 |
-| `with_claim_limit(n)` | 等于 concurrency | 一次 `next_requests(limit, worker_id, modes)` 最多领取的 Request 数 |
+| `with_claim_limit(n)` | 等于 concurrency | 一次 `next_requests(limit)` 最多领取的 Request 数 |
 | `with_event_limit(n)` | `32` | 已被 Tx 接受、但 Actor handler 尚未开始的 Event 上限 |
+| `with_idle_interval(duration)` | `1s` | 一次领取为空后，发起下一次领取前的等待时间 |
 
-三个值在 Engine 启动时校验并加载，不支持运行中热更新，也不会互相替代。一次实际领取数量为：
+这些值在 Engine 启动时校验并加载，不支持运行中热更新，也不会互相替代。一次实际领取数量为：
 
 ```text
 min(claim_limit, request_concurrency - active_request_tasks)
@@ -222,21 +226,22 @@ min(claim_limit, request_concurrency - active_request_tasks)
 
 Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Event 时释放。Handler 登记独立输出任务并委托应答；`Tx` 仍会等待 Scheduler 与 Middleware 处理完成。Event 容量因此限制等待开始的 Event，而 Actor 的输出任务集合独立保证处理期间不会提前退出。
 
-### 5.2 空闲与退出
+### 5.2 空闲轮询与关闭
 
-一次 `next_requests(limit, worker_id, modes)` 返回空集合只表示当前领取没有结果，不能直接结束 Engine。Actor 只有同时满足以下条件才退出：
+一次 `next_requests(limit)` 返回空集合只表示当前领取没有结果，不能结束仍在运行的 Worker。Actor 按
+启动时冻结的空闲间隔等待后继续领取，并且始终最多只有一个领取调用。这样 Redis 或 API Scheduler
+在进程启动后收到的新任务无需重新启动 Engine 就能被消费。
 
-- Scheduler 已确认当前 Worker 能力范围内没有排队或执行中的 Request；
-- 没有启动、领取、轮询或 producer 空闲观察任务；
-- 没有 Request 任务；
-- 没有输出任务；
-- 没有活跃的 Event permit；
-- 没有仍可能产生 Event 的 Tx producer。
+`Runtime::start()` 在组件 `open` 前安装 SIGINT 和 SIGTERM 监听。信号在 `open`、`before_spider` 或运行
+初始化期间到达时，已经开始的阶段允许完成，但不再进入后续启动阶段。Actor 已运行时，收到信号后不再
+发起新领取；已经开始的领取仍允许返回，响应中的 Request 全部按正常流程执行。Actor 不设置框架内部超时，持续等待 startup、已领取 Request、
+Tx output task、Event permit 和 Tx producer 全部排空，然后 Runtime 才执行 `after_spider`，依次关闭
+Downloader、Item Store 和 Scheduler。Scheduler 的 `close()` 自己停止心跳并写入显式离线状态。
+SIGKILL、OOM 或进程崩溃无法执行该流程；分布式后端通过心跳超时判断 Worker 离线，并继续使用既有
+Request 租约回收机制恢复遗留执行权。
 
-空领取结果只对该次领取观察到的工作状态有效。如果领取期间有 Request、输出 Event 或 Tx producer
-改变了工作状态，Actor 会把该结果视为过期，并在退出前重新领取确认。
-
-这一条件保证列表页产生的详情 Request、延迟到达的 Item，以及 handler 内克隆 Tx 后产生的输出都不会被提前丢弃。
+终态运行错误使用相同的已接收工作排空边界，同时立即取消尚未结束的空闲轮询等待、禁止新领取，并在
+剩余工作稳定后返回第一个错误。
 
 ### 5.3 运行期追踪
 
@@ -259,11 +264,11 @@ Worker 侧 API Scheduler 访问的可信 Master；目标站点 Downloader、AI p
 | 方法 | 单一语义 |
 | --- | --- |
 | `lease` | 返回可选的租约超时和续租间隔 |
-| `open / close` | 打开和关闭 Scheduler 自身资源 |
+| `open(concurrency) / close` | 使用冻结的 Worker 并发数打开 Scheduler 资源；停止注册资源并关闭 |
 | `push` | 只消费 `Payload.requests`；跳过一致重放、原子写入缺失 Request，并拒绝存在冲突的整批数据 |
 | `trace` | 按 `trace_id` 读取不可变 Trace Snapshot |
-| `next_requests(limit, worker_id, modes)` | 按传入的 Worker 身份和 modes 原子领取并恢复最多 `limit` 条 Request |
-| `has_pending_requests(worker_id, modes)` | 判断传入 Worker 能力范围内是否仍有排队或执行中的 Request |
+| `next_requests(limit)` | 在 Scheduler 后端原子领取最多 `limit` 条 Request，恢复后再返回，并保持领取顺序 |
+| `has_pending_requests()` | 判断 Scheduler 自己持有的 Worker 能力范围内是否仍有待处理 Request |
 | `ack` | 确认 Engine 已接受当前领取的执行权 |
 | `release` | 主动归还执行权，不消耗队列层重试次数 |
 | `refresh_lease` | 延长当前已确认执行权的租约 |
@@ -275,9 +280,11 @@ Worker 侧 API Scheduler 访问的可信 Master；目标站点 Downloader、AI p
 - `initializes_run()`：当前 Engine 是否负责创建本地运行；
 - `init(trace_id, snapshot, requests)`：原子保存 Trace Snapshot 和传入的初始 Request 集合；空集合仍然合法。
 
-`Payload` 继续作为唯一传输信封，不增加 Batch、Receipt 或其他平行结构。它携带 Request 执行身份、状态、错误、时间、统计以及 `requests / items` 两个输出集合。Scheduler 不再持久化 Item：`push` 只允许 Requests，执行权和结算 Payload 的两个集合必须为空；独立的 `item::Store::submit(&Payload)` 只接受 Item Payload，并拒绝 Request 或结算字段。非空 Item Payload 必须始终携带本轮运行的 `task_id / trace_id`；detached Tx 只允许缺少 Request 执行身份。
+`Payload` 继续作为唯一传输信封，不增加 Batch、Receipt 或其他平行结构。它携带 Request 执行身份、仅用于观测的 `worker_id`、状态、错误、时间、统计以及 `requests / items` 两个输出集合。`worker_id` 只用于诊断记录，不与 Scheduler 配置或 Request 当前的 `leased_by` 比较。Scheduler 不再持久化 Item：`push` 只允许 Requests，执行权和结算 Payload 的两个集合必须为空；独立的 `item::Store::submit(&Payload)` 只接受 Item Payload，并拒绝 Request 或结算字段。非空 Item Payload 必须始终携带本轮运行的 `task_id / trace_id`；detached Tx 只允许缺少 Request 执行身份。
 
-`has_pending_requests` 的能力范围由 `modes` 定义。只要 processing Request 的 mode 匹配，所有具备该能力的 Worker 都将其视为 pending，不按当前 `leased_by` 过滤。`worker_id` 用于标识并校验调用方，不把 processing 集合缩小为该 Worker 自己持有的租约。这个保守退出规则避免兼容 Worker 在租约恢复前，或执行中 Request 继续产生兼容任务前提前退出。
+Worker 身份和支持的 modes 由每个具体 Scheduler 自己持有。Engine 只在 `open` 时传入冻结的并发数，
+在 `next_requests` 时传入批次上限，不会在每次调用中重复提供注册元数据或领取能力。只要 processing
+Request 的 mode 匹配，它就在该 Scheduler 的能力范围内算 pending，不按当前 `leased_by` 过滤。
 
 任何 `contrib` Scheduler 都必须完整实现这些状态和身份语义。Engine 不应针对具体后端写特例。
 
@@ -304,20 +311,20 @@ Memory 在一个受互斥锁保护的状态中原子维护队列、已知 Reques
 - Memory 保存每个规范化初始 Request Snapshot 的 SHA-256 摘要用于重放比较；这是 Scheduler 身份保护，不是 URL 或业务去重；
 - ID 去重防止同一 Request 对象重复入队，URL 或业务字段去重仍由 Dedup Middleware 负责；
 - ready 队列先按较高 `priority` 出队，同优先级按 FIFO；未来执行时间由 delayed 队列管理；
-- `Memory::new()` 只拥有进程内 Scheduler 状态；Engine 会在每次领取和待处理判断时传入非空 Worker ID 与 mode 集合；
-- 领取会在传入的 mode 集合中选择 priority 最高且保持 FIFO 的 Request，不改变不兼容队列项；待处理判断使用同一 Worker 范围；
+- `Memory::new()` 只拥有进程内 Scheduler 状态，内部身份固定为 `local`，默认只支持 HTTP；`Memory::with_modes(...)` 可替换启动时冻结的 mode 集合；
+- 领取会在 Memory 自己的 mode 集合中选择 priority 最高且保持 FIFO 的 Request，不改变不兼容队列项；待处理判断使用同一范围；
 - 领取时 Request 进入 `processing`，写入 `leased_by / lease_time` 并推进 `version`；
 - 默认租约超时为 30 秒，续租间隔为 10 秒，也可通过 `Memory::with_lease(...)` 配置为运行时时钟可表示的正整数毫秒；
 - `ack` 对同一有效身份幂等，只记录执行确认；`refresh_lease` 才刷新已确认执行的 `lease_time`；
 - 未 ack 的领取过期时不消费重试次数，也不记录失败 Worker；已 ack 的执行过期时追加当前 Worker并消费一次队列尝试；
 - 回收和重试只把 Request 放回 pending，不改变 `version`；下一次成功领取时才创建新的执行 generation；
 - `Request.failed_workers` 按发生顺序保存且不重复，严格的 Request Snapshot 合同会完整保留并校验该字段；
-- `success / failure` 对同一身份和同一终态的重复提交幂等，但会拒绝 task、trace、node、worker、version 或 state 不匹配的提交；
+- `success / failure` 对同一 Request 身份和同一终态的重复提交幂等，但会拒绝 task、trace、node、version 或 state 不匹配的提交；Scheduler 自己持有的租约 Worker 才是执行权来源，Payload 的 `worker_id` 仅是诊断元数据，不是第二套结算凭据；
 - `failure` 保持 Request ID并增加队列重试次数；有剩余额度时回填，额度耗尽后进入 failed 终态。
-- Snapshot 恢复、version/retry 溢出或队列转换失败都会形成带原 Request ID 和原因的显式终态记录，不允许只增加计数后丢弃。
+- Request Snapshot 恢复、version/retry 溢出或队列转换失败都会形成带原 Request ID 和原因的显式终态记录，不允许只增加计数后丢弃。Trace 读取不是 Memory 的失败路径；API Trace 恢复使用下文独立的 release 语义。
 
-Memory 是不注册到集群的进程内 Scheduler。Engine 持有 Worker 身份和启动时冻结的 mode 能力，并在
-每次领取时传入；Memory 不会发现或选择 Worker 集合。注册、心跳和跨 Worker 领取资格留给确实需要它们的分布式 Scheduler。它从
+Memory 是不注册到集群的进程内 Scheduler，不会发现或选择 Worker 集合。注册、心跳和跨 Worker
+领取资格留给确实需要它们的分布式 Scheduler。它从
 不可变的进程内映射读取 Trace Snapshot，不存在远程 cache、传输重试或“Trace 存储临时不可用”
 分支。进程退出后不恢复 Request 队列；当前也不会在 `data/requests/` 写本地 Request 文件快照。
 
@@ -329,7 +336,11 @@ ack、release、续租、结算、重试、终态记录和统计都由 Redis 自
 
 ```rust
 let scheduler = contrib::scheduler::redis::Redis::new("redis://127.0.0.1:6379")?
-    .with_namespace("crawler")?;
+    .with_namespace("crawler")?
+    .with_worker_id("worker-01")?
+    .with_worker_host("crawler-node-01")?
+    .with_worker_version("1.0.0")?
+    .with_modes([spider::net::Mode::Http])?;
 
 let engine = spider::engine::Engine::new()
     .with_scheduler(scheduler)
@@ -337,17 +348,25 @@ let engine = spider::engine::Engine::new()
     .build();
 ```
 
-`Redis::new` 校验连接 URL，`with_namespace` 校验 key namespace。所有 Redis key 都位于该 namespace
-之下；`close()` 只释放本地客户端资源，绝不删除持久化任务。新的 Scheduler 实例只要使用相同 URL 与
-namespace 就能继续已有数据。Redis 的 `initializes_run()` 返回 `false`，所以代码模式 Worker 只消费
+`Redis::new` 校验连接 URL，`with_namespace` 校验 key namespace；Worker ID、host 和 version 是
+Scheduler 必填配置，modes 默认只包含 HTTP，可通过 `with_modes(...)` 替换。`open(concurrency)` 使用
+Redis server time 注册，默认每 10 秒发送一次心跳，
+连续 30 秒没有心跳则视为离线；同一个仍在线的 Worker ID 会拒绝重复注册。心跳失败会暂停后续领取，
+并按心跳间隔持续重试直至恢复；已经领取的 Request 继续正常执行。`close()` 先等待心跳任务结束，再尝试
+写入离线时间并释放本地客户端资源，保证离线写入后不再发送心跳；离线更新失败时记录日志，由心跳超时最终
+释放注册。等待心跳或离线响应期间取消 `close()` 不会移走连接、注册 token 或停止状态，后续 `close()`
+可以继续完成同一关闭流程。关闭绝不删除持久化任务。
+新的 Scheduler 实例只要使用相同 URL 与 namespace 就能继续
+已有数据。Redis 的 `initializes_run()` 返回 `false`，所以代码模式 Worker 只消费
 外部已初始化的运行；显式 Rules `init` 仍然受支持且保持原子性。
+同一生命周期内，重复 `open` 只有在并发数相同时才幂等；修改并发数必须先 `close()`，再开始新的生命周期。
 
 需要跨进程原子性的状态转换都在 Redis Lua 脚本中执行。领取会原子回收过期租约、按全局 priority/FIFO
 顺序选择兼容任务、推进执行 version，并使用 Redis server time 建立执行权。Init 与 Request 重放也是
 全有或全无：存在冲突 Snapshot 时拒绝整批，一致重放为 no-op。临时连接或可用性错误保持为
 `Scheduler::Unavailable`，不能改判为执行权丢失。
 
-活动执行权只有一组按 mode 分域的投影：`processing:<mode>` 是 ZSET，member 为不透明 Request token，
+活动执行权只有一组按 mode 分域的投影：`processing:<mode>` 是 ZSET，member 为不透明 Request key 片段，
 score 为 `lease_time`。它同时支持按能力判断 pending 与过期扫描，不再维护独立的全局 lease 索引。
 Request Hash 是事实来源；合法 processing Hash 的 score 或错误 mode 投影会在不改变重试状态的情况下修复，
 Hash 本身非法时才隔离。改变活动执行权的状态转换会先清理两个已知 mode 的旧投影，再发布唯一的当前成员。
@@ -368,7 +387,7 @@ mode 的低优先级候选。`has_pending_requests` 直接比较两个队列的�
 会原地修复；Request 或队列状态本身损坏时，才会移除其活动索引、记录终态失败及完成记录，然后继续选择
 后续正常 Request。这不会吞掉共享索引损坏：共享索引的 Redis 类型非法时，领取会在任何状态写入前失败。
 ready 队列清理同样最多丢弃 128 条非法条目，之后交给下一次领取继续处理。Claim 会把持久化摘要与不可变
-Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算规范摘要，不一致时走 token 级恢复且不会
+Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算规范摘要，不一致时按 key 片段恢复且不会
 返回为可执行任务。摘要有效时，其中不可变的重试上限控制恢复并修正可变 Hash 中的不一致值。单条损坏记录
 恢复失败不能扣留同一次原子领取中的合法 Request；损坏记录继续保持 processing，交给正常租约超时恢复。
 每个 Request Snapshot 的 `max_retry_count` 必须位于 `1..=128`；恢复以不可变 Snapshot 为准，并以此约束
@@ -380,20 +399,52 @@ Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算�
 持久化强度与写入吞吐/延迟之间选择：`always` 缩小持久化窗口但降低吞吐，`everysec` 通常吞吐更高，
 但已确认写入可能暴露约一秒。Redis 容量应与独立配置的 Item Store 分开监控。
 
+### 6.4 分布式 Worker 注册
+
+Redis 保存 `worker_id`、host、version、modes、concurrency、`last_heartbeat`、后端生成的 token、
+`offline_time` 与 `created_time`。未来的 Master 服务端持有对应的 API Worker 记录，并可从连接来源补充
+可选 IP；Worker 侧 API Scheduler 适配器不持久化这些服务端状态。Redis 还保存本次配置的心跳超时，
+因此已有注册使用自己的超时判断在线状态，新进程不能通过缩短超时抢占它。每次成功的新注册都会替换元数据、
+时间和 token，并清空 `offline_time`；crawler 合同不增加 instance ID、state 枚举、更新时间或注册历史。
+Redis 的 IP 留空，API 服务端可以从连接来源补充。Token 在 Worker ID 被重新注册后隔离旧进程的心跳与
+显式离线更新，但不参与领取、pending、Request 租约或结算校验。
+
+每个分布式 Scheduler 句柄只在本地运行期内保留尚未确认响应的注册操作 key。API 将它作为请求幂等键，
+Redis 将它作为 Lua 的临时参数，用于生成并识别同一个已存 token，不向 Worker Hash 增加字段。重放会恢复
+在线心跳状态且不修改 `created_time`；注册响应确认后立即清除本地 key，下一轮生命周期使用新的注册。
+进程退出也会丢失这份本地恢复状态，随后仍按正常心跳超时恢复。Redis 领取只在 Worker 合法显式离线或
+心跳超时时返回空集合；Worker 不存在、Redis 类型错误、身份不一致以及心跳或离线字段损坏都返回
+Scheduler 错误，不能伪装成队列暂时为空。
+第一次注册尝试会把 concurrency 与操作 key 一起冻结；重放必须使用相同 concurrency，直到 `close()`
+结束本轮生命周期后才能换值。只要仍保留未完成注册 key 或已经确认的 token，Scheduler 配置就保持冻结，
+避免重试时把旧恢复状态用于另一个 Worker 或 namespace；显式 `close()` 可以放弃尚未确认的本地注册。Redis 在新注册或重放成功时
+原子重建 Worker Hash，只保留文档约定的持久字段。
+
+API Scheduler 使用现有认证客户端调用 `GET /v1/worker/policy` 以及 `POST /v1/worker/register`、
+`/heartbeat`、`/offline`。API 心跳间隔来自服务端 policy，Redis 的间隔与超时在本地 Scheduler 配置。
+两种实现都只用心跳在线状态控制后续领取。它与 Request 执行权明确分离：Worker 离线不会取消已经由
+`next_requests` 返回的 Request，Request 续租成功也不能证明 Worker 仍处于注册在线状态。
+
+API 批量领取省略 Trace Snapshot 时，Worker 对同一批相同 `trace_id` 只读取一次，并发读取不同
+Trace。Trace 读取、缺失、解码、校验或 task/node 绑定失败都只对该 Request 调用 `release`，不调用
+`ack/failure`，也不消耗 Request 重试；只有 Request Snapshot 或执行状态本身损坏才执行
+`ack + failure`。恢复和每条恢复结算共用 lease handoff deadline，不能串行耗尽整批租约；成功恢复的
+Request 保持服务端领取顺序返回，逐条 release 互不阻塞，单条失败不妨碍其他条归还。
+
 ## 7. 单条 Request 的完整生命周期
 
 ```mermaid
 sequenceDiagram
     participant A as Engine Actor
     participant S as Scheduler
-    participant W as Request Worker
+    participant W as Request 执行任务
     participant M as Middleware
     participant D as Downloader
     participant E as Executor
     participant T as Tx / Event
     participant I as Item Store
 
-    A->>S: next_requests(n, worker_id, modes)
+    A->>S: next_requests(n)
     S-->>A: Requests in processing with lease
     A->>W: run(request)
     W->>S: ack(payload)
@@ -715,9 +766,11 @@ Tx.item
 | `close` | Engine 关闭时刷新并关闭 Store 自己的资源 |
 | `submit(&Payload)` | 校验并持久化一份完整 Item Payload，在修改后端前拒绝 Request 或结算字段 |
 
-Engine 默认使用 `item::Jsonl::new()`。`.with_store(store)` 只替换 Item 持久化，
+Engine 默认使用 `item::Jsonl::new()`。`.with_store(store)` 选择本次 Engine 运行唯一的 Item Store，
 `.with_scheduler(scheduler)` 只替换 Request 调度。Store 接收现有 Payload，可使用其中的 task、Trace、
 Request 与 Worker 来源信息选择自己的存储模型，但不会读取、领取、续租或结算 Scheduler 工作。
+Store 选择在 Engine 构建时固定；框架不会读取 `persister_id`、按 Task 路由，也不会把同一次 Item
+提交广播到多个 Store。
 
 `Jsonl::new()` 使用当前工作目录；`Jsonl::with_dir(path)` 修改其输出根目录：
 
@@ -764,10 +817,10 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `spider/src/engine/actor/request.rs` | 登记一条 Request 任务并处理完成消息 |
 | `spider/src/engine/actor/output.rs` | 接受 Tx Event、委托应答并跟踪输出完成 |
 | `spider/src/engine/actor/wait.rs` | 安排轮询与 producer 空闲通知 |
-| `spider/src/engine/actor/task.rs` | 持有任务句柄并把任务 panic 转为 Engine 错误 |
+| `spider/src/engine/actor/shutdown.rs` | 收到进程关闭信号后停止新领取并排空已接受工作 |
+| `spider/src/engine/actor/task.rs` | 持有并终止任务句柄，把任务 panic 转为 Engine 错误 |
 | `spider/src/engine/builder.rs` | 装配组件并持有所有执行模式共用的 Schema Store |
 | `spider/src/engine/runtime.rs` | 组件生命周期、启动参数和 Actor 装配 |
-| `spider/src/engine/worker.rs` | 持有启动时冻结的 Worker ID 与下载模式能力 |
 | `spider/src/engine/request/task.rs` | 单条 Request 的 ack、租约维护和最终结算 |
 | `spider/src/engine/admission.rs` | Request 输出进入 Scheduler 前统一执行 `before_scheduler` 准入 |
 | `spider/src/engine/request.rs` | 单条已领取 Request 的下载、Middleware、Worker 本地重试与解析生命周期 |
@@ -819,10 +872,14 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `macros/src/spider/check.rs` | 宏输入约束校验 |
 | `macros/src/spider/bind.rs` | 生成 node 注册与 handler 绑定代码 |
 | `contrib/src/scheduler/redis/contract.rs` | Redis 对外类型、生命周期及 Scheduler/Init 合同连接 |
+| `contrib/src/scheduler/redis/worker.rs` | Redis Worker 配置、注册隔离、心跳与离线生命周期 |
 | `contrib/src/scheduler/redis/request.rs` | Redis Request 序列化、入队、领取、恢复和租约回收 |
 | `contrib/src/scheduler/redis/trace.rs` | Redis Trace Snapshot 读取与校验 |
 | `contrib/src/scheduler/redis/settle.rs` | Redis ack、release、续租、success 与 failure 转换 |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | key 隔离、Lua 加载、边界校验和错误映射 |
+| `contrib/src/scheduler/api/worker.rs` | API Worker 注册、心跳与离线协议 |
+| `contrib/src/scheduler/api/request/claim.rs` | API 批量领取、Trace 去重并发恢复、错误分类和租约约束下的结算 |
+| `contrib/src/scheduler/api/request/trace.rs` | API Trace 读取、缓存与校验 |
 | `contrib/src/middleware/connection.rs` | 为每个 Middleware 实例按需建立并共享一个 Redis ConnectionManager |
 | `contrib/src/middleware/dedup.rs` | RedisBloom Options、桶 key 和原子 `BF.INSERT` 去重 |
 | `contrib/src/middleware/rate_limit.rs` 与 `rate_limit/reserve.lua` | Redis 服务端时间的共享 group 预约和失活清理 |
@@ -861,7 +918,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 
 实现和扩展应持续满足以下检查：
 
-1. 同一 Request 在同一时刻只有一个有效执行权；旧 version 或旧 Worker 的结算必须被拒绝。
+1. 同一 Request 在同一时刻只有一个有效执行权；旧 version 或不再持有当前 version 的调用者结算必须被拒绝。
 2. Request 重试保留 `id / task_id / trace_id / node / version` 并推进重试状态；下一次成功领取时才推进执行 generation。
 3. 代码与 Rules 不序列化 Rust handler；代码 Worker 只按稳定 node 调用本地注册表。
 4. `Tx.request / Tx.item` 产生的输出即时处理，Engine 在所有潜在 producer 排空前不能退出。

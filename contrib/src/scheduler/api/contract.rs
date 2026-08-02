@@ -5,15 +5,15 @@ use std::time::Duration;
 use spider::{net, payload, scheduler, trace};
 use tokio::sync::RwLockReadGuard;
 
-use super::{client, error::Error, state::Runtime};
+use super::{client, error::Error, state::Runtime, worker};
 
-const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const TRACE_CACHE_CAPACITY: usize = 128;
 const TRACE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct Api {
     pub(super) client: client::Client,
     lease: scheduler::Lease,
+    pub(super) worker: worker::Config,
     pub(super) runtime: Arc<Runtime>,
 }
 
@@ -51,20 +51,12 @@ impl Api {
         }
 
         let lease = scheduler::Lease::default();
-        let client = client::Client::new(
-            base_url,
-            token,
-            "default".to_string(),
-            DEFAULT_MAX_RESPONSE_BYTES,
-        )?;
+        let client = client::Client::new(base_url, token, "default".to_string())?;
         Ok(Self {
             client,
             lease,
-            runtime: Arc::new(Runtime::new(
-                lease.interval(),
-                TRACE_CACHE_CAPACITY,
-                TRACE_CACHE_MAX_BYTES,
-            )),
+            worker: worker::Config::default(),
+            runtime: Arc::new(Runtime::new(TRACE_CACHE_CAPACITY, TRACE_CACHE_MAX_BYTES)),
         })
     }
 
@@ -94,21 +86,40 @@ impl Api {
         Ok(self)
     }
 
-    pub fn with_max_response_bytes(mut self, max_response_bytes: usize) -> Result<Self, Error> {
+    pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Result<Self, Error> {
         self.require_configurable()?;
-        if max_response_bytes == 0 {
-            return Err(Error::Config(
-                "max_response_bytes must be positive".to_string(),
-            ));
+        self.worker.set_id(worker_value("worker_id", worker_id)?);
+        Ok(self)
+    }
+
+    pub fn with_worker_host(mut self, host: impl Into<String>) -> Result<Self, Error> {
+        self.require_configurable()?;
+        self.worker.set_host(worker_value("worker_host", host)?);
+        Ok(self)
+    }
+
+    pub fn with_worker_version(mut self, version: impl Into<String>) -> Result<Self, Error> {
+        self.require_configurable()?;
+        self.worker
+            .set_version(worker_value("worker_version", version)?);
+        Ok(self)
+    }
+
+    pub fn with_modes(mut self, modes: impl IntoIterator<Item = net::Mode>) -> Result<Self, Error> {
+        self.require_configurable()?;
+        let modes = modes.into_iter().collect::<Vec<_>>();
+        if modes.is_empty() {
+            return Err(Error::Config("worker modes must not be empty".to_string()));
         }
-        self.client = self.client.with_max_response_bytes(max_response_bytes);
+        self.worker.set_modes(modes);
         Ok(self)
     }
 
     fn require_configurable(&self) -> Result<(), Error> {
-        if self.runtime.opened.load(Ordering::Acquire) {
+        if !self.runtime.is_configurable() {
             Err(Error::Config(
-                "API Scheduler cannot be reconfigured while it is open".to_string(),
+                "API Scheduler cannot be reconfigured during an active Worker lifecycle"
+                    .to_string(),
             ))
         } else {
             Ok(())
@@ -131,16 +142,6 @@ impl Api {
         }
     }
 
-    pub(super) fn require_epoch(&self, epoch: u64) -> Result<(), scheduler::Error> {
-        if self.runtime.is_open(epoch) {
-            Ok(())
-        } else {
-            Err(scheduler::Error::Message(
-                "API Scheduler is closing".to_string(),
-            ))
-        }
-    }
-
     async fn enter(&self) -> Result<RwLockReadGuard<'_, ()>, scheduler::Error> {
         let activity = self.runtime.activity.read().await;
         self.require_open()?;
@@ -156,21 +157,41 @@ fn header_value(value: &str) -> bool {
     reqwest::header::HeaderValue::from_str(value).is_ok_and(|value| value.to_str().is_ok())
 }
 
-impl scheduler::Scheduler for Api {
-    fn requires_explicit_worker_id(&self) -> bool {
-        true
+fn worker_value(name: &str, value: impl Into<String>) -> Result<String, Error> {
+    let value = value.into();
+    if value.trim().is_empty() {
+        Err(Error::Config(format!("{name} must not be empty")))
+    } else {
+        Ok(value)
     }
+}
 
+impl scheduler::Scheduler for Api {
     fn lease(&self) -> Option<scheduler::Lease> {
         Some(self.lease)
     }
 
-    async fn open(&self) -> Result<(), scheduler::Error> {
+    async fn open(&self, concurrency: usize) -> Result<(), scheduler::Error> {
         let _lifecycle = self.runtime.lifecycle.lock().await;
         let _activity = self.runtime.activity.write().await;
         if self.runtime.opened.load(Ordering::Acquire) {
-            return Ok(());
+            let active = self.runtime.concurrency().ok_or_else(|| {
+                scheduler::Error::Message(
+                    "API Scheduler Worker lifecycle state is missing".to_string(),
+                )
+            })?;
+            return if active == concurrency {
+                Ok(())
+            } else {
+                Err(scheduler::Error::Message(format!(
+                    "API Scheduler is already open with concurrency {active}; received {concurrency}"
+                )))
+            };
         }
+        self.worker.validate(concurrency)?;
+        self.runtime
+            .check_concurrency(concurrency)
+            .map_err(scheduler::Error::Message)?;
 
         let policy = self
             .client
@@ -189,31 +210,46 @@ impl scheduler::Scheduler for Api {
                 remote.interval().as_millis()
             )));
         }
-        if policy.heartbeat_interval_ms == 0
-            || policy.heartbeat_interval_ms >= policy.lease_timeout_ms
-        {
+        if policy.heartbeat_interval_ms == 0 {
             return Err(scheduler::Error::Message(
-                "Master heartbeat interval must be positive and shorter than the lease timeout"
-                    .to_string(),
+                "Master heartbeat interval must be positive".to_string(),
             ));
         }
-        let max_response_bytes = usize::try_from(policy.max_response_bytes).map_err(|_| {
+        let max_request_bytes = usize::try_from(policy.max_request_bytes).map_err(|_| {
             scheduler::Error::Message(
-                "Master response limit exceeds this platform's supported size".to_string(),
+                "Master request limit exceeds this platform's supported size".to_string(),
             )
         })?;
-        if max_response_bytes == 0 || max_response_bytes > self.client.max_response_bytes() {
-            return Err(scheduler::Error::Message(format!(
-                "Master response limit {max_response_bytes} exceeds API Scheduler capacity {}",
-                self.client.max_response_bytes()
-            )));
+        if max_request_bytes == 0 {
+            return Err(scheduler::Error::Message(
+                "Master request limit must be positive".to_string(),
+            ));
         }
-        self.client.set_max_request_bytes(max_response_bytes);
+        self.client.set_max_request_bytes(max_request_bytes);
 
-        *self.runtime.heartbeat_interval.write().await =
-            Duration::from_millis(policy.heartbeat_interval_ms);
-        self.runtime.epoch.fetch_add(1, Ordering::AcqRel);
+        let heartbeat_interval = Duration::from_millis(policy.heartbeat_interval_ms);
+        let key = self
+            .runtime
+            .open_key(concurrency)
+            .map_err(scheduler::Error::Message)?;
+        let token = worker::register(&self.client, &self.worker, concurrency, &key).await?;
+        self.runtime.finish_registration();
+        let epoch = self
+            .runtime
+            .epoch
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        self.runtime.set_token(token.clone());
+        self.runtime.can_claim.store(true, Ordering::Release);
         self.runtime.opened.store(true, Ordering::Release);
+        self.runtime.set_heartbeat(worker::start_heartbeat(
+            self.client.clone(),
+            self.runtime.clone(),
+            epoch,
+            self.worker.id()?.to_string(),
+            token,
+            heartbeat_interval,
+        ));
         Ok(())
     }
 
@@ -222,21 +258,25 @@ impl scheduler::Scheduler for Api {
         let _activity = self.runtime.activity.write().await;
         self.runtime.opened.store(false, Ordering::Release);
         self.runtime.epoch.fetch_add(1, Ordering::AcqRel);
+        self.runtime.can_claim.store(false, Ordering::Release);
 
-        let workers = self
-            .runtime
-            .workers
-            .lock()
-            .await
-            .drain()
-            .map(|(_, worker)| worker)
-            .collect::<Vec<_>>();
-        for worker in &workers {
-            worker.task.abort();
+        if let Some(heartbeat) = self.runtime.take_heartbeat() {
+            heartbeat.stop().await;
         }
-        for worker in workers {
-            let _ = worker.task.await;
+        self.runtime.can_claim.store(false, Ordering::Release);
+        if let Some(token) = self.runtime.token() {
+            let worker_id = self.worker.id()?;
+            let result = worker::offline(&self.client, worker_id, token).await;
+            self.runtime.take_token();
+            if let Err(error) = result {
+                tracing::warn!(
+                    worker_id = %worker_id,
+                    error = %error,
+                    "API Scheduler failed to mark Worker offline"
+                );
+            }
         }
+        self.runtime.clear_registration();
         self.runtime.traces.lock().await.clear();
         Ok(())
     }
@@ -251,23 +291,17 @@ impl scheduler::Scheduler for Api {
         self.load_trace(trace_id).await
     }
 
-    async fn next_requests(
-        &self,
-        limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<Vec<net::Request>, scheduler::Error> {
+    async fn next_requests(&self, limit: usize) -> Result<Vec<net::Request>, scheduler::Error> {
         let _activity = self.enter().await?;
-        self.claim(limit, worker_id, modes).await
+        if !self.runtime.can_claim.load(Ordering::Acquire) {
+            return Ok(Vec::new());
+        }
+        self.claim(limit).await
     }
 
-    async fn has_pending_requests(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<bool, scheduler::Error> {
+    async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
         let _activity = self.enter().await?;
-        self.pending(worker_id, modes).await
+        self.pending().await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
@@ -293,6 +327,13 @@ impl scheduler::Scheduler for Api {
     async fn failure(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
         let _activity = self.enter().await?;
         self.fail(payload).await
+    }
+}
+
+impl Drop for Api {
+    fn drop(&mut self) {
+        // Destructors only tear down local runtime state; close owns the remote offline update.
+        self.runtime.abandon();
     }
 }
 

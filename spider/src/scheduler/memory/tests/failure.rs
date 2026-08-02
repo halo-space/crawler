@@ -9,13 +9,8 @@ async fn failure_rejects_stats_overflow_without_partial_settlement() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let mut ack = payload::Payload::for_request(&claimed, "worker-1");
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut ack = payload::Payload::for_request(&claimed, WORKER);
     ack.state = net::State::Processing;
     scheduler.ack(&ack).await.unwrap();
     scheduler.state().trace_stats.insert(
@@ -28,7 +23,7 @@ async fn failure_rejects_stats_overflow_without_partial_settlement() {
             },
         )]),
     );
-    let mut failure = payload::Payload::for_request(&claimed, "worker-1").failed("boom");
+    let mut failure = payload::Payload::for_request(&claimed, WORKER).failed("boom");
     failure.start_time = Some(1);
     failure.end_time = Some(2);
     for name in ["new", "overflow"] {
@@ -71,16 +66,11 @@ async fn repeated_retryable_failure_does_not_duplicate_the_queue() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let mut ack = payload::Payload::for_request(&claimed, "worker-1");
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut ack = payload::Payload::for_request(&claimed, WORKER);
     ack.state = net::State::Processing;
     scheduler.ack(&ack).await.unwrap();
-    let mut failure = payload::Payload::for_request(&claimed, "worker-1").failed("boom");
+    let mut failure = payload::Payload::for_request(&claimed, WORKER).failed("boom");
     failure.start_time = Some(1);
     failure.end_time = Some(2);
 
@@ -98,28 +88,24 @@ async fn failure_requeues_when_retry_budget_remains() {
     request.max_retry_count = 2;
 
     scheduler
-        .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))
+        .push(payload::Payload::for_request(&request, WORKER).requests(vec![request]))
         .await
         .unwrap();
 
-    let claimed = scheduler.next_requests(1, WORKER, HTTP).await.unwrap();
-    let mut ack = payload::Payload::for_request(&claimed[0], "worker-1");
+    let claimed = scheduler.next_requests(1).await.unwrap();
+    let mut ack = payload::Payload::for_request(&claimed[0], WORKER);
     ack.state = net::State::Processing;
     scheduler.ack(&ack).await.unwrap();
-    let mut payload = payload::Payload::for_request(&claimed[0], "worker-1").failed("boom");
+    let mut payload = payload::Payload::for_request(&claimed[0], WORKER).failed("boom");
+    payload.worker_id = "reported-worker".to_string();
     payload.start_time = Some(1);
     payload.end_time = Some(2);
     scheduler.failure(&payload).await.unwrap();
 
     assert_eq!(scheduler.queued_len(), 1);
     assert_eq!(scheduler.failed_len(), 0);
-    let retried = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert_eq!(retried.failed_workers, ["worker-1"]);
+    let retried = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    assert_eq!(retried.failed_workers, [WORKER]);
 }
 
 #[tokio::test]
@@ -133,28 +119,18 @@ async fn repeated_failures_do_not_duplicate_the_worker_history() {
         .unwrap();
 
     for _ in 0..2 {
-        let claimed = scheduler
-            .next_requests(1, WORKER, HTTP)
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
-        let mut ack = payload::Payload::for_request(&claimed, "worker-1");
+        let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+        let mut ack = payload::Payload::for_request(&claimed, WORKER);
         ack.state = net::State::Processing;
         scheduler.ack(&ack).await.unwrap();
-        let mut failure = payload::Payload::for_request(&claimed, "worker-1").failed("boom");
+        let mut failure = payload::Payload::for_request(&claimed, WORKER).failed("boom");
         failure.start_time = Some(1);
         failure.end_time = Some(2);
         scheduler.failure(&failure).await.unwrap();
     }
 
-    let retried = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert_eq!(retried.failed_workers, ["worker-1"]);
+    let retried = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    assert_eq!(retried.failed_workers, [WORKER]);
     assert_eq!(retried.retry_count, 2);
 }
 
@@ -164,15 +140,15 @@ async fn failure_moves_to_failed_when_retry_budget_is_exhausted() {
     let request = request("https://example.com");
 
     scheduler
-        .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))
+        .push(payload::Payload::for_request(&request, WORKER).requests(vec![request]))
         .await
         .unwrap();
 
-    let claimed = scheduler.next_requests(1, WORKER, HTTP).await.unwrap();
-    let mut ack = payload::Payload::for_request(&claimed[0], "worker-1");
+    let claimed = scheduler.next_requests(1).await.unwrap();
+    let mut ack = payload::Payload::for_request(&claimed[0], WORKER);
     ack.state = net::State::Processing;
     scheduler.ack(&ack).await.unwrap();
-    let mut payload = payload::Payload::for_request(&claimed[0], "worker-1").failed("boom");
+    let mut payload = payload::Payload::for_request(&claimed[0], WORKER).failed("boom");
     payload.start_time = Some(1);
     payload.end_time = Some(2);
     scheduler.failure(&payload).await.unwrap();
@@ -189,13 +165,8 @@ async fn retry_counter_overflow_still_reaches_a_terminal_completion() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let mut ack = payload::Payload::for_request(&claimed, "worker-1");
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut ack = payload::Payload::for_request(&claimed, WORKER);
     ack.state = net::State::Processing;
     scheduler.ack(&ack).await.unwrap();
     scheduler
@@ -204,7 +175,7 @@ async fn retry_counter_overflow_still_reaches_a_terminal_completion() {
         .get_mut(&claimed.id)
         .unwrap()
         .retry_count = i32::MAX;
-    let mut failure = payload::Payload::for_request(&claimed, "worker-1").failed("overflow");
+    let mut failure = payload::Payload::for_request(&claimed, WORKER).failed("overflow");
     failure.start_time = Some(1);
     failure.end_time = Some(2);
 
@@ -222,33 +193,23 @@ async fn retry_counter_overflow_still_reaches_a_terminal_completion() {
 
 #[tokio::test]
 async fn failure_retry_preserves_browser_mode_eligibility() {
-    let scheduler = memory();
+    let scheduler = browser_memory();
     let mut browser = request("https://example.com/browser").mode(net::Mode::Browser);
     browser.max_retry_count = 2;
     scheduler
         .push(payload::Payload::new().requests(vec![browser]))
         .await
         .unwrap();
-    let first = scheduler
-        .next_requests(1, BROWSER_WORKER, BROWSER)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let mut ack = payload::Payload::for_request(&first, "browser-worker");
+    let first = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut ack = payload::Payload::for_request(&first, WORKER);
     ack.state = net::State::Processing;
     scheduler.ack(&ack).await.unwrap();
-    let mut failure = payload::Payload::for_request(&first, "browser-worker").failed("boom");
+    let mut failure = payload::Payload::for_request(&first, WORKER).failed("boom");
     failure.start_time = Some(1);
     failure.end_time = Some(2);
     scheduler.failure(&failure).await.unwrap();
 
-    let retried = scheduler
-        .next_requests(1, BROWSER_WORKER, BROWSER)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let retried = scheduler.next_requests(1).await.unwrap().pop().unwrap();
 
     assert_eq!(retried.id, first.id);
     assert_eq!(retried.mode, net::Mode::Browser);

@@ -9,7 +9,7 @@ mod request;
 /// 处理 Spider Tx 发出的 Request 或 Item。
 pub(crate) async fn handle<S, O>(
     event: Kind,
-    parent: Option<trace::RuntimeContext>,
+    trace_context: Option<trace::RuntimeContext>,
     scheduler: Arc<S>,
     store: Arc<O>,
     registry: Arc<middleware::Registry>,
@@ -22,7 +22,7 @@ where
     trace::output(
         name,
         count,
-        parent,
+        trace_context,
         async move {
             match event {
                 Kind::Requests { requests, context } => {

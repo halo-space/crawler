@@ -133,7 +133,7 @@ async fn traces_complete_request_lifecycles_without_leaking_content() {
         .build()
         .with_concurrency(2)
         .with_tracing(spider::trace::Tracing::all());
-    tokio::spawn(async move { runtime.start().await })
+    tokio::spawn(async move { runtime.start_until_idle().await })
         .await
         .unwrap()
         .unwrap();

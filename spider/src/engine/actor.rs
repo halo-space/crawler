@@ -8,29 +8,35 @@ use crate::{downloader, engine, middleware, scheduler};
 mod claim;
 mod output;
 mod request;
+mod shutdown;
 mod start;
 mod task;
 mod wait;
 
+pub(super) use shutdown::Shutdown;
+
 pub(super) struct Config {
     concurrency: usize,
     claim_limit: usize,
+    idle_interval: std::time::Duration,
     tracing: crate::trace::Tracing,
-    worker: super::worker::Worker,
+    exit_when_idle: bool,
 }
 
 impl Config {
     pub(super) fn new(
         concurrency: usize,
         claim_limit: usize,
+        idle_interval: std::time::Duration,
         tracing: crate::trace::Tracing,
-        worker: super::worker::Worker,
+        exit_when_idle: bool,
     ) -> Self {
         Self {
             concurrency,
             claim_limit,
+            idle_interval,
             tracing,
-            worker,
+            exit_when_idle,
         }
     }
 }
@@ -51,19 +57,17 @@ pub(super) struct Engine<S, D, E, O> {
 
     // Executor startup gates Scheduler claims.
     startup: Option<task::Task>,
-    // Only one Scheduler claim and pending-state check may run at a time.
+    // Only one Scheduler claim may run at a time.
     claim: Option<task::Task>,
-    // Work changed during the current claim, so an empty result needs rechecking.
+    // Local work changed while the current claim was running.
     claim_stale: bool,
-    // An empty claim with pending work schedules one delayed poll.
+    // An empty claim schedules one delayed poll.
     poll: Option<task::Task>,
-    // Final shutdown waits for cloned Tx producers and accepted Events to become idle.
+    // Final shutdown waits for accepted Tx Events to become idle.
     idle: Option<task::Task>,
 
-    // The last empty claim confirmed that the Scheduler has no pending Request.
-    exhausted: bool,
-    // A terminal claim error blocks new claims while already accepted work drains.
-    claims_blocked: bool,
+    // SIGINT/SIGTERM stops new claims while accepted work drains.
+    stopping: bool,
     // Runtime returns the first error after all accepted work has drained.
     error: Option<crate::Error>,
 }
@@ -99,8 +103,7 @@ where
             claim_stale: false,
             poll: None,
             idle: None,
-            exhausted: false,
-            claims_blocked: false,
+            stopping: false,
             error: None,
         }
     }
@@ -113,6 +116,13 @@ where
         if self.error.is_none() {
             self.error = Some(error);
         }
+        if let Some(poll) = self.poll.take() {
+            poll.abort();
+        }
+    }
+
+    fn finishes_when_idle(&self) -> bool {
+        self.config.exit_when_idle || self.error.is_some()
     }
 
     fn invalidate_claim(&mut self) {
@@ -121,13 +131,13 @@ where
         }
     }
 
-    /// Starts eligible work and returns whether every work source has drained.
+    /// Starts eligible work and reports when a requested or error-driven shutdown has drained.
     fn advance(&mut self, actor_ref: &ActorRef<Self>) -> bool {
         if self.startup.is_none()
             && self.claim.is_none()
             && self.poll.is_none()
-            && !self.claims_blocked
-            && !self.exhausted
+            && !self.stopping
+            && self.error.is_none()
             && self.requests.len() < self.config.concurrency
         {
             let available = self.config.concurrency - self.requests.len();
@@ -138,12 +148,15 @@ where
             );
         }
 
+        if !self.stopping && self.error.is_none() {
+            return false;
+        }
+
         if self.startup.is_some()
             || self.claim.is_some()
             || self.poll.is_some()
             || !self.requests.is_empty()
             || !self.outputs.is_empty()
-            || (!self.exhausted && !self.claims_blocked)
         {
             return false;
         }

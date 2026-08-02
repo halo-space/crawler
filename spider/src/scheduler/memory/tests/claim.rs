@@ -1,15 +1,13 @@
 use super::*;
 
 #[tokio::test]
-async fn claim_rejects_an_empty_worker_identity() {
-    let result = memory().next_requests(1, "  ", HTTP).await;
-
-    assert!(result.is_err());
+async fn open_accepts_the_local_worker_and_default_http_mode() {
+    memory().open(8).await.unwrap();
 }
 
 #[tokio::test]
-async fn claim_rejects_an_empty_worker_capability_set() {
-    let result = memory().next_requests(1, WORKER, &[]).await;
+async fn open_rejects_an_empty_worker_capability_set() {
+    let result = Memory::new().with_modes(std::iter::empty()).open(8).await;
 
     assert!(result.is_err());
 }
@@ -46,7 +44,7 @@ async fn broken_trace_fails_only_its_request_in_the_same_claim() {
         .unwrap();
     scheduler.state().trace_snapshots.remove("trace-broken");
 
-    let claimed = scheduler.next_requests(2, WORKER, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(2).await.unwrap();
 
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].trace_id, "trace-good");
@@ -85,13 +83,7 @@ async fn invalid_queued_snapshot_records_a_terminal_error() {
         state.enqueue(snapshot, crate::utils::time::now_millis());
     }
 
-    assert!(
-        scheduler
-            .next_requests(1, WORKER, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     assert_eq!(scheduler.failed_len(), 1);
     assert!(
         scheduler
@@ -120,13 +112,7 @@ async fn invalid_snapshot_is_retried_at_most_once_per_claim() {
         state.enqueue(snapshot, crate::utils::time::now_millis());
     }
 
-    assert!(
-        scheduler
-            .next_requests(1, WORKER, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     assert_eq!(scheduler.failed_len(), 0);
     assert_eq!(scheduler.queued_len(), 1);
     let retried = scheduler
@@ -155,13 +141,7 @@ async fn claim_version_overflow_records_a_terminal_error() {
         state.enqueue(snapshot, crate::utils::time::now_millis());
     }
 
-    assert!(
-        scheduler
-            .next_requests(1, WORKER, HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     assert_eq!(scheduler.failed_len(), 1);
     assert!(
         scheduler
@@ -188,7 +168,7 @@ async fn claim_prefers_higher_priority_and_preserves_fifo_for_ties() {
         .await
         .unwrap();
 
-    let claimed = scheduler.next_requests(3, WORKER, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(3).await.unwrap();
 
     assert_eq!(
         claimed
@@ -213,11 +193,11 @@ async fn claim_leaves_future_requests_pending() {
         .await
         .unwrap();
 
-    let claimed = scheduler.next_requests(1, WORKER, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap();
 
     assert!(claimed.is_empty());
     assert_eq!(scheduler.queued_len(), 1);
-    assert!(scheduler.has_pending_requests(WORKER, HTTP).await.unwrap());
+    assert!(scheduler.has_pending_requests().await.unwrap());
 }
 
 #[tokio::test]
@@ -229,7 +209,7 @@ async fn claim_returns_empty_without_mutating_incompatible_work() {
         .await
         .unwrap();
 
-    let claimed = scheduler.next_requests(1, WORKER, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap();
 
     assert!(claimed.is_empty());
     assert_eq!(scheduler.queued_len(), 1);
@@ -246,36 +226,26 @@ async fn pending_check_ignores_globally_pending_incompatible_work() {
         .unwrap();
 
     assert_eq!(scheduler.queued_len(), 1);
-    assert!(!scheduler.has_pending_requests(WORKER, HTTP).await.unwrap());
+    assert!(!scheduler.has_pending_requests().await.unwrap());
 }
 
 #[tokio::test]
-async fn pending_check_includes_compatible_work_leased_by_another_worker() {
+async fn pending_check_includes_compatible_processing_work() {
     let scheduler = memory();
     let request = request("https://example.com/http");
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    scheduler.next_requests(1, "worker-a", HTTP).await.unwrap();
+    scheduler.next_requests(1).await.unwrap();
 
-    assert!(
-        scheduler
-            .has_pending_requests("worker-b", HTTP)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !scheduler
-            .has_pending_requests(BROWSER_WORKER, BROWSER)
-            .await
-            .unwrap()
-    );
+    assert!(scheduler.has_pending_requests().await.unwrap());
 }
 
 #[tokio::test]
-async fn claim_uses_the_worker_identity_and_modes_of_each_call() {
-    let scheduler = memory();
+async fn claim_uses_the_configured_modes_and_local_worker_identity() {
+    let scheduler = Memory::new().with_modes([net::Mode::Http, net::Mode::Browser]);
+    add_trace(&scheduler);
     let http = request("https://example.com/http");
     let browser = request("https://example.com/browser").mode(net::Mode::Browser);
     scheduler
@@ -283,23 +253,12 @@ async fn claim_uses_the_worker_identity_and_modes_of_each_call() {
         .await
         .unwrap();
 
-    let browser = scheduler
-        .next_requests(1, BROWSER_WORKER, BROWSER)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let http = scheduler
-        .next_requests(1, "http-worker", HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = scheduler.next_requests(2).await.unwrap();
 
-    assert_eq!(browser.mode, net::Mode::Browser);
-    assert_eq!(browser.leased_by, BROWSER_WORKER);
-    assert_eq!(http.mode, net::Mode::Http);
-    assert_eq!(http.leased_by, "http-worker");
+    assert_eq!(claimed.len(), 2);
+    assert_eq!(claimed[0].mode, net::Mode::Http);
+    assert_eq!(claimed[1].mode, net::Mode::Browser);
+    assert!(claimed.iter().all(|request| request.leased_by == WORKER));
 }
 
 #[test]
@@ -338,9 +297,7 @@ fn concurrent_claims_only_take_compatible_requests_once() {
                     .build()
                     .unwrap();
                 barrier.wait();
-                runtime
-                    .block_on(scheduler.next_requests(4, WORKER, HTTP))
-                    .unwrap()
+                runtime.block_on(scheduler.next_requests(4)).unwrap()
             })
         })
         .collect::<Vec<_>>();

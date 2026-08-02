@@ -45,6 +45,9 @@ impl Server {
             for output in outputs {
                 let mut stream = accept(&listener, &stop_receiver)?;
                 stream
+                    .set_nonblocking(false)
+                    .map_err(|error| error.to_string())?;
+                stream
                     .set_read_timeout(Some(IO_TIMEOUT))
                     .map_err(|error| error.to_string())?;
                 stream

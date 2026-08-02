@@ -49,24 +49,41 @@ use contrib::scheduler::redis::Redis;
 use spider::{engine, net};
 
 let scheduler = Redis::new("redis://127.0.0.1:6379")?
-    .with_namespace("crawler")?;
+    .with_namespace("crawler")?
+    .with_worker_id("worker-01")?
+    .with_worker_host("crawler-node-01")?
+    .with_worker_version("1.0.0")?
+    .with_modes([net::Mode::Http])?;
 
 let mut engine = engine::Engine::new()
-    .with_worker_id("worker-01")
-    .with_modes([net::Mode::Http])
     .with_scheduler(scheduler)
     .with_spider(BasicSpider::new())
     .build();
 
-engine.start().await?;
+engine.start().await?; // Runs until SIGINT or SIGTERM, then drains accepted work.
 ```
 
-All Redis keys are isolated by the selected namespace; normal `close()` releases client resources
-without deleting queued work. Redis stores Trace Snapshots, Request state, mode-scoped processing
+Worker ID, host, version, and modes are Scheduler configuration. `open(concurrency)` registers them,
+starts the heartbeat, and rejects a duplicate ID that is still online. Heartbeat failure pauses only
+future claims and retries until recovery; already claimed Requests continue normally. Normal `close()`
+waits for the heartbeat task to stop before attempting the explicit offline update, so no later heartbeat
+can follow that update. A failed update is logged and the registration then expires through heartbeat
+timeout. If `close()` is cancelled while waiting for heartbeat shutdown or the offline response, the
+connection, registration token, and stop state remain available; another `close()` continues shutdown.
+All Redis keys are isolated by the selected namespace,
+and closing never deletes queued work. Redis stores Trace Snapshots, Request state, mode-scoped processing
 leases, settlements, and statistics. Each `processing:<mode>` ZSET is the only active
 execution-lease projection and uses `lease_time` as its score; the Request Hash remains the
 authoritative state. Item persistence is a separate `item::Store` dependency and never enters the
-Redis Scheduler.
+Redis Scheduler. Each Engine run binds exactly one Store at startup: use `.with_store(store)` to replace
+the default JSONL implementation. Store routing, Store registries, per-Task Store selection, and
+`persister_id` are not part of the runtime contract.
+Repeated `open` calls in one lifecycle are idempotent only with the same concurrency; a different value
+is rejected until `close()` starts a new lifecycle.
+
+Worker and namespace settings remain frozen from the first registration attempt until registration is
+confirmed or `close()` explicitly abandons it. This keeps cancellation retries bound to the same Worker
+identity and namespace.
 
 Redis bounds recurring claim maintenance: one `next_requests` call recovers at most 64 expired
 leases per mode, inspects at most 128 processing records across both modes, and promotes and
@@ -98,6 +115,41 @@ multi-key Lua transitions rely on single-instance atomicity, so Cluster will be 
 design. For durable use, enable AOF (`appendonly yes`) and set `maxmemory-policy noeviction`.
 `appendfsync` is an operator choice between stronger durability and write throughput/latency (for
 example, `always` versus `everysec`).
+
+The API Scheduler owns the same Worker configuration and lifecycle while using its existing HTTP
+transport, namespace, and authentication:
+
+```rust
+use contrib::scheduler::api::Api;
+use spider::net;
+
+let scheduler = Api::new("https://master.example.com", api_key)?
+    .with_namespace("crawler")?
+    .with_worker_id("worker-01")?
+    .with_worker_host("crawler-node-01")?
+    .with_worker_version("1.0.0")?
+    .with_modes([net::Mode::Http])?;
+```
+
+During `open`, API reads `/v1/worker/policy`, registers through `/v1/worker/register`, and uses the
+server heartbeat interval. Heartbeat and explicit offline use `/v1/worker/heartbeat` and
+`/v1/worker/offline`. Worker-management responses use `{code, message, data}`; `200` succeeds and
+registration code `100` reports an online ID conflict. The server-generated registration token is
+stored and returned on heartbeat/offline requests, but it does not participate in Request claim,
+lease, or settlement identity.
+The policy lease timeout and refresh interval must exactly match the Scheduler's configured lease.
+`max_request_bytes` must be positive and is applied before the Worker sends one request body to the
+Master. It does not limit response bodies returned by the Master.
+An unfinished registration key or confirmed token freezes API Scheduler configuration until the
+lifecycle is completed or explicitly closed.
+
+For a batch claim without embedded Trace Snapshots, API recovery reads each cold `trace_id` once and
+loads different Traces concurrently. Trace read, missing, decode, validation, and task/node binding
+errors call `release` only; they do not call `ack` or `failure`, and do not consume a Request retry.
+Only a damaged Request Snapshot or execution state uses `ack + failure`. Recovery and its per-Request
+settlement share a lease handoff deadline, and successfully restored Requests keep the server claim
+order. Release operations are independent, so one failed release does not prevent the remaining claims
+from being returned.
 
 ## Selectors
 
@@ -264,7 +316,9 @@ Engine uses `item::Jsonl` as its default Item Store. It writes one record per li
 `{"id":"...","data":{...}}`. `self.tx.request(...)` submits Requests to the Scheduler, while
 `self.tx.item(...)` submits an Item-only `Payload` through `Store::submit(&Payload)`. The two
 dependencies are independent: `.with_scheduler(...)` replaces Request scheduling and
-`.with_store(...)` replaces Item persistence.
+`.with_store(...)` selects the single Item Store for this Engine run and replaces Item persistence. The
+selection is fixed when `build()` completes; the framework does not route a later Item to another Store
+or fan one submission out to multiple Stores. There is no `persister_id` field to configure.
 
 `Jsonl::with_dir(path)` changes the output root. It serializes a complete Payload before taking the
 hourly file's append lock, then writes and flushes the complete byte sequence. A write or flush error
@@ -307,6 +361,10 @@ before acknowledgment does not consume an attempt. Memory reads Trace Snapshots 
 immutable in-process map.
 Engine tracks cloned Tx producers directly, so delayed output is drained without a fixed idle timeout.
 Its internal coordinator is one Kameo Actor; Request and output I/O remains in independent Tokio tasks.
+An empty claim waits one second and retries by default; `with_idle_interval(duration)` replaces this
+positive startup-frozen interval. Empty queues never stop the Worker. `Runtime::start()` listens for
+SIGINT/SIGTERM, stops new claims, lets an active claim return, drains accepted Request and Tx work
+without an internal timeout, and then closes its components.
 An awaited Tx call can use the current Request context. A Tx clone moved into a detached task retains
 only `task_id / trace_id`; it never retains Request ownership, lease identity, node, version, or stats.
 Every emitted Request must match that Tx `task_id / trace_id` before any `before_scheduler` Middleware
@@ -393,35 +451,195 @@ sequences use Unicode replacement semantics; the runtime performs no statistical
 
 ## Runtime Tracing
 
-Enable the `runtime-tracing` Cargo feature and opt in per Engine run:
+Runtime tracing observes the timing and outcome of one claimed Request from acknowledgement through
+download, parsing, Tx output, and final settlement. It is optional and disabled by default. It does
+not change Scheduler, Downloader, Spider, Item Store, or business `trace_id` semantics.
 
-```rust
-fastrace::set_reporter(
-    fastrace::collector::ConsoleReporter,
-    fastrace::collector::Config::default(),
-);
+### Enable the Dependencies
 
-let mut engine = spider::engine::Engine::new()
-    .with_spider(BasicSpider::new())
-    .build()
-    .with_tracing(spider::trace::Tracing::all());
+The executable must enable `spider/runtime-tracing` and depend directly on `fastrace` so that it can
+install a Reporter:
 
-engine.start().await?;
-fastrace::flush();
+```toml
+[dependencies]
+fastrace = { version = "0.7.18", default-features = false, features = ["enable"] }
+spider = { path = "../spider", features = ["runtime-tracing"] }
 ```
 
-`Tracing::sample(ratio)?` selects Requests deterministically with a ratio in `0.0..=1.0`.
-Configuration is frozen for that run. Every sampled Request owns an independent
-`crawler.request` root; its properties include bounded business identifiers, but the fastrace
-TraceId never replaces or persists as crawler `trace_id`. Identity values longer than 128 bytes or
-containing control characters are represented by a stable SHA-256 token in span properties.
+When using the API Scheduler, enable `contrib/runtime-tracing` instead. It also enables
+`spider/runtime-tracing` and allows the API Scheduler to propagate tracing context to a trusted
+Master:
 
-The executable owns the process-global Reporter and calls `fastrace::flush()` during its shutdown.
-Engine works normally without a Reporter, when unsampled, and when the feature is disabled. Runtime
-context is preserved across awaited Tx Request and Item output. Only Worker-side API Scheduler calls
-to the trusted Master endpoint receive W3C `traceparent`; crawled HTTP targets, AI providers, Redis,
-Payloads, snapshots, bodies, Items, prompts, credentials, full URLs, and raw errors do not receive or
-persist tracing context.
+```toml
+[dependencies]
+contrib = { path = "../contrib", features = ["runtime-tracing"] }
+fastrace = { version = "0.7.18", default-features = false, features = ["enable"] }
+```
+
+The Cargo feature alone does not sample Requests. The executable must also install one process-wide
+Reporter and call `with_tracing` for the Engine run. When the feature is disabled, no spans are
+generated even if the program calls `Tracing::all()`; Engine continues through the non-tracing path.
+
+### View Traces Locally
+
+`ConsoleReporter` writes complete `SpanRecord` values to the process standard error stream (`stderr`),
+so they are visible when the program runs in a local terminal:
+
+```rust
+use fastrace::collector::{Config, ConsoleReporter};
+use spider::{engine, trace};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The Reporter is process-wide and must be installed before Engine creates spans.
+    fastrace::set_reporter(ConsoleReporter, Config::default());
+
+    let mut engine = engine::Engine::new()
+        .with_spider(BasicSpider::new())
+        .build()
+        .with_tracing(trace::Tracing::all());
+
+    // Preserve the result so completed spans are flushed even when Engine fails.
+    let result = engine.start().await;
+    fastrace::flush();
+    result?;
+    Ok(())
+}
+```
+
+`Config::default()` has a maximum background report interval of one second. A long-running Worker
+reports periodically, but the executable should still call `fastrace::flush()` before a normal exit
+to deliver remaining records immediately. Configure a different interval explicitly when needed:
+
+```rust
+use std::time::Duration;
+
+fastrace::set_reporter(
+    ConsoleReporter,
+    Config::default().report_interval(Duration::from_millis(500)),
+);
+```
+
+Console output can also be redirected to a file. Because ConsoleReporter uses `stderr`, regular error
+logs enter the same file:
+
+```bash
+cargo run --bin <your-bin> 2> runtime-traces.log
+```
+
+The fastrace ConsoleReporter and the codebase's `tracing::warn!` or `tracing::error!` calls are separate
+pipelines. The application's `tracing` Subscriber still controls the latter; `RUST_LOG` does not
+filter ConsoleReporter spans. In production, replace ConsoleReporter with a remote implementation of
+`fastrace::collector::Reporter`; Engine configuration stays the same, while the application chooses
+the concrete backend and companion crate rather than crawler fixing a Jaeger, Datadog, or
+OpenTelemetry integration.
+
+### Full Tracing and Sampling
+
+Trace every Request during local debugging:
+
+```rust
+let tracing = trace::Tracing::all();
+```
+
+Production deployments will normally sample by ratio:
+
+```rust
+let tracing = trace::Tracing::sample(0.1)?; // approximately 10%
+
+let mut engine = engine::Engine::new()
+    .with_spider(BasicSpider::new())
+    .build()
+    .with_tracing(tracing);
+```
+
+`Tracing::sample(ratio)` accepts only finite values in `0.0..=1.0`. `0.0` disables sampling, `1.0`
+is equivalent to `Tracing::all()`, and NaN, infinity, or an out-of-range value returns an error.
+`Tracing::default()` also disables sampling. Configuration is frozen when that Engine run starts and
+is not hot-reloaded.
+
+Sampling is not randomized again for every claim. The decision is a stable function of Request ID,
+Request version, and Worker ID, so another execution of the same Request version on the same Worker
+keeps the same decision. A Request executed by a different Worker can have a different sampling
+result. Internal download, parse, and Scheduler operation retries do not resample the root trace.
+
+### Trace Structure
+
+Every sampled claimed Request creates one independent `crawler.request` root span. Engine does not
+create a root around the whole Worker, preventing a long-running process from accumulating one
+unbounded trace. Multiple Requests in one business Trace therefore have different fastrace TraceIds;
+query the root span's `crawler.trace_id` property to aggregate one business run.
+
+The root span records these bounded properties:
+
+| Property | Meaning |
+| --- | --- |
+| `crawler.task_id` | Task identity |
+| `crawler.trace_id` | crawler business-run identity |
+| `crawler.request_id` | current Request identity |
+| `crawler.node` | current node |
+| `crawler.version` | Request execution version |
+| `crawler.worker_id` | current Worker identity |
+| `crawler.mode` | `http` or `browser` |
+
+Depending on the executed path, the root can contain these spans:
+
+| Span | Scope |
+| --- | --- |
+| `scheduler.ack` | Confirm execution ownership before Downloader starts |
+| `crawler.execute` | Main Middleware, download, and parse lifecycle |
+| `middleware.before_download`, `middleware.after_download`, `middleware.before_parse` | Corresponding Middleware stage |
+| `downloader.fetch` | One download attempt |
+| `executor.parse` | One complete parse attempt |
+| `middleware.error_download`, `middleware.error_parse` | Terminal download or parse error callback |
+| `output.requests`, `output.items` | Request or Item output emitted through Spider Tx |
+| `middleware.before_scheduler`, `scheduler.push` | Admission and enqueue of new Requests |
+| `middleware.before_item`, `item_store.submit` | Item admission and persistence |
+| `middleware.error_item` | Terminal Item submission error callback |
+| `scheduler.refresh_lease` | Execution-lease refresh for long work |
+| `scheduler.success / failure / release` | Success, failure, or unstarted-release settlement |
+
+Stages that do not run produce no placeholder span. For example, a path without retries has only one
+download or parse span, and a path without Item output has no `output.items`. The Request root begins
+after Scheduler has claimed the Request; it does not cover idle Engine polling or `next_requests`.
+
+Each operation span uses `span.status_code=ok|error`; failures record only a bounded `error.type`
+classification. Retry spans record one-based `retry.attempt`, Tx output records `output.count`, and a
+download records `http.request.method` plus `http.response.status_code` after a successful response.
+The Reporter record also contains TraceId, SpanId, parent relationship, start time, and duration.
+
+### Context and Data Boundaries
+
+A fastrace TraceId is runtime telemetry only. It never replaces crawler's business `trace_id` and is
+never persisted in a Request, Trace Snapshot, Payload, Item, failure snapshot, or Rules DSL. Tx
+Request/Item Events privately carry the current span context in process so asynchronous output stays
+in the Request trace that produced it. This context is not a public or persisted contract.
+
+In distributed operation, W3C `traceparent` is injected only when a Worker uses
+`contrib::scheduler::api::Api` to call its trusted Master. The framework does not send that header to
+crawl targets, redirect targets, AI providers, or Redis. An API Scheduler call outside an active
+Request context does not synthesize a `traceparent`. Transport retries for one API operation keep the
+same header. Whether Master accepts and exports the context belongs to the separate Master project.
+
+Spans exclude response content, Request bodies, Item content, AI prompts, API keys, cookies, proxy
+credentials, complete URLs, and raw error text. A business identifier is recorded directly only when
+it is no longer than 128 bytes and contains no control character; otherwise it becomes a stable
+`sha256:<hex>` token. Directly recorded identifiers are still visible to the Reporter, so credentials
+or tokens must not be used as Task, Trace, Request, node, or Worker IDs. This boundary applies to
+fastrace spans only; application logs need their own redaction policy.
+
+### Troubleshooting Missing Local Output
+
+Check these conditions in order:
+
+1. The executable was compiled with `spider/runtime-tracing` or `contrib/runtime-tracing`.
+2. `fastrace::set_reporter(...)` ran before Engine startup. Spans created before Reporter setup are ignored.
+3. The Runtime uses `with_tracing(Tracing::all())` or a nonzero `Tracing::sample(...)` ratio.
+4. Scheduler actually claimed and executed a Request; an empty queue and idle polling produce no `crawler.request`.
+5. The executable called `fastrace::flush()` before exit and the terminal or container captures `stderr`.
+
+Engine continues normally when no Reporter is installed, a Request is not sampled, or the compile-time
+feature is disabled. Reporting failures do not participate in Request success, failure, or retry logic.
 
 ## Development
 
@@ -434,8 +652,9 @@ cargo clippy --workspace --all-targets --features runtime-tracing -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
-The Scheduler contract receives the Engine-owned Worker ID and supported download modes for
-`next_requests` and pending-work checks; filtering must be atomic with claim. Redis is the available
+Each Scheduler owns its Worker identity and supported download modes; Engine supplies only frozen
+concurrency to `open(concurrency)` and a batch size to `next_requests(limit)`. Capability filtering
+must remain atomic with claim. Redis is the available
 persistent Scheduler implementation and is covered by the shared Scheduler conformance suite.
 The Worker-side `contrib::scheduler::api::Api` adapter is also implemented. Its corresponding Master
 service is not part of this workspace: this repository maintains only the Master feature and protocol
@@ -443,10 +662,10 @@ design, while another project owns the server, database, Cron, Control API, and 
 Optional `fastrace` runtime tracing is implemented; a real Browser Downloader and mixed HTTP/browser
 end-to-end execution remain v5 work. AI provider configuration is already Worker-local: one reusable
 `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.
-The local Memory runtime defaults to `worker-1` and HTTP mode. Distributed Scheduler
-implementations require a stable, unique startup identity with `with_worker_id(...)`; Engine rejects
-startup when that explicit identity is missing. `with_modes(...)` freezes the download capabilities
-for that run. An empty Worker ID or mode set is rejected before execution.
+Memory uses the internal identity `local`, defaults to HTTP mode, and can replace its capability set
+with `Memory::with_modes(...)`; it does not register or heartbeat. Redis and API require stable Worker
+ID, host, and version values on the Scheduler, while `with_modes(...)` freezes their download
+capabilities. Missing metadata or an empty mode set is rejected during Scheduler configuration/open.
 
 Media normalization does not download files. Item attachment downloading is planned as an
 independent v5 change alongside, but not dependent on, the Browser Downloader.

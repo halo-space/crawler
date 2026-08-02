@@ -22,8 +22,10 @@ pub(super) fn validate_lease(
             });
         }
     }
-    if request.leased_by != payload.worker_id {
-        return Err(scheduler::Error::LeaseMismatch(request.id.clone()));
+    if request.leased_by.trim().is_empty() {
+        return Err(scheduler::Error::Message(
+            "processing Request has no lease owner".to_string(),
+        ));
     }
     if request.version != payload.version {
         return Err(scheduler::Error::VersionMismatch(request.id.clone()));
@@ -66,11 +68,13 @@ pub(super) fn is_duplicate(
             });
         }
     }
-    if completed.worker_id != payload.worker_id {
-        return Err(scheduler::Error::LeaseMismatch(payload.id.clone()));
-    }
     if completed.state != payload.state {
         return Err(scheduler::Error::StateMismatch(payload.id.clone()));
+    }
+    if completed.worker_id.is_empty() {
+        return Err(scheduler::Error::Message(
+            "completion is missing its observed execution worker".to_string(),
+        ));
     }
     Ok(true)
 }
@@ -187,19 +191,20 @@ pub(super) fn retry(
     None
 }
 
-pub(super) fn record(state: &mut State, payload: &payload::Payload) {
+pub(super) fn record(state: &mut State, payload: &payload::Payload, worker_id: &str) {
     state.completed.insert(
         (payload.id.clone(), payload.version),
-        Completion::new(payload),
+        Completion::new(payload, worker_id),
     );
 }
 
 pub(super) fn record_error(
     state: &mut State,
     payload: &payload::Payload,
+    worker_id: &str,
     error: impl Into<String>,
 ) {
-    let mut completion = Completion::new(payload);
+    let mut completion = Completion::new(payload, worker_id);
     completion.state = net::State::Failed;
     let transition = error.into();
     completion.error = Some(

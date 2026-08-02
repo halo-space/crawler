@@ -13,9 +13,12 @@ mod validate;
 
 use state::State;
 
+const LOCAL_WORKER: &str = "local";
+
 #[derive(Debug)]
 pub struct Memory {
     lease: scheduler::Lease,
+    modes: Vec<net::Mode>,
     state: Mutex<State>,
 }
 
@@ -23,12 +26,23 @@ impl Memory {
     pub fn new() -> Self {
         Self {
             lease: scheduler::Lease::default(),
+            modes: vec![net::Mode::Http],
             state: Mutex::new(State::default()),
         }
     }
 
     pub fn with_lease(mut self, lease: scheduler::Lease) -> Self {
         self.lease = lease;
+        self
+    }
+
+    pub fn with_modes(mut self, modes: impl IntoIterator<Item = net::Mode>) -> Self {
+        self.modes.clear();
+        for mode in modes {
+            if !self.modes.contains(&mode) {
+                self.modes.push(mode);
+            }
+        }
         self
     }
 
@@ -108,7 +122,8 @@ impl scheduler::Scheduler for Memory {
         Some(self.lease)
     }
 
-    async fn open(&self) -> Result<(), scheduler::Error> {
+    async fn open(&self, _concurrency: usize) -> Result<(), scheduler::Error> {
+        validate_worker(LOCAL_WORKER, &self.modes)?;
         Ok(())
     }
 
@@ -167,25 +182,20 @@ impl scheduler::Scheduler for Memory {
             .map(|snapshot| snapshot.as_ref().clone()))
     }
 
-    async fn next_requests(
-        &self,
-        limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<Vec<net::Request>, scheduler::Error> {
-        validate_worker(worker_id, modes)?;
+    async fn next_requests(&self, limit: usize) -> Result<Vec<net::Request>, scheduler::Error> {
         let mut state = self.state();
-        Ok(claim::next(&mut state, self.lease, limit, worker_id, modes))
+        Ok(claim::next(
+            &mut state,
+            self.lease,
+            limit,
+            LOCAL_WORKER,
+            &self.modes,
+        ))
     }
 
-    async fn has_pending_requests(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<bool, scheduler::Error> {
-        validate_worker(worker_id, modes)?;
+    async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
         let state = self.state();
-        Ok(state.has_pending_requests(modes))
+        Ok(state.has_pending_requests(&self.modes))
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
@@ -258,6 +268,11 @@ impl scheduler::Scheduler for Memory {
         settle::require_ack(&state, payload)?;
         let counters = settle::counters(payload)?;
         let counters = settle::merge_stats(&state, &payload.trace_id, counters)?;
+        let worker_id = state
+            .processing
+            .get(&payload.id)
+            .map(|request| request.leased_by.clone())
+            .ok_or_else(|| scheduler::Error::RequestNotFound(payload.id.clone()))?;
         if state.processing.remove(&payload.id).is_none() {
             return Err(scheduler::Error::RequestNotFound(payload.id.clone()));
         }
@@ -265,7 +280,7 @@ impl scheduler::Scheduler for Memory {
             .acknowledged
             .remove(&(payload.id.clone(), payload.version));
         state.done += 1;
-        settle::record(&mut state, payload);
+        settle::record(&mut state, payload, &worker_id);
         settle::apply_stats(&mut state, payload.trace_id.clone(), counters);
         Ok(())
     }
@@ -290,9 +305,9 @@ impl scheduler::Scheduler for Memory {
             .remove(&(payload.id.clone(), payload.version));
         let worker_id = request.leased_by.clone();
         if let Some(error) = settle::retry(&mut state, request, &worker_id) {
-            settle::record_error(&mut state, payload, error);
+            settle::record_error(&mut state, payload, &worker_id, error);
         } else {
-            settle::record(&mut state, payload);
+            settle::record(&mut state, payload, &worker_id);
         }
         settle::apply_stats(&mut state, payload.trace_id.clone(), counters);
         Ok(())

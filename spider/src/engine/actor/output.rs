@@ -21,16 +21,22 @@ where
 
     async fn handle(&mut self, event: Event, ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         self.invalidate_claim();
-        let (event, parent) = event.accept();
+        let (event, trace_context) = event.accept();
         let scheduler = self.scheduler.clone();
         let store = self.store.clone();
         let registry = self.registry.clone();
         let actor_ref = ctx.actor_ref().clone();
         let (delegated, reply) = ctx.reply_sender();
+        let id = task::Id::new();
+        let done_id = id.clone();
 
         let handle = tokio::spawn(async move {
             let result = task::protect(engine::event::handle(
-                event, parent, scheduler, store, registry,
+                event,
+                trace_context,
+                scheduler,
+                store,
+                registry,
             ))
             .await;
             let error = match (result, reply) {
@@ -48,11 +54,9 @@ where
                 }
                 (Err(error), None) => Some(error),
             };
-            let id = tokio::task::id();
-            let _ = actor_ref.tell(Done { id, error }).await;
+            let _ = actor_ref.tell(Done { id: done_id, error }).await;
         });
-        self.outputs.insert(handle);
-        self.exhausted = false;
+        self.outputs.insert(id, handle);
         delegated
     }
 }
@@ -67,11 +71,10 @@ where
     type Reply = ();
 
     async fn handle(&mut self, done: Done, ctx: &mut Context<Self, Self::Reply>) {
-        if !self.outputs.remove(done.id) {
+        if !self.outputs.remove(&done.id) {
             return;
         }
         self.invalidate_claim();
-        self.exhausted = false;
         if let Some(error) = done.error {
             self.record_error(error);
         }

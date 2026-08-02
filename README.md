@@ -43,6 +43,7 @@ let mut engine = spider::engine::Engine::new()
 engine.start().await?;
 ```
 
+`start()` keeps the Worker alive while the queue is empty and shuts down cleanly on SIGINT/SIGTERM.
 The default runtime uses the in-memory Scheduler and writes Items as JSONL below `./data/items/`.
 Redis replaces only the scheduling dependency; Item persistence remains independently
 replaceable.

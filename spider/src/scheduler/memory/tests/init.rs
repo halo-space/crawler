@@ -16,11 +16,11 @@ async fn claim_uses_trace_snapshot_from_memory_domain() {
         .await
         .unwrap();
     scheduler
-        .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))
+        .push(payload::Payload::for_request(&request, WORKER).requests(vec![request]))
         .await
         .unwrap();
 
-    let claimed = scheduler.next_requests(1, WORKER, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap();
 
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].trace_id, "trace-1");
@@ -47,14 +47,7 @@ async fn init_atomically_stores_trace_and_initial_requests() {
 
     assert!(scheduler.trace("trace-1").await.unwrap().is_some());
     assert_eq!(scheduler.queued_len(), 2);
-    assert_eq!(
-        scheduler
-            .next_requests(2, WORKER, HTTP)
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(scheduler.next_requests(2).await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -149,7 +142,7 @@ async fn claim_restores_rules_requests_and_shares_trace_config() {
         .await
         .unwrap();
 
-    let claimed = scheduler.next_requests(2, WORKER, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(2).await.unwrap();
 
     assert_eq!(claimed.len(), 2);
     assert_eq!(claimed[0].node_key(), "detail");

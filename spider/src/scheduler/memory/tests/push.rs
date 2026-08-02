@@ -4,16 +4,15 @@ use super::*;
 async fn push_and_claim_moves_request_to_processing() {
     let scheduler = memory();
     let request = request("https://example.com");
-    let payload =
-        payload::Payload::for_request(&request, "worker-1").requests(vec![request.clone()]);
+    let payload = payload::Payload::for_request(&request, WORKER).requests(vec![request.clone()]);
 
     scheduler.push(payload).await.unwrap();
-    let claimed = scheduler.next_requests(1, WORKER, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap();
 
     assert_eq!(claimed.len(), 1);
     assert_eq!(scheduler.queued_len(), 0);
     assert_eq!(scheduler.processing_len(), 1);
-    assert_eq!(claimed[0].leased_by, "worker-1");
+    assert_eq!(claimed[0].leased_by, WORKER);
 }
 
 #[tokio::test]
@@ -186,9 +185,7 @@ fn concurrent_conflict_does_not_partially_insert_missing_requests() {
     assert!(conflicting.join().unwrap().is_err());
     assert!(independent.join().unwrap().is_ok());
     assert_eq!(scheduler.queued_len(), 2);
-    let claimed = runtime
-        .block_on(scheduler.next_requests(3, WORKER, HTTP))
-        .unwrap();
+    let claimed = runtime.block_on(scheduler.next_requests(3)).unwrap();
     let urls = claimed
         .iter()
         .map(|request| request.url.as_str())
@@ -236,22 +233,17 @@ async fn push_is_idempotent_while_a_request_is_processing_or_terminal() {
         .push(payload::Payload::new().requests(vec![request.clone()]))
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     scheduler
         .push(payload::Payload::new().requests(vec![request.clone()]))
         .await
         .unwrap();
     assert_eq!(scheduler.processing_len(), 1);
 
-    let mut ack = payload::Payload::for_request(&claimed, "worker-1");
+    let mut ack = payload::Payload::for_request(&claimed, WORKER);
     ack.state = net::State::Processing;
     scheduler.ack(&ack).await.unwrap();
-    let mut success = payload::Payload::for_request(&claimed, "worker-1");
+    let mut success = payload::Payload::for_request(&claimed, WORKER);
     success.start_time = Some(1);
     success.end_time = Some(2);
     scheduler.success(&success).await.unwrap();
@@ -318,7 +310,7 @@ async fn push_rejects_missing_trace_snapshot_atomically() {
     request.trace_id = "trace-1".to_string();
 
     let result = scheduler
-        .push(payload::Payload::for_request(&request, "worker-1").requests(vec![request]))
+        .push(payload::Payload::for_request(&request, WORKER).requests(vec![request]))
         .await;
 
     assert!(matches!(result, Err(scheduler::Error::TraceNotFound(_))));

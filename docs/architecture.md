@@ -32,9 +32,9 @@ The workspace contains four crates:
 | AI runtime configuration | Implemented | One reusable Worker-local `ai::OpenAI` provider is injected with `Engine::with_ai`; provider configuration does not enter Rules or Trace snapshots |
 | Middleware | Implemented | Lifecycle Registry, Worker-local Memory implementations, and optional RedisBloom Dedup/shared Redis RateLimit implementations |
 | Item Store | Implemented | Independent `open / close / submit(&Payload)` persistence contract; default JSONL output and Jsonl-owned failure snapshots; attachment download is planned for v5 |
-| Capability-aware claiming | Implemented | Memory claims and checks pending work only within the current Worker's configured Request modes |
-| Redis Scheduler | Implemented | Redis 7+ standalone only; namespaced complete Request Scheduler/Init contract and Lua-atomic transitions |
-| API Scheduler adapter | Implemented | Worker-side `contrib::scheduler::api::Api`; the Master service is designed here but implemented in a separate project |
+| Capability-aware claiming | Implemented | Each Scheduler owns frozen Request modes; claim filtering remains backend-atomic |
+| Redis Scheduler | Implemented | Redis 7+ standalone only; complete namespaced Scheduler/Init contract, Worker registration/heartbeat, and Lua-atomic transitions |
+| API Scheduler adapter | Implemented | Worker-side Scheduler with registration/heartbeat over the planned Master API; the Master service belongs to a separate project |
 | Runtime tracing | Implemented | Optional per-Request `fastrace` roots and bounded lifecycle spans; distinct from business `trace_id` |
 
 XPath has been removed from the roadmap. CSS is the sole HTML selector path; the project does not maintain a partial XPath implementation.
@@ -44,20 +44,25 @@ selection semantics, and XML selection is not currently implemented.
 The crawler workspace does not contain or implement the Master service. It owns only the Worker-side
 API Scheduler adapter and the crawler contracts consumed over HTTP. The local `docs/master/` files
 record the Master feature, wire, database, and frontend design; the server, migrations, Cron, Control
-API, and frontend are implemented and verified in a separate project.
-A Master-backed `item::Store` is not part of the API Scheduler and is not a partially implemented
-API Scheduler feature. It remains an optional, separately decided Store adapter.
+API, and frontend are planned for a separate project.
+Item persistence remains strictly inside the Worker: `item::Jsonl` is the default and
+`.with_store(...)` may replace it with a Worker-owned business backend. One Engine run has exactly one
+Store selected at startup; the runtime does not route Items between Stores or maintain a Store registry.
+Master does not participate in Item persistence, and this workspace does not define a remote Store
+adapter for it. `persister_id` is not part of the framework contract or any persisted Item context.
 
 ## 2. Core Design Principles
 
 1. **One runtime:** Code mode and Rules mode use one Executor. Trace Snapshot data selects the code handler or Rules interpretation path; only run-seed initialization differs.
 2. **Scheduler as the Request distribution boundary:** Switching away from Memory changes only `.with_scheduler(...)` at assembly time. A replacement must implement the complete Request scheduling semantics, not merely wrap a storage client.
-3. **Store as the Item persistence boundary:** `.with_store(...)` independently replaces Item persistence. A Store never claims, leases, or settles Requests.
+3. **Store as the Item persistence boundary:** `.with_store(...)` independently selects the one Store for
+   the Engine run. There is no `persister_id`, Store registry, per-Task Store routing, or Store capability
+   filtering. A Store never claims, leases, or settles Requests.
 4. **Immediate output:** Requests and Items emitted by parsing enter the Engine through `Tx` immediately. Request Payloads go to the Scheduler and Item Payloads go to the Store; neither waits for a Trace or request graph to finish.
 5. **Identity is separate from execution ownership:** Request ID survives retry and recovery; `version`, `leased_by`, and `lease_time` describe one execution right.
 6. **Immutable run snapshots:** Each Trace has one immutable Trace Snapshot. Rules snapshots contain the complete DSL; code snapshots never persist Rust handlers.
 7. **Explicit recovery semantics:** Lease refresh, release, success, and failure use separate methods. There is no overloaded `finish` operation.
-8. **Single-purpose modules:** The Actor coordinates, startup-frozen Worker state owns identity and capabilities, a Request task owns one execution right, an Executor parses, a Scheduler owns Request scheduling, and a Store owns Item persistence.
+8. **Single-purpose modules:** The Actor coordinates, each distributed Scheduler owns its startup-frozen Worker identity and capabilities, a Request task owns one execution right, an Executor parses, a Scheduler owns Request scheduling, and a Store owns Item persistence.
 
 ## 3. System Overview
 
@@ -71,7 +76,7 @@ flowchart LR
     S["Scheduler contract"]
     M["Memory Scheduler"]
     Z["Redis 7 Scheduler"]
-    W["Request Worker"]
+    W["Request Task"]
     MW["Middleware Registry"]
     D["Downloader"]
     H["HTTP"]
@@ -190,8 +195,8 @@ initial-Request contract without depending on Worker-local code.
 The outer `Runtime::start()` order is fixed:
 
 ```text
-validate runtime limits
--> open Scheduler / Downloader / Item Store
+validate runtime settings
+-> open Scheduler with frozen concurrency / Downloader / Item Store
 -> before_spider
 -> initialize or attach to a run
 -> spawn and drain the Engine Actor
@@ -205,18 +210,19 @@ validate runtime limits
 - at most one active Scheduler claim;
 - the set of active Request tasks;
 - the set of active Tx output tasks;
-- Tx Event capacity, producer activity, and the first terminal error;
+- Tx Event capacity, producer activity, shutdown state, and the first terminal error;
 - shared Scheduler, Item Store, Downloader, Executor, and Middleware Registry references.
 
 Startup, claim, Request, output, poll, and producer-idle completions return as separate Actor messages. Every spawned task catches panic and reports completion. An accepted output failure normally returns to its waiting `Tx` caller; if that caller has been cancelled, the output completion reports the undelivered error to the Engine instead of silently succeeding. Kameo's mailbox is unbounded for internal messages; the explicit Event capacity controls only external `Tx` output and therefore remains independent from internal completion traffic.
 
-### 5.1 Three Independent Limits
+### 5.1 Runtime Limits and Idle Interval
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
 | `with_concurrency(n)` | `16` | Maximum number of active Request tasks |
-| `with_claim_limit(n)` | concurrency | Maximum Requests requested by one `next_requests(limit, worker_id, modes)` call |
+| `with_claim_limit(n)` | concurrency | Maximum Requests requested by one `next_requests(limit)` call |
 | `with_event_limit(n)` | `32` | Maximum accepted Events whose Actor handler has not started |
+| `with_idle_interval(duration)` | `1s` | Delay before the next claim after an empty result |
 
 The values are validated and frozen when the Engine starts. They are not hot-reloaded and do not replace one another. The actual claim size is:
 
@@ -226,22 +232,25 @@ min(claim_limit, request_concurrency - active_request_tasks)
 
 An Event permit is acquired before `Tx` sends an Event and released when the Engine Actor starts its handler. The handler registers an output task and delegates the reply; `Tx` still waits for Scheduler and Middleware processing to finish. Event capacity therefore bounds Events waiting to start, while the Actor's output task set separately prevents early shutdown during processing.
 
-### 5.2 Idle Detection and Exit
+### 5.2 Idle Polling and Shutdown
 
-An empty `next_requests(limit, worker_id, modes)` result means only that the current claim returned no work. It does not terminate the Engine. The Actor exits only when all of the following are true:
+An empty `next_requests(limit)` result means only that the current claim returned no work. It never
+terminates a live Worker. The Actor waits for the frozen idle interval and claims again; there is still
+at most one active claim. This lets Redis and API Schedulers accept work published after the process
+started without a second Engine lifecycle.
 
-- the Scheduler confirms there are no queued or processing Requests within the current Worker capability scope;
-- no startup, claim, poll, or producer-idle observation task is active;
-- no Request task is active;
-- no output task is active;
-- no Event permit is active;
-- no tracked Tx producer can still emit an Event.
+`Runtime::start()` installs SIGINT and SIGTERM listeners before component `open`. If a signal arrives
+during `open`, `before_spider`, or run initialization, the active stage is allowed to finish and no
+later startup stage begins. Once the Actor is running, a signal stops new claims, but a claim that
+already started is allowed to return and every Request in that response is executed. The Actor then
+waits without a framework timeout until startup, claimed Requests, Tx output tasks, Event permits, and
+tracked Tx producers have drained. Only then does Runtime run `after_spider` and close Downloader,
+Item Store, and Scheduler. Scheduler `close()` owns heartbeat shutdown and the explicit offline update.
+SIGKILL, OOM, and process crashes cannot run this path; distributed backends use heartbeat timeout for
+Worker liveness and the existing Request lease recovery for abandoned execution rights.
 
-An empty claim result is valid only for the work state observed by that claim. If a Request,
-output Event, or Tx producer changes work while the claim is in flight, the Actor treats the
-result as stale and claims again before it can terminate.
-
-This prevents early termination while a list page is producing detail Requests, an Item Event arrives late, or a handler has cloned its Tx for delayed output.
+A terminal runtime error follows the same accepted-work drain boundary, immediately cancels any idle
+poll delay, blocks new claims, and returns the first error after the remaining work is stable.
 
 ### 5.3 Runtime Tracing
 
@@ -268,11 +277,11 @@ raw errors.
 | Method | Single responsibility |
 | --- | --- |
 | `lease` | Return optional lease timeout and refresh interval settings |
-| `open / close` | Open and close Scheduler-owned resources |
+| `open(concurrency) / close` | Open Scheduler-owned resources with frozen Worker concurrency; stop registration resources and close them |
 | `push` | Consume only `Payload.requests`; skip identical replays, atomically insert missing Requests, and reject a conflicting collection |
 | `trace` | Read an immutable Trace Snapshot by `trace_id` |
-| `next_requests(limit, worker_id, modes)` | Atomically claim and restore at most `limit` Requests for the supplied Worker identity and modes |
-| `has_pending_requests(worker_id, modes)` | Report whether the supplied Worker capability scope still has queued or processing Requests |
+| `next_requests(limit)` | Atomically claim at most `limit` Requests in the Scheduler backend, restore them before returning, and preserve the claimed order |
+| `has_pending_requests()` | Report pending work in the Scheduler-owned Worker capability scope |
 | `ack` | Confirm that the Engine accepted a claimed execution right |
 | `release` | Voluntarily return execution ownership without consuming a queue retry |
 | `refresh_lease` | Extend an acknowledged execution lease |
@@ -284,9 +293,12 @@ raw errors.
 - `initializes_run()`, which declares whether this Engine creates a local run;
 - `init(trace_id, snapshot, requests)`, which atomically stores a Trace Snapshot and its supplied initial Requests; an empty collection remains valid.
 
-`Payload` remains the single transport envelope and the design does not add parallel Batch or Receipt structures. It carries Request execution identity, state, error, timing, statistics, and the `requests / items` output collections. Scheduler methods never persist Items: `push` accepts Requests only, while ownership and settlement Payloads require both collections to be empty. The independent `item::Store::submit(&Payload)` accepts Item Payloads and rejects Request or completion fields. A non-empty Item Payload always carries its run `task_id / trace_id`; a detached Tx may omit only Request execution identity.
+`Payload` remains the single transport envelope and the design does not add parallel Batch or Receipt structures. It carries Request execution identity, the observational `worker_id`, state, error, timing, statistics, and the `requests / items` output collections. `worker_id` is recorded for diagnostics only; it is not compared with Scheduler configuration or the Request's current `leased_by`. Scheduler methods never persist Items: `push` accepts Requests only, while ownership and settlement Payloads require both collections to be empty. The independent `item::Store::submit(&Payload)` accepts Item Payloads and rejects Request or completion fields. A non-empty Item Payload always carries its run `task_id / trace_id`; a detached Tx may omit only Request execution identity.
 
-For `has_pending_requests`, `modes` defines the capability scope. A processing Request with a matching mode remains pending for every Worker with that capability, regardless of its current `leased_by` value. The `worker_id` identifies and validates the caller; it does not narrow the processing set to leases owned by that Worker. This conservative rule prevents a compatible Worker from exiting before lease recovery or before an in-flight Request can emit more compatible work.
+Worker identity and supported modes belong to each concrete Scheduler. Engine passes only frozen
+concurrency to `open` and a batch limit to `next_requests`; it never supplies registration metadata or
+claim capabilities per call. A processing Request with a matching mode remains pending regardless of
+its current `leased_by` value.
 
 Every `contrib` Scheduler must fully implement these state and identity semantics. The Engine must not contain backend-specific branches.
 
@@ -313,21 +325,21 @@ Memory atomically maintains its queues, known Request IDs, processing records, a
 - Memory keeps a SHA-256 digest of each canonical initial Request Snapshot for replay comparison; this is Scheduler identity protection, not URL/business deduplication;
 - ID uniqueness prevents the same Request object from being enqueued twice; URL and business-field deduplication remain Dedup Middleware responsibilities;
 - the ready queue uses higher `priority` first and FIFO within one priority; a delayed queue holds future `next_time` values;
-- `Memory::new()` owns only process-local Scheduler state; Engine supplies a non-empty Worker ID and mode set for every claim and pending check;
-- claim selects the highest-priority FIFO Request supported by the supplied mode set without changing incompatible queue entries, and pending checks use the same Worker scope;
+- `Memory::new()` owns process-local Scheduler state, uses the internal identity `local`, and defaults to HTTP capability; `Memory::with_modes(...)` replaces the frozen mode set;
+- claim selects the highest-priority FIFO Request supported by Memory's mode set without changing incompatible queue entries, and pending checks use the same scope;
 - claiming changes a Request to `processing`, records `leased_by / lease_time`, and advances `version`;
 - the default lease timeout is 30 seconds and the refresh interval is 10 seconds; `Memory::with_lease(...)` can replace them with positive whole-millisecond durations representable by the runtime clock;
 - `ack` is idempotent for the same valid identity and records only execution confirmation; `refresh_lease` updates the acknowledged lease timestamp;
 - an unacknowledged expired claim consumes no retry and records no failed Worker, while an acknowledged expiry appends the current Worker and consumes one queue attempt;
 - recovery and retry return a Request to pending without changing `version`; the next successful claim creates the next execution generation;
 - ordered duplicate-free `Request.failed_workers` is preserved and validated by the strict Request Snapshot contract;
-- repeated `success / failure` with the same identity and terminal state is idempotent, while mismatched task, trace, node, worker, version, or state is rejected;
+- repeated `success / failure` with the same Request identity and terminal state is idempotent, while mismatched task, trace, node, version, or state is rejected; the Scheduler's own leased Worker is the execution owner and the Payload `worker_id` is diagnostic metadata, not a second settlement credential;
 - `failure` preserves Request ID while advancing queue retry count, then requeues or enters failed when retries are exhausted.
-- restoration, version/retry overflow, and queue-conversion failures produce explicit terminal diagnostics with the original Request ID instead of silently dropping work.
+- Request Snapshot restoration, version/retry overflow, and queue-conversion failures produce explicit terminal diagnostics with the original Request ID instead of silently dropping work. Trace loading is not a Memory failure path; API Trace recovery has separate release semantics below.
 
-Memory is an unregistered process-local Scheduler. Engine owns the Worker identity and frozen mode
-capabilities, then supplies them to each claim; Memory does not discover or select among a fleet of Workers;
-registration, heartbeat, and cross-Worker eligibility belong to the concrete distributed Scheduler that needs them. It reads
+Memory is an unregistered process-local Scheduler. It does not discover or select among a fleet of
+Workers; registration, heartbeat, and cross-Worker eligibility belong to the concrete distributed
+Scheduler that needs them. It reads
 Trace Snapshots from an immutable in-process map and has no remote cache, transport retry, or
 temporary Trace-storage failure path. It does not restore its Request queue after process exit, and
 the current implementation does not write local Request files under `data/requests/`.
@@ -342,7 +354,11 @@ Request scheduling dependency:
 
 ```rust
 let scheduler = contrib::scheduler::redis::Redis::new("redis://127.0.0.1:6379")?
-    .with_namespace("crawler")?;
+    .with_namespace("crawler")?
+    .with_worker_id("worker-01")?
+    .with_worker_host("crawler-node-01")?
+    .with_worker_version("1.0.0")?
+    .with_modes([spider::net::Mode::Http])?;
 
 let engine = spider::engine::Engine::new()
     .with_scheduler(scheduler)
@@ -350,9 +366,20 @@ let engine = spider::engine::Engine::new()
     .build();
 ```
 
-`Redis::new` validates the connection URL and `with_namespace` validates the key namespace. Every
-Redis key is scoped below that namespace, and `close()` drops only local client resources. It never
+`Redis::new` validates the connection URL and `with_namespace` validates the key namespace. Worker
+identity, host, and version are mandatory Scheduler configuration; modes default to HTTP and
+`with_modes(...)` replaces that capability set. `open(concurrency)` registers them with Redis server
+time, starts a 10-second heartbeat by default, and treats 30 seconds without a
+heartbeat as offline. A duplicate still-online Worker ID rejects registration. A heartbeat error pauses
+later claims and is retried at the configured interval until recovery; Requests already claimed continue
+normally. `close()` waits for the heartbeat task to stop, attempts the explicit offline update, and then
+drops local client resources, so no heartbeat can follow the offline update. If that update fails, it
+logs the error and the registration expires through the heartbeat timeout. Cancelling `close()` while it
+waits for heartbeat shutdown or the offline response retains the connection, registration token, and
+stop state; a later `close()` continues the same shutdown. Close never
 deletes persisted work; a new Scheduler instance using the same URL and namespace can continue it.
+Within one lifecycle, repeated `open` calls are idempotent only for the same concurrency; changing it
+requires `close()` followed by a new lifecycle.
 Redis returns `initializes_run() == false`, so a code-mode Worker consumes externally initialized
 runs; explicit Rules `init` remains atomic and supported.
 
@@ -364,7 +391,7 @@ replay is a no-op. Transient connection and availability failures remain `Schedu
 rather than being reclassified as ownership loss.
 
 Active ownership has one mode-scoped projection: `processing:<mode>` is a ZSET whose member is the
-opaque Request token and whose score is `lease_time`. It supports both capability-scoped pending
+opaque Request key segment and whose score is `lease_time`. It supports both capability-scoped pending
 checks and expiration scans; there is no separate global lease index. The Request Hash is the source
 of truth. A valid processing Hash repairs a stale score or wrong-mode projection without changing
 retry state, while an invalid Hash is quarantined. Every transition clears both known mode
@@ -394,7 +421,7 @@ completion, then continuing with later valid Requests. This does not hide shared
 an invalid Redis type for a shared index rejects the claim before it mutates state. Ready-queue
 cleanup is likewise bounded to 128 discarded invalid entries before the claim yields to a later
 invocation. Claim returns the persisted digest with the immutable Request Snapshot; Rust recalculates
-the canonical digest before overlaying mutable execution fields. A mismatch follows token-scoped
+the canonical digest before overlaying mutable execution fields. A mismatch follows key-segment-scoped
 recovery and is never returned as executable work. When that digest is valid, its immutable retry
 limit controls recovery and repairs a mismatched mutable Hash value. Recovery failure for one damaged
 record does not withhold valid Requests already claimed in the same atomic operation; the damaged
@@ -412,20 +439,64 @@ smaller persistence window, while `everysec` commonly offers higher throughput w
 one second of acknowledged-write exposure. Operators must monitor Redis capacity independently of
 the configured Item Store.
 
+### 6.4 Distributed Worker Registration
+
+Redis stores `worker_id`, host, version, modes, concurrency, `last_heartbeat`, a backend-generated
+token, `offline_time`, and `created_time`. The future Master service owns the equivalent server-side
+API Worker record and may additionally derive an optional IP from the connection; the Worker-side API
+Scheduler adapter does not persist this server state. Redis also stores the
+configured heartbeat timeout so an existing registration, rather than a replacement process, defines
+its own online window. Every successful new
+registration replaces the metadata, timestamps, and token and clears `offline_time`; no instance ID,
+state enum, update time, or registration history is part of the crawler contract. Redis leaves IP
+unset, while an API server may derive it from the connection. Token fences heartbeat and explicit
+offline updates after a Worker ID is registered again; it is not validated by claim, pending, Request
+lease, or settlement operations.
+
+Each distributed Scheduler handle keeps an unfinished register operation key only in local runtime
+memory until its response is confirmed. API sends it as the request idempotency key; Redis passes it
+to Lua, which derives and recognizes the same stored token without adding a Worker hash field. A
+replay restores the online heartbeat state without changing `created_time`; a confirmed registration
+clears the local key, so the next lifecycle is a new registration. Process loss also loses this local
+recovery state and falls back to the normal heartbeat timeout. Redis claim returns no work for a valid
+explicit-offline or heartbeat-timeout state. A missing Worker, wrong Redis type, mismatched identity,
+or malformed heartbeat/offline fields is a Scheduler error rather than an empty queue result.
+The first registration attempt freezes its concurrency together with the operation key. Replays must
+use that same concurrency; a different value is rejected until `close()` ends the lifecycle. While an
+unfinished registration key or confirmed token is retained, the Scheduler configuration is frozen so
+a retry cannot apply old recovery state to a different Worker or namespace. An explicit
+`close()` abandons an unconfirmed local registration. Redis atomically rebuilds the Worker Hash on a
+successful new registration or replay, leaving exactly the documented persistent fields.
+
+API Scheduler uses its existing authenticated client for `GET /v1/worker/policy` and
+`POST /v1/worker/register`, `/heartbeat`, and `/offline`. The policy supplies heartbeat interval;
+Redis configures interval and timeout locally. In both implementations, heartbeat liveness gates only
+future claims. It is deliberately separate from Request execution ownership: going offline never
+cancels a Request already returned by `next_requests`, and Request lease refresh never proves that the
+Worker process is registered online.
+
+When an API claim omits a Trace Snapshot, the Worker loads each cold `trace_id` once and loads
+different Traces concurrently. Trace read, missing, decode, validation, or task/node binding errors
+release that Request without `ack`/`failure` and without consuming a Request retry. Only a damaged
+Request Snapshot or execution state uses `ack + failure`. Claim recovery and each recovery settlement
+share a lease handoff deadline; one slow item cannot serially consume the whole batch lease. Successfully
+restored Requests are returned in the server claim order, and release attempts are independent so one
+failed release does not prevent the remaining claims from being returned.
+
 ## 7. Complete Request Lifecycle
 
 ```mermaid
 sequenceDiagram
     participant A as Engine Actor
     participant S as Scheduler
-    participant W as Request Worker
+    participant W as Request Task
     participant M as Middleware
     participant D as Downloader
     participant E as Executor
     participant T as Tx / Event
     participant I as Item Store
 
-    A->>S: next_requests(n, worker_id, modes)
+    A->>S: next_requests(n)
     S-->>A: Requests in processing with lease
     A->>W: run(request)
     W->>S: ack(payload)
@@ -777,10 +848,12 @@ in business deduplication.
 | `close` | Flush and close Store-owned resources during Engine shutdown |
 | `submit(&Payload)` | Validate and persist one complete Item Payload; reject Request or settlement fields before backend mutation |
 
-Engine uses `item::Jsonl::new()` by default. `.with_store(store)` replaces only Item persistence, while
-`.with_scheduler(scheduler)` independently replaces Request scheduling. A Store receives the existing
-Payload, including its task, trace, Request, and Worker identity, and may choose its own storage model;
-it never reads, claims, leases, or settles Scheduler work.
+Engine uses `item::Jsonl::new()` by default. `.with_store(store)` selects the only Store for the Engine
+run, while `.with_scheduler(scheduler)` independently replaces Request scheduling. A Store receives the
+existing Payload, including its task, trace, Request, and Worker identity, and may choose its own storage
+model; it never reads, claims, leases, or settles Scheduler work. Store selection is fixed when the Engine
+is built: the framework does not inspect `persister_id`, route by Task, or fan one Item submission out to
+multiple Stores.
 
 `Jsonl::new()` uses the current working directory. `Jsonl::with_dir(path)` changes its output root:
 
@@ -828,10 +901,10 @@ the Store contract.
 | `spider/src/engine/actor/request.rs` | Register one Request task and handle its completion message |
 | `spider/src/engine/actor/output.rs` | Accept Tx Events, delegate replies, and track output completion |
 | `spider/src/engine/actor/wait.rs` | Schedule poll and producer-idle notifications |
-| `spider/src/engine/actor/task.rs` | Own task handles and convert task panic into Engine errors |
+| `spider/src/engine/actor/shutdown.rs` | Stop new claims after a process shutdown signal and drain accepted work |
+| `spider/src/engine/actor/task.rs` | Own and abort task handles, and convert task panic into Engine errors |
 | `spider/src/engine/builder.rs` | Assemble components and own the Schema Store used by all execution modes |
 | `spider/src/engine/runtime.rs` | Component lifecycle, startup settings, and Actor assembly |
-| `spider/src/engine/worker.rs` | Own the startup-frozen Worker ID and download-mode capabilities |
 | `spider/src/engine/request/task.rs` | Ack, lease maintenance, and final settlement for one Request |
 | `spider/src/engine/admission.rs` | Apply `before_scheduler` to Request output before it enters the Scheduler |
 | `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse lifecycle for one claimed Request |
@@ -883,10 +956,14 @@ the Store contract.
 | `macros/src/spider/check.rs` | Validate macro input constraints |
 | `macros/src/spider/bind.rs` | Generate node registration and handler bindings |
 | `contrib/src/scheduler/redis/contract.rs` | Redis public type, lifecycle, and Scheduler/Init contract wiring |
+| `contrib/src/scheduler/redis/worker.rs` | Redis Worker configuration, registration fencing, heartbeat, and offline lifecycle |
 | `contrib/src/scheduler/redis/request.rs` | Redis Request serialization, queueing, claim, restore, and lease recovery |
 | `contrib/src/scheduler/redis/trace.rs` | Redis Trace Snapshot reads and validation |
 | `contrib/src/scheduler/redis/settle.rs` | Redis acknowledgement, release, refresh, success, and failure transitions |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | Key isolation, Lua loading, boundary validation, and error mapping |
+| `contrib/src/scheduler/api/worker.rs` | API Worker registration, heartbeat, and offline protocol |
+| `contrib/src/scheduler/api/request/claim.rs` | API batch claim, Trace de-duplication/concurrent recovery, recovery classification, and lease-bounded settlement |
+| `contrib/src/scheduler/api/request/trace.rs` | API Trace loading, caching, and validation |
 | `contrib/src/middleware/connection.rs` | Lazily establish and share one Redis ConnectionManager per Middleware instance |
 | `contrib/src/middleware/dedup.rs` | RedisBloom options, bucket keys, and atomic `BF.INSERT` Dedup |
 | `contrib/src/middleware/rate_limit.rs` and `rate_limit/reserve.lua` | Redis server-time shared group reservations and idle cleanup |

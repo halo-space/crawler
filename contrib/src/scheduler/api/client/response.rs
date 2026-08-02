@@ -1,4 +1,3 @@
-use futures_util::StreamExt as _;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -36,40 +35,12 @@ fn ambiguous(message: &str) -> scheduler::Error {
     ))
 }
 
-pub(super) enum ReadError {
-    Transport(String),
-    TooLarge(String),
-}
-
-pub(super) async fn read(
-    response: reqwest::Response,
-    max_response_bytes: usize,
-) -> Result<Vec<u8>, ReadError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_response_bytes as u64)
-    {
-        return Err(ReadError::TooLarge(format!(
-            "Master response exceeds the configured {max_response_bytes} byte limit"
-        )));
-    }
-
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| ReadError::Transport(error.to_string()))?;
-        let next = bytes
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| ReadError::TooLarge("Master response size overflow".to_string()))?;
-        if next > max_response_bytes {
-            return Err(ReadError::TooLarge(format!(
-                "Master response exceeds the configured {max_response_bytes} byte limit"
-            )));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+pub(super) async fn read(response: reqwest::Response) -> Result<Vec<u8>, String> {
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| error.to_string())
 }
 
 pub(in crate::scheduler::api) fn map_error(status: StatusCode, body: &[u8]) -> scheduler::Error {

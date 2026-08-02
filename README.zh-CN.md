@@ -40,6 +40,7 @@ let mut engine = spider::engine::Engine::new()
 engine.start().await?;
 ```
 
+`start()` 在队列为空时仍保持 Worker 运行，收到 SIGINT/SIGTERM 后再排空并关闭。
 默认运行时使用 Memory Scheduler，并把 Item 以 JSONL 写入 `./data/items/`。Redis Scheduler
 只替换调度依赖，Item 持久化仍可独立替换。
 

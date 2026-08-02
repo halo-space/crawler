@@ -212,7 +212,7 @@ mod tests {
             Some(self.policy)
         }
 
-        async fn open(&self) -> Result<(), scheduler::Error> {
+        async fn open(&self, _concurrency: usize) -> Result<(), scheduler::Error> {
             Ok(())
         }
 
@@ -234,17 +234,11 @@ mod tests {
         async fn next_requests(
             &self,
             _limit: usize,
-            _worker_id: &str,
-            _modes: &[net::Mode],
         ) -> Result<Vec<net::Request>, scheduler::Error> {
             Ok(Vec::new())
         }
 
-        async fn has_pending_requests(
-            &self,
-            _worker_id: &str,
-            _modes: &[net::Mode],
-        ) -> Result<bool, scheduler::Error> {
+        async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
             Ok(false)
         }
 

@@ -1,47 +1,73 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 use futures_util::FutureExt;
 
-pub(super) type Id = tokio::task::Id;
+#[derive(Clone)]
+pub(super) struct Id(Arc<()>);
+
+impl Id {
+    pub(super) fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 /// Tracks one singleton control task by its actual handle.
 pub(super) struct Task {
+    id: Id,
     handle: tokio::task::JoinHandle<()>,
 }
 
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 impl Task {
-    pub(super) fn new(handle: tokio::task::JoinHandle<()>) -> Self {
-        Self { handle }
+    pub(super) fn new(id: Id, handle: tokio::task::JoinHandle<()>) -> Self {
+        Self { id, handle }
     }
 
-    pub(super) fn matches(&self, id: Id) -> bool {
-        self.handle.id() == id
+    pub(super) fn matches(&self, id: &Id) -> bool {
+        self.id.matches(id)
+    }
+
+    pub(super) fn abort(self) {
+        self.handle.abort();
     }
 }
 
 /// Tracks concurrent tasks by their actual handles.
 #[derive(Default)]
 pub(super) struct Tasks {
-    handles: HashMap<Id, tokio::task::JoinHandle<()>>,
+    tasks: Vec<Task>,
 }
 
 impl Tasks {
-    pub(super) fn insert(&mut self, handle: tokio::task::JoinHandle<()>) {
-        self.handles.insert(handle.id(), handle);
+    pub(super) fn insert(&mut self, id: Id, handle: tokio::task::JoinHandle<()>) {
+        self.tasks.push(Task::new(id, handle));
     }
 
-    pub(super) fn remove(&mut self, id: Id) -> bool {
-        self.handles.remove(&id).is_some()
+    pub(super) fn remove(&mut self, id: &Id) -> bool {
+        let Some(index) = self.tasks.iter().position(|task| task.matches(id)) else {
+            return false;
+        };
+        self.tasks.swap_remove(index);
+        true
     }
 
     pub(super) fn len(&self) -> usize {
-        self.handles.len()
+        self.tasks.len()
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.handles.is_empty()
+        self.tasks.is_empty()
     }
 }
 
@@ -62,5 +88,40 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         format!("engine task panicked: {message}")
     } else {
         "engine task panicked".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NotifyOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_tracked_task_aborts_its_future() {
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped, dropped_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _notify = NotifyOnDrop(Some(dropped));
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        let task = Task::new(Id::new(), handle);
+        started_rx.await.unwrap();
+
+        drop(task);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("tracked task was detached instead of aborted")
+            .unwrap();
     }
 }

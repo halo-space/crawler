@@ -15,8 +15,9 @@ enum Output {
         requests: Vec<crate::net::Request>,
         claim_started: Instant,
     },
-    Pending,
-    Exhausted,
+    Empty {
+        pending: bool,
+    },
 }
 
 pub(super) struct Done {
@@ -36,60 +37,43 @@ pub(super) fn spawn<S, D, E, O>(
 {
     engine.claim_stale = false;
     let scheduler = engine.scheduler.clone();
-    let worker_id = engine.config.worker.id.clone();
-    let modes = engine.config.worker.modes.clone();
+    let check_pending = engine.finishes_when_idle();
+    let id = task::Id::new();
+    let done_id = id.clone();
     let handle = tokio::spawn(async move {
-        let result = task::protect(next(scheduler, limit, worker_id, modes)).await;
-        let id = tokio::task::id();
-        let _ = actor_ref.tell(Done { id, result }).await;
+        let result = task::protect(next(scheduler, limit, check_pending)).await;
+        let _ = actor_ref
+            .tell(Done {
+                id: done_id,
+                result,
+            })
+            .await;
     });
-    engine.claim = Some(task::Task::new(handle));
+    engine.claim = Some(task::Task::new(id, handle));
 }
 
 async fn next<S>(
     scheduler: Arc<S>,
     limit: usize,
-    worker_id: String,
-    modes: Vec<crate::net::Mode>,
+    check_pending: bool,
 ) -> Result<Output, crate::Error>
 where
     S: scheduler::Scheduler,
 {
-    let (requests, claim_started) = claim(scheduler.as_ref(), limit, &worker_id, &modes).await?;
+    let (requests, claim_started) = claim(scheduler.as_ref(), limit).await?;
     if requests.is_empty() {
-        if retry(|| scheduler.has_pending_requests(&worker_id, &modes)).await? {
-            Ok(Output::Pending)
+        let pending = if check_pending {
+            retry(|| scheduler.has_pending_requests()).await?
         } else {
-            Ok(Output::Exhausted)
-        }
+            false
+        };
+        Ok(Output::Empty { pending })
     } else {
         Ok(Output::Requests {
             requests,
             claim_started,
         })
     }
-}
-
-async fn claim<S>(
-    scheduler: &S,
-    limit: usize,
-    worker_id: &str,
-    modes: &[crate::net::Mode],
-) -> Result<(Vec<crate::net::Request>, Instant), crate::Error>
-where
-    S: scheduler::Scheduler,
-{
-    for attempt in 0..MAX_ATTEMPTS {
-        let claim_started = Instant::now();
-        match scheduler.next_requests(limit, worker_id, modes).await {
-            Ok(requests) => return Ok((requests, claim_started)),
-            Err(error) if error.is_transient() && attempt + 1 < MAX_ATTEMPTS => {
-                tokio::time::sleep(RETRY_DELAY).await;
-            }
-            Err(error) => return Err(crate::Error::Scheduler(error)),
-        }
-    }
-    unreachable!()
 }
 
 async fn retry<Fut, T>(mut operation: impl FnMut() -> Fut) -> Result<T, crate::Error>
@@ -99,6 +83,26 @@ where
     for attempt in 0..MAX_ATTEMPTS {
         match operation().await {
             Ok(value) => return Ok(value),
+            Err(error) if error.is_transient() && attempt + 1 < MAX_ATTEMPTS => {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+            Err(error) => return Err(crate::Error::Scheduler(error)),
+        }
+    }
+    unreachable!()
+}
+
+async fn claim<S>(
+    scheduler: &S,
+    limit: usize,
+) -> Result<(Vec<crate::net::Request>, Instant), crate::Error>
+where
+    S: scheduler::Scheduler,
+{
+    for attempt in 0..MAX_ATTEMPTS {
+        let claim_started = Instant::now();
+        match scheduler.next_requests(limit).await {
+            Ok(requests) => return Ok((requests, claim_started)),
             Err(error) if error.is_transient() && attempt + 1 < MAX_ATTEMPTS => {
                 tokio::time::sleep(RETRY_DELAY).await;
             }
@@ -121,7 +125,7 @@ where
         if !self
             .claim
             .as_ref()
-            .is_some_and(|task| task.matches(done.id))
+            .is_some_and(|task| task.matches(&done.id))
         {
             return;
         }
@@ -132,20 +136,24 @@ where
                 requests,
                 claim_started,
             }) => {
-                self.exhausted = false;
                 for next in requests {
                     request::spawn(self, ctx.actor_ref().clone(), next, claim_started);
                 }
             }
-            Ok(Output::Pending) => {
-                self.exhausted = false;
-                wait::poll(self, ctx.actor_ref().clone());
-            }
-            Ok(Output::Exhausted) => {
-                self.exhausted = !stale;
+            Ok(Output::Empty { pending }) => {
+                if self.finishes_when_idle()
+                    && !pending
+                    && !stale
+                    && self.requests.is_empty()
+                    && self.outputs.is_empty()
+                    && self.events.is_idle()
+                {
+                    self.stopping = true;
+                } else if !self.stopping && self.error.is_none() {
+                    wait::poll(self, ctx.actor_ref().clone());
+                }
             }
             Err(error) => {
-                self.claims_blocked = true;
                 self.record_error(error);
             }
         }
@@ -181,7 +189,7 @@ mod tests {
     }
 
     impl scheduler::Scheduler for TestScheduler {
-        async fn open(&self) -> Result<(), scheduler::Error> {
+        async fn open(&self, _concurrency: usize) -> Result<(), scheduler::Error> {
             Ok(())
         }
 
@@ -203,8 +211,6 @@ mod tests {
         async fn next_requests(
             &self,
             _limit: usize,
-            _worker_id: &str,
-            _modes: &[net::Mode],
         ) -> Result<Vec<net::Request>, scheduler::Error> {
             let attempt = {
                 let mut attempts = self.attempts.lock().unwrap();
@@ -220,11 +226,7 @@ mod tests {
             Ok(self.requests.lock().unwrap().take().unwrap())
         }
 
-        async fn has_pending_requests(
-            &self,
-            _worker_id: &str,
-            _modes: &[net::Mode],
-        ) -> Result<bool, scheduler::Error> {
+        async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
             Ok(false)
         }
 
@@ -261,14 +263,7 @@ mod tests {
             .collect::<Vec<_>>();
         let scheduler = TestScheduler::new(requests);
 
-        let (claimed, claim_started) = claim(
-            &scheduler,
-            expected_ids.len(),
-            "worker-1",
-            &[net::Mode::Http],
-        )
-        .await
-        .unwrap();
+        let (claimed, claim_started) = claim(&scheduler, expected_ids.len()).await.unwrap();
 
         let attempts = scheduler.attempts();
         assert_eq!(attempts.len(), 2);

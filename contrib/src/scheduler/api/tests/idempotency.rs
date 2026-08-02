@@ -1,24 +1,55 @@
 use super::*;
 
 #[tokio::test]
+async fn cancelled_open_reuses_the_pending_registration_key() {
+    let (reached, registration_started) = std::sync::mpsc::channel();
+    let (resume, registration_continued) = std::sync::mpsc::channel();
+    let (base_url, received, server) = server(vec![
+        policy(),
+        Response::held_json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "data": "worker-token"}),
+            reached,
+            registration_continued,
+        ),
+        policy(),
+        registered(),
+        offline(),
+    ]);
+    let api = Arc::new(api(base_url, "token"));
+
+    let opening = {
+        let api = api.clone();
+        tokio::spawn(async move { api.open(CONCURRENCY).await })
+    };
+    wait_for_request(registration_started).await;
+    opening.abort();
+    assert!(opening.await.unwrap_err().is_cancelled());
+    resume.send(()).unwrap();
+    let error = api.open(CONCURRENCY + 1).await.unwrap_err();
+    assert!(error.to_string().contains("frozen with concurrency"));
+
+    api.open(CONCURRENCY).await.unwrap();
+    api.close().await.unwrap();
+
+    let requests = received.recv().unwrap();
+    server.join().unwrap();
+    let keys = operation_keys(&requests, "/v1/worker/register");
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1]);
+}
+
+#[tokio::test]
 async fn empty_request_submission_is_a_local_no_op() {
-    let (base_url, received, server) = server(vec![Response::json(
-        "200 OK",
-        json!({
-            "lease_timeout_ms": 30000,
-            "lease_interval_ms": 10000,
-            "heartbeat_interval_ms": 10000,
-            "max_response_bytes": 67108864
-        }),
-    )]);
-    let api = Api::new(base_url, "token").unwrap();
-    api.open().await.unwrap();
+    let (base_url, received, server) = server(vec![policy(), registered(), offline()]);
+    let api = api(base_url, "token");
+    api.open(CONCURRENCY).await.unwrap();
     api.push(payload::Payload::new()).await.unwrap();
     api.close().await.unwrap();
 
     let requests = received.recv().unwrap();
     server.join().unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 3);
 }
 #[tokio::test]
 async fn claim_reuses_a_key_only_for_automatic_http_retries() {
@@ -29,10 +60,10 @@ async fn claim_reuses_a_key_only_for_automatic_http_retries() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-            "max_response_bytes": 67108864
+            "max_request_bytes": 67108864
             }),
         ),
-        Response::json("200 OK", json!({})),
+        registered(),
     ];
     responses.extend((0..3).map(|_| {
         Response::json(
@@ -46,18 +77,14 @@ async fn claim_reuses_a_key_only_for_automatic_http_retries() {
         )
     }));
     responses.push(Response::json("200 OK", json!({"requests": []})));
+    responses.push(offline());
     let (base_url, received, server) = server(responses);
-    let api = Api::new(base_url, "token").unwrap();
-    api.open().await.unwrap();
+    let api = api(base_url, "token");
+    api.open(CONCURRENCY).await.unwrap();
 
-    let first = api.next_requests(1, "worker-1", &[net::Mode::Http]).await;
+    let first = api.next_requests(1).await;
     assert!(matches!(first, Err(scheduler::Error::Unavailable(_))));
-    assert!(
-        api.next_requests(1, "worker-1", &[net::Mode::Http])
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(api.next_requests(1).await.unwrap().is_empty());
     api.close().await.unwrap();
 
     let requests = received.recv().unwrap();
@@ -80,20 +107,24 @@ async fn claim_reuses_a_key_only_for_automatic_http_retries() {
 
 #[tokio::test]
 async fn init_retry_reuses_the_deterministic_body_key() {
-    let mut responses = vec![Response::json(
-        "200 OK",
-        json!({
-            "lease_timeout_ms": 30000,
-            "lease_interval_ms": 10000,
-            "heartbeat_interval_ms": 10000,
-            "max_response_bytes": 67108864
-        }),
-    )];
+    let mut responses = vec![
+        Response::json(
+            "200 OK",
+            json!({
+                "lease_timeout_ms": 30000,
+                "lease_interval_ms": 10000,
+                "heartbeat_interval_ms": 10000,
+                "max_request_bytes": 67108864
+            }),
+        ),
+        registered(),
+    ];
     responses.extend((0..3).map(|_| unavailable("init unavailable")));
     responses.push(Response::empty("204 No Content"));
+    responses.push(offline());
     let (base_url, received, server) = server(responses);
-    let api = Arc::new(Api::new(base_url, "token").unwrap());
-    api.open().await.unwrap();
+    let api = Arc::new(api(base_url, "token"));
+    api.open(CONCURRENCY).await.unwrap();
 
     let retrying = {
         let api = api.clone();
@@ -134,14 +165,16 @@ async fn independent_release_invocations_use_fresh_keys() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_response_bytes": 67108864
+                "max_request_bytes": 67108864
             }),
         ),
+        registered(),
         Response::empty("204 No Content"),
         Response::empty("204 No Content"),
+        offline(),
     ]);
-    let api = Api::new(base_url, "token").unwrap();
-    api.open().await.unwrap();
+    let api = api(base_url, "token");
+    api.open(CONCURRENCY).await.unwrap();
     let mut request = net::Request::follow("https://example.com").unwrap();
     request.id = "request-1".to_string();
     request.task_id = "task-1".to_string();

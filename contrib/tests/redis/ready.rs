@@ -9,8 +9,10 @@ async fn ready_events_follow_release_retry_and_terminal_settlement() {
         return;
     };
     let namespace = server::namespace("ready-lifecycle");
-    let scheduler = server.redis(&namespace);
+    let scheduler = server.redis_as(&namespace, worker::A);
+    let backup = server.redis_as(&namespace, worker::B);
     server::open(&scheduler).await;
+    server::open(&backup).await;
     super::run::init(&scheduler).await;
 
     scheduler
@@ -21,14 +23,14 @@ async fn ready_events_follow_release_retry_and_terminal_settlement() {
         .await
         .unwrap();
     assert_ready(&server, &namespace, "released").await;
-    let released = claim(&scheduler, worker::A).await;
+    let released = claim(&scheduler).await;
     assert_clear(&server, &namespace, "released").await;
     scheduler
         .release(&settlement::processing(&released))
         .await
         .unwrap();
     assert_ready(&server, &namespace, "released").await;
-    let released = claim(&scheduler, worker::A).await;
+    let released = claim(&scheduler).await;
     settlement::succeed(&scheduler, &released).await;
     assert_clear(&server, &namespace, "released").await;
 
@@ -38,15 +40,15 @@ async fn ready_events_follow_release_retry_and_terminal_settlement() {
         .push(payload::Payload::new().requests(vec![retried]))
         .await
         .unwrap();
-    let retried = claim(&scheduler, worker::A).await;
+    let retried = claim(&scheduler).await;
     scheduler
         .ack(&settlement::processing(&retried))
         .await
         .unwrap();
     scheduler.failure(&failed(&retried, "retry")).await.unwrap();
     assert_ready(&server, &namespace, "retried").await;
-    let retried = claim(&scheduler, worker::B).await;
-    settlement::succeed(&scheduler, &retried).await;
+    let retried = claim(&backup).await;
+    settlement::succeed(&backup, &retried).await;
     assert_clear(&server, &namespace, "retried").await;
 
     let mut terminal = request::new("terminal", "https://example.com/terminal");
@@ -55,7 +57,7 @@ async fn ready_events_follow_release_retry_and_terminal_settlement() {
         .push(payload::Payload::new().requests(vec![terminal]))
         .await
         .unwrap();
-    let terminal = claim(&scheduler, worker::A).await;
+    let terminal = claim(&scheduler).await;
     scheduler
         .ack(&settlement::processing(&terminal))
         .await
@@ -67,6 +69,7 @@ async fn ready_events_follow_release_retry_and_terminal_settlement() {
     assert_clear(&server, &namespace, "terminal").await;
 
     scheduler.close().await.unwrap();
+    backup.close().await.unwrap();
     server.clear(&namespace).await;
 }
 
@@ -96,13 +99,7 @@ async fn missing_request_removes_its_ready_member_and_event() {
         .await
         .unwrap();
 
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     assert_eq!(cardinality(&server, ready(&namespace)).await, 0);
     assert_eq!(cardinality(&server, events(&namespace)).await, 0);
 
@@ -132,7 +129,7 @@ async fn malformed_ready_member_clears_its_referenced_event() {
         .unwrap();
 
     let request_key = key::request(&namespace, "damaged");
-    let malformed = format!("not-a-revision|{}", key::token("damaged"));
+    let malformed = format!("not-a-revision|{}", key::segment("damaged"));
     let mut connection = server.connection().await;
     let stored = redis::cmd("HGET")
         .arg(&request_key)
@@ -160,7 +157,7 @@ async fn malformed_ready_member_clears_its_referenced_event() {
         .await
         .unwrap();
 
-    let valid = claim(&scheduler, worker::A).await;
+    let valid = claim(&scheduler).await;
     assert_eq!(valid.id, "valid");
     settlement::succeed(&scheduler, &valid).await;
     let state = redis::cmd("HGET")
@@ -184,7 +181,9 @@ async fn dangling_terminal_member_clears_exclusions_before_pending_is_reused() {
     };
     let namespace = server::namespace("terminal-ready-exclusion");
     let scheduler = server.redis(&namespace);
+    let worker_b = server.redis_as(&namespace, worker::B);
     server::open(&scheduler).await;
+    server::open(&worker_b).await;
     super::run::init(&scheduler).await;
 
     let mut stale = request::new("stale", "https://example.com/stale");
@@ -193,7 +192,7 @@ async fn dangling_terminal_member_clears_exclusions_before_pending_is_reused() {
         .push(payload::Payload::new().requests(vec![stale]))
         .await
         .unwrap();
-    let stale = claim(&scheduler, worker::A).await;
+    let stale = claim(&scheduler).await;
     scheduler
         .ack(&settlement::processing(&stale))
         .await
@@ -208,13 +207,7 @@ async fn dangling_terminal_member_clears_exclusions_before_pending_is_reused() {
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
-    assert!(
-        scheduler
-            .next_requests(1, worker::B, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(worker_b.next_requests(1).await.unwrap().is_empty());
     assert_eq!(cardinality(&server, ready(&namespace)).await, 0);
     assert_eq!(cardinality(&server, events(&namespace)).await, 0);
     assert_eq!(cardinality(&server, exclusions(&namespace)).await, 0);
@@ -226,23 +219,19 @@ async fn dangling_terminal_member_clears_exclusions_before_pending_is_reused() {
         )]))
         .await
         .unwrap();
-    assert!(
-        scheduler
-            .has_pending_requests(worker::A, worker::HTTP)
-            .await
-            .unwrap()
-    );
-    let eligible = claim(&scheduler, worker::A).await;
+    assert!(scheduler.has_pending_requests().await.unwrap());
+    let eligible = claim(&scheduler).await;
     assert_eq!(eligible.id, "eligible");
     settlement::succeed(&scheduler, &eligible).await;
 
     scheduler.close().await.unwrap();
+    worker_b.close().await.unwrap();
     server.clear(&namespace).await;
 }
 
-async fn claim(scheduler: &Redis, worker_id: &str) -> net::Request {
+async fn claim(scheduler: &Redis) -> net::Request {
     scheduler
-        .next_requests(1, worker_id, worker::HTTP)
+        .next_requests(1)
         .await
         .unwrap()
         .pop()

@@ -6,5 +6,6 @@ mod script;
 mod settle;
 mod trace;
 mod validate;
+mod worker;
 
 pub use contract::Redis;

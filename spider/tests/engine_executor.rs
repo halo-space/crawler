@@ -516,14 +516,14 @@ async fn code_parse_retry_keeps_openai_after_scheduler_replacement() {
         .with_spider(AiCodeSpider::new(value.clone()))
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
+    let requests = provider.finish();
     assert_eq!(
         *value.lock().unwrap(),
         Some(serde_json::json!({"title": "Rust"}))
     );
     assert_eq!(engine.scheduler().inner.done_len(), 1);
-    let requests = provider.finish();
     assert_eq!(requests.len(), 2);
     requests.iter().for_each(assert_ai_request);
 }
@@ -541,7 +541,7 @@ async fn rules_code_and_declarative_parsers_share_engine_openai() {
         .with_downloader(TestDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().done_len(), 1);
     let requests = provider.finish();
@@ -565,7 +565,7 @@ async fn rules_builder_keeps_openai_after_scheduler_replacement() {
         .with_downloader(TestDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().inner.done_len(), 1);
     let requests = provider.finish();
@@ -600,7 +600,7 @@ graph:
         .with_downloader(TestDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().trace_len(), 1);
     assert_eq!(engine.scheduler().done_len(), 1);
@@ -658,7 +658,7 @@ graph:
         .with_downloader(TestDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().trace_len(), 1);
     assert_eq!(engine.scheduler().done_len(), 3);
@@ -764,7 +764,7 @@ item:
         .with_downloader(RulesDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().done_len(), 3);
     assert_eq!(engine.scheduler().failed_len(), 0);
@@ -799,7 +799,7 @@ item:
         .with_downloader(RulesDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let attempts = attempts.lock().unwrap();
     assert_eq!(attempts.len(), 2);
@@ -853,7 +853,7 @@ item:
         .with_downloader(RulesDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert!(called.load(Ordering::SeqCst));
     assert_eq!(engine.scheduler().done_len(), 1);
@@ -879,7 +879,7 @@ async fn code_parse_retry_reuses_the_emitted_request_id() {
         .with_spider(RetryingRequestSpider::new(attempts.clone()))
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     let pushed_requests = pushed_requests.lock().unwrap();
@@ -951,7 +951,7 @@ item:
         .with_downloader(RulesDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     let pushed_requests = pushed_requests.lock().unwrap();
@@ -1064,7 +1064,7 @@ item:
         .with_downloader(MediaDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let item_dir = dir
         .join("data")
@@ -1114,7 +1114,7 @@ graph:
         .with_downloader(RulesDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().done_len(), 0);
     assert_eq!(engine.scheduler().failed_len(), 1);
@@ -1179,7 +1179,7 @@ graph:
         .with_downloader(PagingDownload)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().done_len(), 2);
     assert_eq!(engine.scheduler().failed_len(), 0);
@@ -1236,7 +1236,7 @@ graph:
         .build()
         .with_concurrency(2);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().done_len(), 1);
     assert_eq!(engine.scheduler().failed_len(), 1);
@@ -1297,7 +1297,7 @@ graph:
         .build()
         .with_concurrency(4);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().done_len(), 4);
     assert_eq!(engine.scheduler().failed_len(), 0);
@@ -1616,9 +1616,9 @@ impl Scheduler for LifecycleScheduler {
         self.inner.lease()
     }
 
-    async fn open(&self) -> Result<(), spider::scheduler::Error> {
+    async fn open(&self, concurrency: usize) -> Result<(), spider::scheduler::Error> {
         self.calls.lock().unwrap().push("scheduler.open");
-        self.inner.open().await
+        self.inner.open(concurrency).await
     }
 
     async fn close(&self) -> Result<(), spider::scheduler::Error> {
@@ -1649,18 +1649,12 @@ impl Scheduler for LifecycleScheduler {
     async fn next_requests(
         &self,
         limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
-        self.inner.next_requests(limit, worker_id, modes).await
+        self.inner.next_requests(limit).await
     }
 
-    async fn has_pending_requests(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests(worker_id, modes).await
+    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests().await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -1759,8 +1753,8 @@ impl Scheduler for FlakyScheduler {
         self.inner.lease()
     }
 
-    async fn open(&self) -> Result<(), spider::scheduler::Error> {
-        self.inner.open().await
+    async fn open(&self, concurrency: usize) -> Result<(), spider::scheduler::Error> {
+        self.inner.open(concurrency).await
     }
 
     async fn close(&self) -> Result<(), spider::scheduler::Error> {
@@ -1781,22 +1775,16 @@ impl Scheduler for FlakyScheduler {
     async fn next_requests(
         &self,
         limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
         let call = self.claim_calls.fetch_add(1, Ordering::SeqCst);
         if self.delay_second_claim && call == 1 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        self.inner.next_requests(limit, worker_id, modes).await
+        self.inner.next_requests(limit).await
     }
 
-    async fn has_pending_requests(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests(worker_id, modes).await
+    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests().await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -1985,8 +1973,8 @@ impl Scheduler for RecordingScheduler {
         self.inner.lease()
     }
 
-    async fn open(&self) -> Result<(), spider::scheduler::Error> {
-        self.inner.open().await
+    async fn open(&self, concurrency: usize) -> Result<(), spider::scheduler::Error> {
+        self.inner.open(concurrency).await
     }
 
     async fn close(&self) -> Result<(), spider::scheduler::Error> {
@@ -2033,19 +2021,9 @@ impl Scheduler for RecordingScheduler {
     async fn next_requests(
         &self,
         limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
-        self.inner.next_requests(limit, worker_id, modes).await
-    }
-
-    async fn has_pending_requests(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<bool, spider::scheduler::Error> {
-        let pending = self.inner.has_pending_requests(worker_id, modes).await?;
-        if !pending
+        let requests = self.inner.next_requests(limit).await?;
+        if requests.is_empty()
             && let Some(sync) = &self.claim_sync
             && sync.armed.swap(false, Ordering::SeqCst)
         {
@@ -2053,8 +2031,13 @@ impl Scheduler for RecordingScheduler {
             ClaimSync::acquire(&sync.pushed).await;
             ClaimSync::acquire(&sync.producer_done).await;
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            return self.inner.next_requests(limit).await;
         }
-        Ok(pending)
+        Ok(requests)
+    }
+
+    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests().await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -2109,7 +2092,7 @@ impl Scheduler for FailingCloseScheduler {
         self.inner.lease()
     }
 
-    async fn open(&self) -> Result<(), spider::scheduler::Error> {
+    async fn open(&self, _concurrency: usize) -> Result<(), spider::scheduler::Error> {
         Ok(())
     }
 
@@ -2134,18 +2117,12 @@ impl Scheduler for FailingCloseScheduler {
     async fn next_requests(
         &self,
         limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
-        self.inner.next_requests(limit, worker_id, modes).await
+        self.inner.next_requests(limit).await
     }
 
-    async fn has_pending_requests(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<bool, spider::scheduler::Error> {
-        self.inner.has_pending_requests(worker_id, modes).await
+    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
+        self.inner.has_pending_requests().await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
@@ -2697,7 +2674,7 @@ async fn engine_start_opens_runs_and_closes_resources() {
         .with_spider(spider)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
@@ -2727,7 +2704,7 @@ async fn engine_runs_request_response_and_item_middleware_hooks_in_order() {
         .with_middleware("lifecycle", middleware)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
@@ -2757,7 +2734,7 @@ async fn engine_start_closes_resources_when_spider_start_fails() {
         .with_spider(spider)
         .build();
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(error.to_string().contains("start"));
     assert_eq!(
@@ -2794,7 +2771,7 @@ async fn start_item_store_failure_keeps_store_error_and_closes_resources() {
         )
         .build();
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(error.to_string().contains("store submit"));
     assert!(!error.to_string().contains("error item callback"));
@@ -2821,7 +2798,7 @@ async fn engine_reports_start_task_panic_without_hanging() {
         .with_spider(PanicStartSpider::new())
         .build();
 
-    let error = tokio::time::timeout(std::time::Duration::from_secs(1), engine.start())
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), engine.start_until_idle())
         .await
         .expect("engine must clear a panicked start task")
         .unwrap_err();
@@ -2830,7 +2807,7 @@ async fn engine_reports_start_task_panic_without_hanging() {
 }
 
 #[tokio::test]
-async fn spider_start_error_drains_work_that_was_already_accepted() {
+async fn spider_start_error_submits_accepted_output_without_claiming_it() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
         .with_scheduler(spider::Memory::new())
@@ -2838,11 +2815,12 @@ async fn spider_start_error_drains_work_that_was_already_accepted() {
         .with_spider(StartEmitFailSpider::new(calls.clone()))
         .build();
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(error.to_string().contains("start after output"));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(engine.scheduler().done_len(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.scheduler().queued_len(), 1);
+    assert_eq!(engine.scheduler().done_len(), 0);
     assert_eq!(engine.scheduler().processing_len(), 0);
 }
 
@@ -2862,7 +2840,7 @@ async fn engine_start_closes_resources_when_event_push_fails() {
         .with_spider(spider)
         .build();
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(error.to_string().contains("push"));
     assert_eq!(
@@ -2889,7 +2867,8 @@ async fn engine_reports_output_failure_after_the_sender_is_cancelled() {
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(CancelledOutputSpider::new(task.clone()))
-        .build();
+        .build()
+        .with_idle_interval(std::time::Duration::from_secs(60));
 
     let runtime = tokio::spawn(async move { engine.start().await });
     gate.entered.acquire().await.unwrap().forget();
@@ -2921,7 +2900,7 @@ async fn engine_start_closes_resources_when_downloader_open_fails() {
         .with_spider(spider)
         .build();
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(error.to_string().contains("open"));
     assert_eq!(
@@ -2944,7 +2923,7 @@ async fn engine_open_closes_prior_resources_when_store_open_fails() {
         .with_spider(EmptySpider::new())
         .build();
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(error.to_string().contains("store open"));
     assert_eq!(
@@ -2976,7 +2955,7 @@ async fn executor_completes_current_request() {
         .with_spider(EmptySpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let scheduler = engine.scheduler();
     assert_eq!(scheduler.done_len(), 1);
@@ -2995,7 +2974,7 @@ async fn engine_starts_until_scheduler_is_empty() {
         .with_spider(spider)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let scheduler = engine.scheduler();
     assert_eq!(scheduler.done_len(), 1);
@@ -3018,7 +2997,7 @@ async fn engine_waits_for_output_sent_after_the_request_task_finishes() {
         .build()
         .with_concurrency(1);
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), engine.start())
+    tokio::time::timeout(std::time::Duration::from_secs(2), engine.start_until_idle())
         .await
         .expect("engine must drain late output")
         .unwrap();
@@ -3065,7 +3044,7 @@ async fn engine_waits_for_detached_item_submit_before_closing_store() {
         .with_spider(DetachedItemSpider::new())
         .build();
 
-    let runtime = tokio::spawn(async move { engine.start().await });
+    let runtime = tokio::spawn(async move { engine.start_until_idle().await });
     tokio::time::timeout(std::time::Duration::from_secs(1), gate.entered.acquire())
         .await
         .expect("detached Item submission must reach the Store")
@@ -3114,7 +3093,7 @@ async fn stale_empty_claim_is_rechecked_after_detached_output() {
         .build()
         .with_concurrency(2);
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), engine.start())
+    tokio::time::timeout(std::time::Duration::from_secs(2), engine.start_until_idle())
         .await
         .expect("engine must recheck an empty claim after detached output")
         .unwrap();
@@ -3152,7 +3131,7 @@ graph:
         .build()
         .with_concurrency(1);
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), engine.start())
+    tokio::time::timeout(std::time::Duration::from_secs(2), engine.start_until_idle())
         .await
         .expect("engine must drain detached Rules output")
         .unwrap();
@@ -3193,7 +3172,7 @@ async fn engine_submits_start_items_to_store() {
         .with_spider(spider)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let scheduler = engine.scheduler();
     assert_eq!(scheduler.done_len(), 0);
@@ -3212,7 +3191,7 @@ async fn replacing_scheduler_does_not_change_store_submission() {
         .with_downloader(TestDownload)
         .with_spider(StartItemSpider::new())
         .build();
-    memory.start().await.unwrap();
+    memory.start_until_idle().await.unwrap();
 
     let mut alternate = engine::Builder::new()
         .with_scheduler(LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))))
@@ -3220,7 +3199,7 @@ async fn replacing_scheduler_does_not_change_store_submission() {
         .with_downloader(TestDownload)
         .with_spider(StartItemSpider::new())
         .build();
-    alternate.start().await.unwrap();
+    alternate.start_until_idle().await.unwrap();
 
     assert_eq!(items.lock().unwrap().len(), 2);
 }
@@ -3231,7 +3210,7 @@ async fn builder_uses_memory_scheduler_and_jsonl_store_by_default() {
         .with_spider(EmptySpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let scheduler = engine.scheduler();
     assert_eq!(scheduler.done_len(), 0);
@@ -3253,7 +3232,7 @@ async fn spider_macro_keeps_user_business_fields_and_injects_tx() {
         .with_spider(spider)
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let scheduler = engine.scheduler();
     assert_eq!(scheduler.done_len(), 1);
@@ -3281,7 +3260,7 @@ async fn engine_records_failed_request_and_continues_other_requests() {
         .build()
         .with_concurrency(2);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let scheduler = engine.scheduler();
     assert_eq!(scheduler.done_len(), 1);
@@ -3319,7 +3298,7 @@ async fn engine_concurrency_controls_concurrent_requests() {
         .build()
         .with_concurrency(2);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let scheduler = engine.scheduler();
     assert_eq!(scheduler.done_len(), 2);
@@ -3345,7 +3324,7 @@ async fn engine_refreshes_the_lease_while_a_request_is_running() {
         .build()
         .with_concurrency(1);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert!(engine.scheduler().lease_refreshes.load(Ordering::SeqCst) > 0);
     assert_eq!(engine.scheduler().inner.done_len(), 1);
@@ -3370,10 +3349,13 @@ async fn slow_lease_refresh_does_not_pause_request_execution() {
         .build()
         .with_concurrency(1);
 
-    tokio::time::timeout(std::time::Duration::from_millis(500), engine.start())
-        .await
-        .expect("request execution must continue while lease refresh is pending")
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        engine.start_until_idle(),
+    )
+    .await
+    .expect("request execution must continue while lease refresh is pending")
+    .unwrap();
 
     assert!(engine.scheduler().lease_refreshes.load(Ordering::SeqCst) > 0);
     assert_eq!(engine.scheduler().inner.done_len(), 1);
@@ -3398,7 +3380,7 @@ async fn transient_refresh_errors_are_retried_before_the_lease_expires() {
         .build()
         .with_concurrency(1);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert!(engine.scheduler().lease_refreshes.load(Ordering::SeqCst) >= 3);
     assert_eq!(engine.scheduler().completions.load(Ordering::SeqCst), 1);
@@ -3424,7 +3406,7 @@ async fn lease_is_refreshed_until_completion_finishes() {
         .build()
         .with_concurrency(1);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert!(engine.scheduler().lease_refreshes.load(Ordering::SeqCst) > 1);
     assert_eq!(engine.scheduler().inner.done_len(), 1);
@@ -3449,13 +3431,13 @@ async fn engine_does_not_settle_after_lease_refresh_is_rejected() {
         .build()
         .with_concurrency(1);
 
-    let error = engine.start().await.unwrap_err();
+    let error = engine.start_until_idle().await.unwrap_err();
 
     assert!(error.to_string().contains("not leased by worker"));
     assert_eq!(engine.scheduler().lease_refreshes.load(Ordering::SeqCst), 1);
     assert_eq!(engine.scheduler().completions.load(Ordering::SeqCst), 0);
-    assert_eq!(engine.scheduler().inner.processing_len(), 0);
-    assert_eq!(engine.scheduler().inner.failed_len(), 1);
+    assert_eq!(engine.scheduler().inner.processing_len(), 1);
+    assert_eq!(engine.scheduler().inner.failed_len(), 0);
 }
 
 #[tokio::test]
@@ -3491,7 +3473,7 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
         .build()
         .with_concurrency(2);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let pushed_requests = pushed_requests.lock().unwrap();
     let (payload, requests) = pushed_requests
@@ -3510,7 +3492,7 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
             task_id: "task-7".to_string(),
             trace_id: "trace-7".to_string(),
             version: 1,
-            worker_id: "worker-1".to_string(),
+            worker_id: "local".to_string(),
             node: "index".to_string(),
             state: payload::State::Done,
             has_start_time: false,
@@ -3532,7 +3514,7 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
     assert_eq!(current.task_id, "task-7");
     assert_eq!(current.trace_id, "trace-7");
     assert_eq!(current.version, 1);
-    assert_eq!(current.worker_id, "worker-1");
+    assert_eq!(current.worker_id, "local");
     assert_eq!(current.node, "index");
     assert_eq!(current.state, payload::State::Done);
     assert!(current.has_start_time);
@@ -3561,7 +3543,7 @@ async fn rejected_requests_only_fail_current_request_and_keep_consuming() {
         .build()
         .with_concurrency(2);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     let records = records.lock().unwrap();
     assert_eq!(records.len(), 2);
@@ -3616,7 +3598,7 @@ async fn rejected_items_only_fail_current_request_and_keep_consuming() {
         .build()
         .with_concurrency(2);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(pushed_items.lock().unwrap().len(), 1);
     assert_eq!(calls.lock().unwrap().as_slice(), ["error_item"]);
@@ -3659,7 +3641,7 @@ async fn independent_items_run_concurrently() {
         .build()
         .with_concurrency(2);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().done_len(), 2);
 }
@@ -3694,9 +3676,10 @@ async fn engine_retries_transient_success_error_without_reexecution() {
         .build()
         .with_concurrency(2);
 
-    let completion = tokio::time::timeout(std::time::Duration::from_secs(1), engine.start())
-        .await
-        .expect("engine must not wait forever after success fails");
+    let completion =
+        tokio::time::timeout(std::time::Duration::from_secs(1), engine.start_until_idle())
+            .await
+            .expect("engine must not wait forever after success fails");
 
     completion.unwrap();
     assert_eq!(engine.scheduler().inner.done_len(), 2);
@@ -3729,7 +3712,7 @@ async fn engine_retries_the_same_success_payload_after_a_lost_response() {
         .with_spider(EmptySpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(engine.scheduler().inner.done_len(), 1);
     assert_eq!(engine.scheduler().inner.processing_len(), 0);
@@ -3773,7 +3756,7 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
         .with_spider(EmptySpider::new())
         .build();
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(downloads.lock().unwrap().as_slice(), [(1, 0), (2, 1)]);
     let failure_attempts = failure_attempts.lock().unwrap();
@@ -3808,6 +3791,7 @@ async fn claim_returning_after_a_request_error_still_executes_its_request() {
         .push(payload::Payload::new().requests(vec![
             bound_request("https://example.com/one"),
             bound_request("https://example.com/two"),
+            bound_request("https://example.com/three"),
         ]))
         .await
         .unwrap();
@@ -3819,7 +3803,7 @@ async fn claim_returning_after_a_request_error_still_executes_its_request() {
         .with_concurrency(2)
         .with_claim_limit(1);
 
-    let error = tokio::time::timeout(std::time::Duration::from_secs(1), engine.start())
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), engine.start_until_idle())
         .await
         .expect("engine must drain the late claim")
         .unwrap_err();
@@ -3827,5 +3811,5 @@ async fn claim_returning_after_a_request_error_still_executes_its_request() {
     assert!(error.to_string().contains("after commit"));
     assert_eq!(engine.scheduler().inner.done_len(), 2);
     assert_eq!(engine.scheduler().inner.processing_len(), 0);
-    assert_eq!(engine.scheduler().inner.queued_len(), 0);
+    assert_eq!(engine.scheduler().inner.queued_len(), 1);
 }

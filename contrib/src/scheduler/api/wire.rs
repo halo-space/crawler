@@ -10,7 +10,6 @@ pub(super) struct Context {
     pub task_id: String,
     pub trace_id: String,
     pub version: i64,
-    pub worker_id: String,
     pub node: String,
 }
 
@@ -21,7 +20,6 @@ impl Context {
             task_id: payload.task_id.clone(),
             trace_id: payload.trace_id.clone(),
             version: payload.version,
-            worker_id: payload.worker_id.clone(),
             node: payload.node.clone(),
         }
     }
@@ -41,9 +39,18 @@ pub(super) struct Push {
 }
 
 #[derive(Debug, Serialize)]
+pub(super) struct Register {
+    pub worker_id: String,
+    pub host: String,
+    pub version: String,
+    pub modes: Vec<net::Mode>,
+    pub concurrency: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub(super) struct Worker {
     pub worker_id: String,
-    pub modes: Vec<net::Mode>,
+    pub token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,14 +77,32 @@ pub(super) struct Identity {
     pub node: String,
 }
 
-impl Identity {
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct Lease {
+    pub id: String,
+    pub task_id: String,
+    pub trace_id: String,
+    pub version: i64,
+    pub node: String,
+}
+
+impl Lease {
+    pub(super) fn from_claim(identity: &Identity) -> Self {
+        Self {
+            id: identity.id.clone(),
+            task_id: identity.task_id.clone(),
+            trace_id: identity.trace_id.clone(),
+            version: identity.version,
+            node: identity.node.clone(),
+        }
+    }
+
     pub(super) fn from_payload(payload: &spider::payload::Payload) -> Self {
         Self {
             id: payload.id.clone(),
             task_id: payload.task_id.clone(),
             trace_id: payload.trace_id.clone(),
             version: payload.version,
-            worker_id: payload.worker_id.clone(),
             node: payload.node.clone(),
         }
     }
@@ -85,7 +110,7 @@ impl Identity {
 
 #[derive(Debug, Serialize)]
 pub(super) struct Success {
-    pub identity: Identity,
+    pub identity: Lease,
     pub stats: HashMap<String, Value>,
     pub start_time: i64,
     pub end_time: i64,
@@ -93,7 +118,7 @@ pub(super) struct Success {
 
 #[derive(Debug, Serialize)]
 pub(super) struct Failure {
-    pub identity: Identity,
+    pub identity: Lease,
     pub error: String,
     pub stats: HashMap<String, Value>,
     pub start_time: i64,
@@ -106,7 +131,15 @@ pub(super) struct Policy {
     pub lease_timeout_ms: u64,
     pub lease_interval_ms: u64,
     pub heartbeat_interval_ms: u64,
-    pub max_response_bytes: u64,
+    pub max_request_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WorkerResponse {
+    pub code: i32,
+    pub message: String,
+    pub data: Value,
 }
 
 #[derive(Debug, Deserialize)]

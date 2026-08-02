@@ -32,7 +32,6 @@ graph:
     .unwrap();
     let fetched = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
-        .with_worker_id("conformance-rules-worker")
         .with_scheduler(scheduler)
         .with_rules(config)
         .with_spider(LocalSpiderFactory)
@@ -41,7 +40,7 @@ graph:
         })
         .build()
         .with_concurrency(1);
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(fetched.load(Ordering::SeqCst), 2);
 }
@@ -65,7 +64,7 @@ graph:
     let task_id = "remote-task";
     let trace_id = "remote-trace";
     let scheduler = NoSeed(scheduler);
-    scheduler.open().await.unwrap();
+    scheduler.open(16).await.unwrap();
     scheduler
         .init(
             trace_id.to_string(),
@@ -82,7 +81,6 @@ graph:
     let started = Arc::new(AtomicUsize::new(0));
     let indexed = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
-        .with_worker_id("conformance-remote-worker")
         .with_scheduler(scheduler)
         .with_spider(RemoteSpiderFactory {
             started: started.clone(),
@@ -93,7 +91,7 @@ graph:
         })
         .build()
         .with_concurrency(1);
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
 
     assert_eq!(started.load(Ordering::SeqCst), 0);
     assert_eq!(fetched.load(Ordering::SeqCst), 1);
@@ -144,8 +142,8 @@ where
         self.0.lease()
     }
 
-    async fn open(&self) -> Result<(), scheduler::Error> {
-        self.0.open().await
+    async fn open(&self, concurrency: usize) -> Result<(), scheduler::Error> {
+        self.0.open(concurrency).await
     }
 
     async fn close(&self) -> Result<(), scheduler::Error> {
@@ -160,21 +158,12 @@ where
         self.0.trace(trace_id).await
     }
 
-    async fn next_requests(
-        &self,
-        limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<Vec<net::Request>, scheduler::Error> {
-        self.0.next_requests(limit, worker_id, modes).await
+    async fn next_requests(&self, limit: usize) -> Result<Vec<net::Request>, scheduler::Error> {
+        self.0.next_requests(limit).await
     }
 
-    async fn has_pending_requests(
-        &self,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> Result<bool, scheduler::Error> {
-        self.0.has_pending_requests(worker_id, modes).await
+    async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
+        self.0.has_pending_requests().await
     }
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {

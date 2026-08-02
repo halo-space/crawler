@@ -9,14 +9,16 @@ async fn identical_init_bodies_share_a_key_across_tasks() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_response_bytes": 67108864
+                "max_request_bytes": 67108864
             }),
         ),
+        registered(),
         Response::empty("204 No Content"),
         Response::empty("204 No Content"),
+        offline(),
     ]);
-    let api = Arc::new(Api::new(base_url, "token").unwrap());
-    api.open().await.unwrap();
+    let api = Arc::new(api(base_url, "token"));
+    api.open(CONCURRENCY).await.unwrap();
 
     let first = {
         let api = api.clone();
@@ -61,14 +63,16 @@ async fn different_init_bodies_use_different_keys() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_response_bytes": 67108864
+                "max_request_bytes": 67108864
             }),
         ),
+        registered(),
         Response::empty("204 No Content"),
         Response::empty("204 No Content"),
+        offline(),
     ]);
-    let api = Api::new(base_url, "token").unwrap();
-    api.open().await.unwrap();
+    let api = api(base_url, "token");
+    api.open(CONCURRENCY).await.unwrap();
 
     api.init(
         "trace-1".to_string(),

@@ -69,7 +69,7 @@ for _, request in ipairs(requests) do
         return 'DUPLICATE:' .. request.id
     end
     seen[request.id] = true
-    local key = prefix .. 'request:' .. request.token
+    local key = prefix .. 'request:' .. request.segment
     if not has_type(key, 'hash') then return 'CORRUPT_REQUEST:' .. request.id end
     if not has_type(prefix .. 'queue:' .. request.mode .. ':ready', 'zset') then
         return 'CORRUPT_READY_QUEUE'
@@ -94,14 +94,14 @@ end
 
 local function enqueue(request, key, sequence_text)
     if pad(request.next_time, 19) <= pad(now, 19) then
-        local member = sequence_text .. '|' .. sequence_text .. '|' .. request.token
+        local member = sequence_text .. '|' .. sequence_text .. '|' .. request.segment
         local event = sequence_text .. '|' .. member
         redis.call('ZADD', prefix .. 'queue:' .. request.mode .. ':ready', -tonumber(request.priority), member)
         redis.call('ZADD', prefix .. 'ready_events:' .. request.mode, 0, event)
         redis.call('HSET', key,
             'queue_kind', 'ready', 'queue_member', member, 'ready_event', event)
     else
-        local member = pad(request.next_time, 19) .. '|' .. sequence_text .. '|' .. request.token
+        local member = pad(request.next_time, 19) .. '|' .. sequence_text .. '|' .. request.segment
         redis.call('ZADD', prefix .. 'queue:' .. request.mode .. ':delayed', 0, member)
         redis.call('HSET', key,
             'queue_kind', 'delayed', 'queue_member', member, 'ready_event', '')
@@ -115,7 +115,7 @@ if #requests > 0 then
 end
 
 for index, request in ipairs(requests) do
-    local key = prefix .. 'request:' .. request.token
+    local key = prefix .. 'request:' .. request.segment
     redis.call('HSET', key,
         'id', request.id,
         'task_id', request.task_id,

@@ -1,11 +1,11 @@
 use base64::Engine as _;
 
-pub(super) fn token(value: &str) -> String {
+pub(super) fn segment(value: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value)
 }
 
 pub(super) fn request(namespace: &str, id: &str) -> String {
-    format!("{namespace}:request:{}", token(id))
+    format!("{namespace}:request:{}", segment(id))
 }
 
 pub(super) fn processing(namespace: &str, mode: &str) -> String {
@@ -17,5 +17,9 @@ pub(super) fn completion(namespace: &str, id: &str, version: i64) -> String {
 }
 
 pub(super) fn stats(namespace: &str, trace_id: &str) -> String {
-    format!("{namespace}:trace:{}:stats", token(trace_id))
+    format!("{namespace}:trace:{}:stats", segment(trace_id))
+}
+
+pub(super) fn worker(namespace: &str, worker_id: &str) -> String {
+    format!("{namespace}:worker:{}", segment(worker_id))
 }

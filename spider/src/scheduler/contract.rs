@@ -1,23 +1,19 @@
 use std::future::Future;
 
-use crate::{net, payload, trace};
+use crate::{payload, trace};
 
 pub trait Scheduler: Send + Sync {
-    /// 是否要求 Engine 通过 `with_worker_id` 提供稳定的 Worker 身份。
-    ///
-    /// 进程内实现可以使用 Engine 的本地默认值；分布式实现必须返回 `true`，避免多个 Worker
-    /// 共享同一个默认身份。
-    fn requires_explicit_worker_id(&self) -> bool {
-        false
-    }
-
     /// 当前实现的租约恢复和续租策略；不需要租约的实现返回 `None`。
     fn lease(&self) -> Option<crate::scheduler::Lease> {
         None
     }
 
     /// 打开调度器持有的连接、存储或运行期资源。
-    fn open(&self) -> impl Future<Output = Result<(), crate::scheduler::Error>> + Send;
+    /// `concurrency` 是本次 Engine 运行冻结后的 Request 并发数。
+    fn open(
+        &self,
+        concurrency: usize,
+    ) -> impl Future<Output = Result<(), crate::scheduler::Error>> + Send;
 
     /// 关闭调度器资源；不改变已经结算的 Request 语义。
     fn close(&self) -> impl Future<Output = Result<(), crate::scheduler::Error>> + Send;
@@ -36,20 +32,16 @@ pub trait Scheduler: Send + Sync {
         trace_id: &str,
     ) -> impl Future<Output = Result<Option<trace::Snapshot>, crate::scheduler::Error>> + Send;
 
-    /// 按当前 Worker 身份和能力领取并恢复下一批可执行 Request，`limit` 是本次最多领取条数。
+    /// 按 Scheduler 自己持有的 Worker 身份和能力领取并恢复下一批可执行 Request。
+    /// `limit` 是本次最多领取条数。
     fn next_requests(
         &self,
         limit: usize,
-        worker_id: &str,
-        modes: &[net::Mode],
-    ) -> impl Future<Output = Result<Vec<net::Request>, crate::scheduler::Error>> + Send;
+    ) -> impl Future<Output = Result<Vec<crate::net::Request>, crate::scheduler::Error>> + Send;
 
-    /// 判断当前 Worker 能力范围内是否仍有排队中或执行中的 Request。
-    /// `modes` 定义能力范围；执行中的 Request 按 mode 全局统计，不按 `leased_by` 过滤。
+    /// 判断 Scheduler 自己持有的 Worker 能力范围内是否仍有排队中或执行中的 Request。
     fn has_pending_requests(
         &self,
-        worker_id: &str,
-        modes: &[net::Mode],
     ) -> impl Future<Output = Result<bool, crate::scheduler::Error>> + Send;
 
     /// 确认 Engine 已接受当前领取的 Request。

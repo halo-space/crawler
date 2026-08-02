@@ -9,7 +9,11 @@ use super::Api;
 use super::client;
 use super::state::TraceCache;
 use super::wire;
-use super::worker::canonical_modes;
+
+const CONCURRENCY: usize = 16;
+const WORKER_ID: &str = "worker-1";
+const WORKER_HOST: &str = "crawler-node-01";
+const WORKER_VERSION: &str = "1.0.0";
 
 mod config;
 mod idempotency;
@@ -59,6 +63,46 @@ fn unavailable(message: &str) -> Response {
             "message": message
         }}),
     )
+}
+
+fn policy() -> Response {
+    Response::json(
+        "200 OK",
+        json!({
+            "lease_timeout_ms": 30000,
+            "lease_interval_ms": 10000,
+            "heartbeat_interval_ms": 10000,
+            "max_request_bytes": 67108864
+        }),
+    )
+}
+
+fn worker_ok(data: serde_json::Value) -> Response {
+    Response::json(
+        "200 OK",
+        json!({"code": 200, "message": "success", "data": data}),
+    )
+}
+
+fn registered() -> Response {
+    worker_ok(json!("worker-token"))
+}
+
+fn offline() -> Response {
+    worker_ok(serde_json::Value::Null)
+}
+
+fn api(base_url: impl AsRef<str>, token: impl Into<String>) -> Api {
+    Api::new(base_url, token)
+        .unwrap()
+        .with_worker_id(WORKER_ID)
+        .unwrap()
+        .with_worker_host(WORKER_HOST)
+        .unwrap()
+        .with_worker_version(WORKER_VERSION)
+        .unwrap()
+        .with_modes([net::Mode::Http])
+        .unwrap()
 }
 
 fn operation_keys(requests: &[Request], path: &str) -> Vec<String> {
@@ -144,15 +188,14 @@ fn server(
                 wait.reached.send(()).unwrap();
                 wait.resume.recv_timeout(Duration::from_secs(2)).unwrap();
             }
-            write!(
-                stream,
-                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                status,
+            let headers = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
-            )
-            .unwrap();
-            stream.write_all(&body).unwrap();
-            stream.flush().unwrap();
+            );
+            if stream.write_all(headers.as_bytes()).is_ok() {
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
         }
         sender.send(requests).unwrap();
     });
@@ -185,15 +228,14 @@ fn concurrent_server(
                     wait.reached.send(()).unwrap();
                     wait.resume.recv_timeout(Duration::from_secs(2)).unwrap();
                 }
-                write!(
-                    stream,
-                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    status,
+                let headers = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
-                )
-                .unwrap();
-                stream.write_all(&body).unwrap();
-                stream.flush().unwrap();
+                );
+                if stream.write_all(headers.as_bytes()).is_ok() {
+                    let _ = stream.write_all(&body);
+                    let _ = stream.flush();
+                }
             }));
         }
         drop(request_sender);

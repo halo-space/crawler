@@ -8,7 +8,7 @@ async fn ack_is_idempotent_for_the_same_execution() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let claimed = scheduler.next_requests(1, WORKER, HTTP).await.unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap();
     let lease_time = crate::utils::time::now_millis().saturating_sub(1);
     scheduler
         .state()
@@ -16,11 +16,11 @@ async fn ack_is_idempotent_for_the_same_execution() {
         .get_mut(&claimed[0].id)
         .unwrap()
         .lease_time = lease_time;
-    let mut first = payload::Payload::for_request(&claimed[0], "worker-1");
+    let mut first = payload::Payload::for_request(&claimed[0], WORKER);
     first.state = net::State::Processing;
     scheduler.ack(&first).await.unwrap();
 
-    let mut duplicate = payload::Payload::for_request(&claimed[0], "worker-1");
+    let mut duplicate = payload::Payload::for_request(&claimed[0], WORKER);
     duplicate.state = net::State::Processing;
     scheduler.ack(&duplicate).await.unwrap();
     assert_eq!(scheduler.processing_len(), 1);
@@ -38,13 +38,8 @@ async fn refresh_lease_updates_an_acknowledged_lease() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let mut lease = payload::Payload::for_request(&claimed, "worker-1");
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut lease = payload::Payload::for_request(&claimed, WORKER);
     lease.state = net::State::Processing;
     scheduler.ack(&lease).await.unwrap();
     let before = crate::utils::time::now_millis().saturating_sub(1);
@@ -75,36 +70,20 @@ async fn lease_refresh_prevents_reclaim_until_it_stops() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let mut lease = payload::Payload::for_request(&claimed, "worker-1");
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let mut lease = payload::Payload::for_request(&claimed, WORKER);
     lease.state = net::State::Processing;
     scheduler.ack(&lease).await.unwrap();
 
     for _ in 0..3 {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         scheduler.refresh_lease(&lease).await.unwrap();
-        assert!(
-            scheduler
-                .next_requests(1, WORKER, HTTP)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let reclaimed = scheduler
-        .next_requests(1, WORKER, HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let reclaimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     assert_eq!(reclaimed.id, claimed.id);
     assert_eq!(reclaimed.version, claimed.version + 1);
-    assert_eq!(reclaimed.failed_workers, ["worker-1"]);
+    assert_eq!(reclaimed.failed_workers, [WORKER]);
 }

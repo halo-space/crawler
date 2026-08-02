@@ -34,11 +34,10 @@ async fn all_operations_conform() {
                     move || isolated(&url, &namespaces, lease)
                 },
                 false,
-                Some(isolated(&url, &namespaces, lease)),
                 TIMING,
             )
             .await;
-            conformance::lease(isolated(&url, &namespaces, lease), TIMING).await;
+            conformance::lease(isolated(&url, &namespaces, lease), false, TIMING).await;
         }
     })
     .await;
@@ -57,5 +56,14 @@ fn isolated(url: &str, namespaces: &Arc<Mutex<Vec<String>>>, lease: Lease) -> Re
         .unwrap()
         .with_namespace(namespace)
         .unwrap()
+        .with_worker_id("worker-a")
+        .unwrap()
+        .with_worker_host("crawler-test-host")
+        .unwrap()
+        .with_worker_version("test")
+        .unwrap()
+        .with_modes([spider::net::Mode::Http, spider::net::Mode::Browser])
+        .unwrap()
         .with_lease(lease)
+        .unwrap()
 }

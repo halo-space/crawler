@@ -25,8 +25,6 @@ pub struct Snapshot {
     pub params: HashMap<String, Value>,
     #[serde(default)]
     pub attachment: Option<Value>,
-    #[serde(default)]
-    pub persister_id: Option<String>,
     pub priority: i32,
     #[serde(default)]
     pub dsl: Option<config::Config>,
@@ -39,7 +37,6 @@ impl fmt::Debug for Snapshot {
             .field("task_id", &self.task_id)
             .field("params_len", &self.params.len())
             .field("has_attachment", &self.attachment.is_some())
-            .field("has_persister_id", &self.persister_id.is_some())
             .field("priority", &self.priority)
             .field("has_dsl", &self.dsl.is_some())
             .finish()
@@ -53,7 +50,6 @@ impl Snapshot {
             task_id: task_id.into(),
             params: HashMap::new(),
             attachment: None,
-            persister_id: None,
             priority,
             dsl: Some(dsl),
         }
@@ -64,7 +60,6 @@ impl Snapshot {
             task_id: task_id.into(),
             params: HashMap::new(),
             attachment: None,
-            persister_id: None,
             priority: 0,
             dsl: None,
         }
@@ -109,6 +104,7 @@ mod tests {
         assert!(encoded.get("schema_version").is_none());
         assert!(encoded.get("task_version").is_none());
         assert!(encoded.get("download_mode").is_none());
+        assert!(encoded.get("persister_id").is_none());
     }
 
     #[test]
@@ -144,13 +140,11 @@ graph:
             .params
             .insert("token".to_string(), Value::from("params-secret"));
         snapshot.attachment = Some(serde_json::json!({"token": "attachment-secret"}));
-        snapshot.persister_id = Some("persister-secret".to_string());
 
         let debug = format!("{snapshot:?}");
 
         assert!(!debug.contains("params-secret"));
         assert!(!debug.contains("attachment-secret"));
-        assert!(!debug.contains("persister-secret"));
         assert!(!debug.contains("dsl-header-secret"));
         assert!(!debug.contains("dsl-cookie-secret"));
         assert!(debug.contains("params_len: 1"));

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use spider::scheduler::Init;
 use spider::{Scheduler, payload, stats, trace};
 
-use super::{key, request, server, settlement, worker};
+use super::{key, request, server, settlement};
 
 const EXACT_INTEGER: i64 = 9_007_199_254_740_993;
 
@@ -39,12 +39,7 @@ async fn versions_and_stats_remain_exact_above_lua_safe_integers() {
         .await
         .unwrap();
 
-    let claimed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     assert_eq!(claimed.version, EXACT_INTEGER);
     scheduler
         .ack(&settlement::processing(&claimed))
@@ -132,13 +127,10 @@ async fn fifo_sequence_remains_exact_above_lua_safe_integers() {
             .unwrap();
         assert_eq!(
             member,
-            format!("{expected:032}|{expected:032}|{}", key::token(id))
+            format!("{expected:032}|{expected:032}|{}", key::segment(id))
         );
     }
-    let claimed = scheduler
-        .next_requests(2, worker::A, worker::HTTP)
-        .await
-        .unwrap();
+    let claimed = scheduler.next_requests(2).await.unwrap();
     assert_eq!(
         claimed
             .iter()
@@ -176,12 +168,7 @@ async fn success_stats_overflow_names_the_counter_without_partial_settlement() {
         )
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     scheduler
         .ack(&settlement::processing(&claimed))
         .await
@@ -204,10 +191,10 @@ async fn success_stats_overflow_names_the_counter_without_partial_settlement() {
         .await
         .unwrap();
     let processing_key = key::processing(&namespace, "http");
-    let request_token = key::token("overflow-request");
+    let request_segment = key::segment("overflow-request");
     let before_lease = redis::cmd("ZSCORE")
         .arg(&processing_key)
-        .arg(&request_token)
+        .arg(&request_segment)
         .query_async::<Option<String>>(&mut connection)
         .await
         .unwrap();
@@ -245,7 +232,7 @@ async fn success_stats_overflow_names_the_counter_without_partial_settlement() {
     assert_eq!(state, "processing");
     let after_lease = redis::cmd("ZSCORE")
         .arg(&processing_key)
-        .arg(&request_token)
+        .arg(&request_segment)
         .query_async::<Option<String>>(&mut connection)
         .await
         .unwrap();
@@ -293,12 +280,7 @@ async fn failure_stats_overflow_names_the_counter_without_partial_settlement() {
         )
         .await
         .unwrap();
-    let claimed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     scheduler
         .ack(&settlement::processing(&claimed))
         .await
@@ -396,7 +378,7 @@ async fn failure_stats_overflow_names_the_counter_without_partial_settlement() {
     }
     let processing = redis::cmd("ZSCORE")
         .arg(&processing_key)
-        .arg(key::token("failure-overflow-request"))
+        .arg(key::segment("failure-overflow-request"))
         .query_async::<Option<f64>>(&mut connection)
         .await
         .unwrap();
@@ -436,13 +418,7 @@ async fn request_version_overflow_records_a_terminal_failure() {
         .await
         .unwrap();
 
-    assert!(
-        scheduler
-            .next_requests(1, worker::A, worker::HTTP)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     let state = redis::cmd("HGET")
         .arg(key::request(&namespace, "version-overflow-request"))
         .arg("state")

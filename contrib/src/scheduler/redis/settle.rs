@@ -21,7 +21,6 @@ struct Execution {
     task_id: String,
     trace_id: String,
     node: String,
-    worker_id: String,
     version: String,
     state: String,
     error: Option<String>,
@@ -79,7 +78,6 @@ impl Execution {
             task_id: payload.task_id.clone(),
             trace_id: payload.trace_id.clone(),
             node: payload.node.clone(),
-            worker_id: payload.worker_id.clone(),
             version: payload.version.to_string(),
             state: state(payload.state).to_string(),
             error: payload.error.clone(),
@@ -129,7 +127,7 @@ impl Redis {
             .arg(self.keys.prefix())
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
-            .arg(key::token(&payload.id))
+            .arg(key::segment(&payload.id))
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
@@ -150,7 +148,7 @@ impl Redis {
             .arg(self.keys.prefix())
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
-            .arg(key::token(&payload.id))
+            .arg(key::segment(&payload.id))
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
@@ -171,7 +169,7 @@ impl Redis {
             .key(self.keys.completion(&payload.id, payload.version))
             .key(self.keys.stats(&payload.trace_id))
             .arg(self.keys.prefix())
-            .arg(key::token(&payload.id))
+            .arg(key::segment(&payload.id))
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
             .invoke_async(&mut connection)
@@ -195,7 +193,7 @@ impl Redis {
             .key(self.keys.stats(&payload.trace_id))
             .key(self.keys.meta())
             .arg(self.keys.prefix())
-            .arg(key::token(&payload.id))
+            .arg(key::segment(&payload.id))
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
             .invoke_async(&mut connection)

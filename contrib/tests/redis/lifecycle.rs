@@ -1,7 +1,7 @@
 use spider::scheduler::Init;
 use spider::{Scheduler, payload, trace};
 
-use super::{key, request, server, settlement, worker};
+use super::{key, request, server, settlement};
 
 #[tokio::test]
 async fn close_preserves_data_for_a_new_scheduler_instance() {
@@ -47,12 +47,7 @@ async fn close_preserves_data_for_a_new_scheduler_instance() {
             .task_id,
         "restart-task"
     );
-    let claimed = second
-        .next_requests(1, worker::A, worker::HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let claimed = second.next_requests(1).await.unwrap().pop().unwrap();
     assert_eq!(claimed.id, "restart-request");
     settlement::succeed(&second, &claimed).await;
     second.close().await.unwrap();
@@ -79,12 +74,7 @@ async fn namespaces_isolate_identical_request_ids() {
     )]))
     .await
     .unwrap();
-    assert!(
-        !right
-            .has_pending_requests(worker::B, worker::HTTP)
-            .await
-            .unwrap()
-    );
+    assert!(!right.has_pending_requests().await.unwrap());
     right
         .push(payload::Payload::new().requests(vec![request::new(
             "shared-id",
@@ -93,18 +83,8 @@ async fn namespaces_isolate_identical_request_ids() {
         .await
         .unwrap();
 
-    let left_request = left
-        .next_requests(1, worker::A, worker::HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let right_request = right
-        .next_requests(1, worker::B, worker::HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let left_request = left.next_requests(1).await.unwrap().pop().unwrap();
+    let right_request = right.next_requests(1).await.unwrap().pop().unwrap();
     assert_eq!(left_request.url, "https://left.example.com/value");
     assert_eq!(right_request.url, "https://right.example.com/value");
     settlement::succeed(&left, &left_request).await;
@@ -133,12 +113,7 @@ async fn terminal_settlement_clears_lease_and_queue_fields() {
         )]))
         .await
         .unwrap();
-    let succeeded = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let succeeded = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     settlement::succeed(&scheduler, &succeeded).await;
 
     let mut failed_request =
@@ -148,12 +123,7 @@ async fn terminal_settlement_clears_lease_and_queue_fields() {
         .push(payload::Payload::new().requests(vec![failed_request]))
         .await
         .unwrap();
-    let failed = scheduler
-        .next_requests(1, worker::A, worker::HTTP)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let failed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     scheduler
         .ack(&settlement::processing(&failed))
         .await

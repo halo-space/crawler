@@ -4,6 +4,7 @@ use contrib::scheduler::redis::Redis;
 use spider::Scheduler;
 
 const DEFAULT_URL: &str = "redis://127.0.0.1:6379";
+const DEFAULT_WORKER_ID: &str = "worker-a";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(super) struct Handle {
@@ -89,15 +90,25 @@ impl Handle {
     }
 
     pub(super) fn redis(&self, namespace: &str) -> Redis {
+        self.redis_as(namespace, DEFAULT_WORKER_ID)
+    }
+
+    pub(super) fn redis_as(&self, namespace: &str, worker_id: &str) -> Redis {
         Redis::new(self.url())
             .unwrap()
             .with_namespace(namespace)
+            .unwrap()
+            .with_worker_id(worker_id)
+            .unwrap()
+            .with_worker_host("crawler-test-host")
+            .unwrap()
+            .with_worker_version("test")
             .unwrap()
     }
 }
 
 pub(super) async fn open(scheduler: &Redis) {
-    scheduler.open().await.unwrap();
+    scheduler.open(16).await.unwrap();
 }
 
 pub(super) fn namespace(label: &str) -> String {

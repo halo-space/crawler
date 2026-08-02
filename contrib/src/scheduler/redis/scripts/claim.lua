@@ -34,6 +34,58 @@ local function storage_type(key)
     return redis.call('TYPE', key).ok
 end
 
+local worker_kind = storage_type(KEYS[3])
+if worker_kind == 'none' then return redis.error_reply('WORKER_NOT_FOUND') end
+if worker_kind ~= 'hash' then return redis.error_reply('CORRUPT_WORKER_TYPE') end
+if redis.call('HGET', KEYS[3], 'worker_id') ~= worker_id then
+    return redis.error_reply('WORKER_ID_MISMATCH')
+end
+
+local worker_host = redis.call('HGET', KEYS[3], 'host')
+local worker_version = redis.call('HGET', KEYS[3], 'version')
+local worker_modes = redis.call('HGET', KEYS[3], 'modes')
+local worker_concurrency_text = redis.call('HGET', KEYS[3], 'concurrency')
+local registration_token = redis.call('HGET', KEYS[3], 'token')
+local worker_created_text = redis.call('HGET', KEYS[3], 'created_time')
+local worker_concurrency = tonumber(worker_concurrency_text)
+local worker_created = tonumber(worker_created_text)
+if not worker_host or worker_host == ''
+    or not worker_version or worker_version == ''
+    or not worker_modes or worker_modes == '' or worker_modes ~= ARGV[5]
+    or not worker_concurrency or worker_concurrency <= 0
+    or not registration_token or registration_token == ''
+    or not worker_created or worker_created <= 0 or worker_created > now then
+    return redis.error_reply('CORRUPT_WORKER_METADATA')
+end
+
+local worker_last_heartbeat_text = redis.call('HGET', KEYS[3], 'last_heartbeat')
+local worker_heartbeat_timeout_text = redis.call('HGET', KEYS[3], 'heartbeat_timeout')
+local worker_offline_time = redis.call('HGET', KEYS[3], 'offline_time')
+local worker_last_heartbeat = tonumber(worker_last_heartbeat_text)
+local worker_heartbeat_timeout = tonumber(worker_heartbeat_timeout_text)
+if not worker_last_heartbeat_text
+    or not worker_heartbeat_timeout_text
+    or not worker_last_heartbeat
+    or not worker_heartbeat_timeout
+    or worker_last_heartbeat < 0
+    or worker_heartbeat_timeout <= 0
+    or worker_last_heartbeat > now then
+    return redis.error_reply('CORRUPT_WORKER_HEARTBEAT')
+end
+if worker_offline_time == false then
+    return redis.error_reply('CORRUPT_WORKER_OFFLINE_TIME')
+end
+if worker_offline_time ~= '' then
+    local offline_time = tonumber(worker_offline_time)
+    if not offline_time or offline_time <= 0 or offline_time > now then
+        return redis.error_reply('CORRUPT_WORKER_OFFLINE_TIME')
+    end
+    return {'', '', '', '', 1, {}}
+end
+if now - worker_last_heartbeat >= worker_heartbeat_timeout then
+    return {'', '', '', '', 1, {}}
+end
+
 local function accepts_type(key, expected)
     local actual = storage_type(key)
     return actual == 'none' or actual == expected
@@ -63,8 +115,8 @@ local function pad(value, width)
     return string.rep('0', width - string.len(value)) .. value
 end
 
-local function request_key(token)
-    return prefix .. 'request:' .. token
+local function request_key(segment)
+    return prefix .. 'request:' .. segment
 end
 
 local function exclusion_key(mode)
@@ -81,11 +133,11 @@ end
 
 local function ready_parts(member)
     if type(member) ~= 'string' then return nil end
-    local queue_revision, event_revision, token =
+    local queue_revision, event_revision, segment =
         string.match(member, '^(%d+)|(%d+)|([^|]+)$')
     if queue_revision and #queue_revision == 32
         and event_revision and #event_revision == 32 then
-        return queue_revision, event_revision, token
+        return queue_revision, event_revision, segment
     end
     return nil
 end
@@ -94,21 +146,21 @@ local function event_parts(event)
     if type(event) ~= 'string' then return nil end
     local event_revision, member = string.match(event, '^(%d+)|(.+)$')
     if not event_revision or #event_revision ~= 32 then return nil end
-    local _, member_revision, token = ready_parts(member)
-    if member_revision ~= event_revision or not token then return nil end
-    return member, token
+    local _, member_revision, segment = ready_parts(member)
+    if member_revision ~= event_revision or not segment then return nil end
+    return member, segment
 end
 
-local function remove_ready_event(key, token, mode, member)
-    local _, event_revision, member_token = ready_parts(member)
-    if member_token == token then
+local function remove_ready_event(key, segment, mode, member)
+    local _, event_revision, member_segment = ready_parts(member)
+    if member_segment == segment then
         redis.call('ZREM', ready_events_key(mode), event_revision .. '|' .. member)
     end
 
     if storage_type(key) ~= 'hash' then return end
     local stored = redis.call('HGET', key, 'ready_event')
-    local referenced, referenced_token = event_parts(stored)
-    if referenced_token ~= token then return end
+    local referenced, referenced_segment = event_parts(stored)
+    if referenced_segment ~= segment then return end
 
     local active = false
     for _, candidate_mode in ipairs({'http', 'browser'}) do
@@ -126,16 +178,16 @@ end
 
 local function discard_ready_event(mode, event, member)
     redis.call('ZREM', ready_events_key(mode), event)
-    local referenced, token = event_parts(event)
-    if referenced ~= member then token = nil end
-    local key = token and request_key(token) or ''
-    if token and storage_type(key) == 'hash'
+    local referenced, segment = event_parts(event)
+    if referenced ~= member then segment = nil end
+    local key = segment and request_key(segment) or ''
+    if segment and storage_type(key) == 'hash'
         and redis.call('HGET', key, 'ready_event') == event then
         redis.call('HSET', key, 'ready_event', '')
     end
 end
 
-local function worker_token(worker)
+local function worker_segment(worker)
     local encoded = {}
     for index = 1, string.len(worker) do
         encoded[index] = string.format('%02x', string.byte(worker, index))
@@ -143,40 +195,40 @@ local function worker_token(worker)
     return table.concat(encoded)
 end
 
-local function exclusion_member(worker, token)
-    return worker_token(worker) .. '|' .. token
+local function exclusion_member(worker, segment)
+    return worker_segment(worker) .. '|' .. segment
 end
 
-local function add_pending_exclusions(mode, token)
-    local failed_workers = request_key(token) .. ':failed_workers'
+local function add_pending_exclusions(mode, segment)
+    local failed_workers = request_key(segment) .. ':failed_workers'
     if storage_type(failed_workers) ~= 'list' then return end
     for _, worker in ipairs(redis.call('LRANGE', failed_workers, 0, MAX_RETRY_COUNT - 1)) do
-        redis.call('ZADD', exclusion_key(mode), 0, exclusion_member(worker, token))
+        redis.call('ZADD', exclusion_key(mode), 0, exclusion_member(worker, segment))
     end
 end
 
-local function remove_pending_exclusions(mode, token)
-    local failed_workers = request_key(token) .. ':failed_workers'
+local function remove_pending_exclusions(mode, segment)
+    local failed_workers = request_key(segment) .. ':failed_workers'
     if storage_type(failed_workers) ~= 'list' then return end
     for _, worker in ipairs(redis.call('LRANGE', failed_workers, 0, MAX_RETRY_COUNT - 1)) do
-        redis.call('ZREM', exclusion_key(mode), exclusion_member(worker, token))
+        redis.call('ZREM', exclusion_key(mode), exclusion_member(worker, segment))
     end
 end
 
-local function token_from_member(member)
+local function segment_from_member(member)
     if type(member) ~= 'string' then return nil end
     return string.match(member, '([^|]+)$')
 end
 
-local function member_token(kind, member)
+local function member_segment(kind, member)
     if type(member) ~= 'string' then return nil end
     if kind == 'ready' then
-        local _, _, token = ready_parts(member)
-        return token
+        local _, _, segment = ready_parts(member)
+        return segment
     elseif kind == 'delayed' then
-        local due_time, sequence, token = string.match(member, '^(%d+)|(%d+)|([^|]+)$')
+        local due_time, sequence, segment = string.match(member, '^(%d+)|(%d+)|([^|]+)$')
         if due_time and #due_time == 19 and sequence and #sequence == 32 then
-            return token
+            return segment
         end
     end
     return nil
@@ -238,26 +290,26 @@ local function parse_retry(value)
     return parsed
 end
 
-local function remove_active(token, mode)
+local function remove_active(segment, mode)
     if parse_mode(mode) then
-        redis.call('ZREM', prefix .. 'processing:' .. mode, token)
+        redis.call('ZREM', prefix .. 'processing:' .. mode, segment)
         local other = mode == 'http' and 'browser' or 'http'
-        redis.call('ZREM', prefix .. 'processing:' .. other, token)
+        redis.call('ZREM', prefix .. 'processing:' .. other, segment)
     else
-        redis.call('ZREM', prefix .. 'processing:http', token)
-        redis.call('ZREM', prefix .. 'processing:browser', token)
+        redis.call('ZREM', prefix .. 'processing:http', segment)
+        redis.call('ZREM', prefix .. 'processing:browser', segment)
     end
 end
 
-local function remove_stored_queue(key, token)
+local function remove_stored_queue(key, segment)
     local mode = parse_mode(redis.call('HGET', key, 'mode'))
     local queue_kind = redis.call('HGET', key, 'queue_kind')
     local member = redis.call('HGET', key, 'queue_member')
-    local stored_token = member_token(queue_kind, member) or token_from_member(member)
+    local stored_segment = member_segment(queue_kind, member) or segment_from_member(member)
     if (queue_kind == 'ready' or queue_kind == 'delayed')
-        and member and member ~= '' and stored_token == token then
+        and member and member ~= '' and stored_segment == segment then
         if mode then
-            if queue_kind == 'ready' then remove_ready_event(key, token, mode, member) end
+            if queue_kind == 'ready' then remove_ready_event(key, segment, mode, member) end
             redis.call('ZREM', prefix .. 'queue:' .. mode .. ':' .. queue_kind, member)
         else
             redis.call('ZREM', prefix .. 'queue:http:' .. queue_kind, member)
@@ -266,8 +318,8 @@ local function remove_stored_queue(key, token)
     end
 end
 
-local function write_completion(key, token, version, worker, message)
-    local completion = request_key(token) .. ':completion:' .. version
+local function write_completion(key, segment, version, worker, message)
+    local completion = request_key(segment) .. ':completion:' .. version
     local kind = storage_type(completion)
     if kind ~= 'none' and kind ~= 'hash' then redis.call('DEL', completion) end
     redis.call('HSET', completion,
@@ -279,9 +331,9 @@ local function write_completion(key, token, version, worker, message)
         'error', message)
 end
 
-local function record_failed_worker(token, worker)
+local function record_failed_worker(segment, worker)
     if not worker or worker == '' then return end
-    local failed_workers = request_key(token) .. ':failed_workers'
+    local failed_workers = request_key(segment) .. ':failed_workers'
     local kind = storage_type(failed_workers)
     if kind ~= 'none' and kind ~= 'list' then redis.call('DEL', failed_workers) end
     if redis.call('LPOS', failed_workers, worker) == false then
@@ -289,9 +341,9 @@ local function record_failed_worker(token, worker)
     end
 end
 
-local function quarantine(key, token, message)
+local function quarantine(key, segment, message)
     if storage_type(key) ~= 'hash' then
-        remove_active(token, nil)
+        remove_active(segment, nil)
         return
     end
 
@@ -300,11 +352,11 @@ local function quarantine(key, token, message)
     local worker = redis.call('HGET', key, 'leased_by') or ''
     local mode = redis.call('HGET', key, 'mode')
     if redis.call('HGET', key, 'state') == 'pending' and parse_mode(mode) then
-        remove_pending_exclusions(mode, token)
+        remove_pending_exclusions(mode, segment)
     end
-    remove_active(token, mode)
-    remove_stored_queue(key, token)
-    write_completion(key, token, version, worker, message)
+    remove_active(segment, mode)
+    remove_stored_queue(key, segment)
+    write_completion(key, segment, version, worker, message)
     redis.call('HSET', key,
         'state', 'failed', 'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now_text)
@@ -315,21 +367,21 @@ end
 -- that still has another valid membership. Other recoverable records are
 -- quarantined so malformed state cannot remain pending without an index.
 local function discard_queue_member(mode, kind, member, message)
-    local token = token_from_member(member)
-    local key = token and request_key(token) or ''
-    if kind == 'ready' then remove_ready_event(key, token or '', mode, member) end
+    local segment = segment_from_member(member)
+    local key = segment and request_key(segment) or ''
+    if kind == 'ready' then remove_ready_event(key, segment or '', mode, member) end
     redis.call('ZREM', prefix .. 'queue:' .. mode .. ':' .. kind, member)
-    if not token then return end
+    if not segment then return end
 
     if storage_type(key) ~= 'hash' then
-        remove_pending_exclusions(mode, token)
-        remove_active(token, nil)
+        remove_pending_exclusions(mode, segment)
+        remove_active(segment, nil)
         return
     end
 
     local state = redis.call('HGET', key, 'state')
     if state == 'processing' or state == 'done' or state == 'failed' then
-        remove_pending_exclusions(mode, token)
+        remove_pending_exclusions(mode, segment)
         return
     end
 
@@ -342,29 +394,29 @@ local function discard_queue_member(mode, kind, member, message)
     if state == 'pending'
         and stored_mode and (stored_kind == 'ready' or stored_kind == 'delayed')
         and stored_member and stored_member ~= ''
-        and member_token(stored_kind, stored_member) == token
+        and member_segment(stored_kind, stored_member) == segment
         and redis.call('ZSCORE', prefix .. 'queue:' .. stored_mode .. ':' .. stored_kind,
             stored_member) ~= false then
         return
     end
 
-    quarantine(key, token, message)
+    quarantine(key, segment, message)
 end
 
 local sequences = {}
 local sequence_index = 1
-local function enqueue(key, mode, priority, next_time, token)
+local function enqueue(key, mode, priority, next_time, segment)
     local sequence = sequences[sequence_index]
     sequence_index = sequence_index + 1
     if pad(next_time, 19) <= pad(now_text, 19) then
-        local member = sequence .. '|' .. sequence .. '|' .. token
+        local member = sequence .. '|' .. sequence .. '|' .. segment
         local event = sequence .. '|' .. member
         redis.call('ZADD', prefix .. 'queue:' .. mode .. ':ready', -priority, member)
         add_ready_event(mode, event)
         redis.call('HSET', key,
             'queue_kind', 'ready', 'queue_member', member, 'ready_event', event)
     else
-        local member = pad(next_time, 19) .. '|' .. sequence .. '|' .. token
+        local member = pad(next_time, 19) .. '|' .. sequence .. '|' .. segment
         redis.call('ZADD', prefix .. 'queue:' .. mode .. ':delayed', 0, member)
         redis.call('HSET', key,
             'queue_kind', 'delayed', 'queue_member', member, 'ready_event', '')
@@ -373,7 +425,7 @@ end
 
 local actions = {}
 local requeues = 0
-local expired_tokens = {}
+local expired_segments = {}
 
 local function lease_millis(value)
     if type(value) ~= 'string' or not string.match(value, '^%d+$') then return nil end
@@ -390,15 +442,15 @@ local function collect_expired(mode)
     local expired = redis.call('ZRANGEBYSCORE', processing, '-inf', expired_before,
         'LIMIT', 0, MAX_RECOVERY_PER_MODE)
 
-    for _, token in ipairs(expired) do
-        if not expired_tokens[token] then
-            expired_tokens[token] = true
-            local key = request_key(token)
+    for _, segment in ipairs(expired) do
+        if not expired_segments[segment] then
+            expired_segments[segment] = true
+            local key = request_key(segment)
             local action = {
-                token = token,
+                segment = segment,
                 key = key,
                 index_mode = mode,
-                lease_score = tonumber(redis.call('ZSCORE', processing, token))
+                lease_score = tonumber(redis.call('ZSCORE', processing, segment))
             }
             if storage_type(key) ~= 'hash' then
                 action.kind = 'missing'
@@ -417,7 +469,7 @@ local function collect_expired(mode)
                     action.priority = parse_priority(redis.call('HGET', key, 'priority'))
                     action.retry_count = parse_retry(redis.call('HGET', key, 'retry_count'))
                     action.max_retry_count = parse_retry(redis.call('HGET', key, 'max_retry_count'))
-                    local failed_workers = request_key(token) .. ':failed_workers'
+                    local failed_workers = request_key(segment) .. ':failed_workers'
                     action.failed_workers_type = storage_type(failed_workers)
                     action.failed_workers_count = action.failed_workers_type == 'list'
                         and redis.call('LLEN', failed_workers) or 0
@@ -468,7 +520,7 @@ table.sort(actions, function(left, right)
     local right_score = right.lease_score or math.huge
     if left_score ~= right_score then return left_score < right_score end
     if left.index_mode ~= right.index_mode then return left.index_mode < right.index_mode end
-    return left.token < right.token
+    return left.segment < right.segment
 end)
 while #actions > MAX_RECOVERY do
     table.remove(actions)
@@ -498,27 +550,27 @@ end
 
 for _, action in ipairs(actions) do
     if action.kind == 'missing' then
-        remove_active(action.token, nil)
+        remove_active(action.segment, nil)
     elseif action.kind == 'stale' then
-        remove_active(action.token, action.mode)
+        remove_active(action.segment, action.mode)
     elseif action.kind == 'corrupt' then
-        quarantine(action.key, action.token, 'stored Request has invalid lease state')
+        quarantine(action.key, action.segment, 'stored Request has invalid lease state')
     elseif action.kind == 'repair' then
-        remove_active(action.token, nil)
-        redis.call('ZADD', prefix .. 'processing:' .. action.mode, action.lease_time, action.token)
+        remove_active(action.segment, nil)
+        redis.call('ZADD', prefix .. 'processing:' .. action.mode, action.lease_time, action.segment)
     else
-        remove_active(action.token, action.mode)
+        remove_active(action.segment, action.mode)
         if action.acknowledged then
-            record_failed_worker(action.token, action.worker)
-            write_completion(action.key, action.token, action.version, action.worker,
+            record_failed_worker(action.segment, action.worker)
+            write_completion(action.key, action.segment, action.version, action.worker,
                 'acknowledged lease expired')
         end
         if action.kind == 'requeue' then
             redis.call('HSET', action.key,
                 'state', 'pending', 'retry_count', action.retry, 'next_time', '0',
                 'leased_by', '', 'lease_time', '0', 'ack_version', '', 'updated_time', now_text)
-            enqueue(action.key, action.mode, action.priority, 0, action.token)
-            add_pending_exclusions(action.mode, action.token)
+            enqueue(action.key, action.mode, action.priority, 0, action.segment)
+            add_pending_exclusions(action.mode, action.segment)
         else
             redis.call('HSET', action.key,
                 'state', 'failed', 'retry_count', action.retry, 'next_time', '0',
@@ -554,20 +606,20 @@ local function inspection_end(key, field, offset, count)
     end
 end
 
-local function inspect_processing(index_mode, token, score)
-    local key = request_key(token)
+local function inspect_processing(index_mode, segment, score)
+    local key = request_key(segment)
     if storage_type(key) ~= 'hash' then
-        redis.call('ZREM', prefix .. 'processing:' .. index_mode, token)
+        redis.call('ZREM', prefix .. 'processing:' .. index_mode, segment)
         return
     end
 
     local state = redis.call('HGET', key, 'state')
     if state == 'pending' or state == 'done' or state == 'failed' then
-        remove_active(token, redis.call('HGET', key, 'mode'))
+        remove_active(segment, redis.call('HGET', key, 'mode'))
         return
     end
     if state ~= 'processing' then
-        quarantine(key, token, 'stored Request lease has an invalid state')
+        quarantine(key, segment, 'stored Request lease has an invalid state')
         return
     end
 
@@ -583,12 +635,12 @@ local function inspect_processing(index_mode, token, score)
         or not lease_time
         or not lease_score
     then
-        quarantine(key, token, 'stored Request lease does not match its fields')
+        quarantine(key, segment, 'stored Request lease does not match its fields')
     elseif mode ~= index_mode or lease_score ~= lease_time then
         -- The Request Hash is authoritative. Repair a stale or misplaced
         -- processing index without changing retry state.
-        remove_active(token, nil)
-        redis.call('ZADD', prefix .. 'processing:' .. mode, lease_time, token)
+        remove_active(segment, nil)
+        redis.call('ZADD', prefix .. 'processing:' .. mode, lease_time, segment)
     end
 end
 
@@ -613,14 +665,14 @@ for _, mode in ipairs({'http', 'browser'}) do
 end
 
 local function delayed_request(mode, member)
-    local due_time, sequence, token = string.match(member, '^(%d+)|(%d+)|([^|]+)$')
+    local due_time, sequence, segment = string.match(member, '^(%d+)|(%d+)|([^|]+)$')
     if not due_time or #due_time ~= 19 or not sequence or #sequence ~= 32 then
         discard_queue_member(mode, 'delayed', member,
             'stored Request delayed queue has an invalid member')
         return nil
     end
 
-    local key = request_key(token)
+    local key = request_key(segment)
     if storage_type(key) ~= 'hash' then
         discard_queue_member(mode, 'delayed', member,
             'stored Request delayed queue has no Request record')
@@ -650,7 +702,7 @@ local function delayed_request(mode, member)
         return nil
     end
 
-    return key, sequence, token, priority
+    return key, sequence, segment, priority
 end
 
 local function inspect_delayed(mode)
@@ -682,9 +734,9 @@ for _, mode in ipairs(modes) do
     for _, member in ipairs(due_by_mode[mode]) do
         local event_revision = sequences[sequence_index]
         sequence_index = sequence_index + 1
-        local key, sequence, token, priority = delayed_request(mode, member)
+        local key, sequence, segment, priority = delayed_request(mode, member)
         if key then
-            local ready_member = sequence .. '|' .. event_revision .. '|' .. token
+            local ready_member = sequence .. '|' .. event_revision .. '|' .. segment
             local event = event_revision .. '|' .. ready_member
             redis.call('ZADD', prefix .. 'queue:' .. mode .. ':ready', -priority, ready_member)
             add_ready_event(mode, event)
@@ -731,9 +783,9 @@ local function refresh_cursor(mode)
     for index = 1, count do
         local event = events[index]
         local event_revision, member = string.match(event, '^(%d+)|(.+)$')
-        local _, member_revision, token = ready_parts(member)
+        local _, member_revision, segment = ready_parts(member)
         if not event_revision or #event_revision ~= 32
-            or member_revision ~= event_revision or not token then
+            or member_revision ~= event_revision or not segment then
             discard_ready_event(mode, event, member)
             position.member = ''
             position.revision = revision
@@ -745,11 +797,11 @@ local function refresh_cursor(mode)
             elseif position.member ~= ''
                 and (score < cursor_score
                     or (score == cursor_score and member < position.member)) then
-                local token = member_token('ready', member)
-                local failed_workers = token and request_key(token) .. ':failed_workers' or ''
-                if not token or storage_type(failed_workers) ~= 'list'
+                local segment = member_segment('ready', member)
+                local failed_workers = segment and request_key(segment) .. ':failed_workers' or ''
+                if not segment or storage_type(failed_workers) ~= 'list'
                     or redis.call('ZSCORE', exclusion_key(mode),
-                        exclusion_member(worker_id, token)) == false then
+                        exclusion_member(worker_id, segment)) == false then
                     position.member = ''
                 end
             end
@@ -794,15 +846,15 @@ local function next_candidate(mode)
     local values = redis.call('ZRANGE', ready, offset, offset + remaining - 1, 'WITHSCORES')
     for index = 1, #values, 2 do
         local member = values[index]
-        local _, _, token = ready_parts(member)
-        if not token then
+        local _, _, segment = ready_parts(member)
+        if not segment then
             return member, tonumber(values[index + 1]), true
         end
 
-        local failed_workers = request_key(token) .. ':failed_workers'
+        local failed_workers = request_key(segment) .. ':failed_workers'
         if storage_type(failed_workers) ~= 'list'
             or redis.call('ZSCORE', exclusion_key(mode),
-                exclusion_member(worker_id, token)) == false then
+                exclusion_member(worker_id, segment)) == false then
             return member, tonumber(values[index + 1]), true
         end
         inspected[mode] = (inspected[mode] or 0) + 1
@@ -837,17 +889,17 @@ while scan_complete and #claimed < limit do
     if not selected_member then break end
     local claimed_before = #claimed
 
-    local _, _, token = ready_parts(selected_member)
-    if not token then
+    local _, _, segment = ready_parts(selected_member)
+    if not segment then
         discard_queue_member(selected_mode, 'ready', selected_member,
             'stored Request ready queue has an invalid member')
     else
-        local key = request_key(token)
+        local key = request_key(segment)
         if storage_type(key) ~= 'hash' then
-            remove_pending_exclusions(selected_mode, token)
-            remove_ready_event(key, token, selected_mode, selected_member)
+            remove_pending_exclusions(selected_mode, segment)
+            remove_ready_event(key, segment, selected_mode, selected_member)
             redis.call('ZREM', prefix .. 'queue:' .. selected_mode .. ':ready', selected_member)
-            remove_active(token, nil)
+            remove_active(segment, nil)
         else
             local state = redis.call('HGET', key, 'state')
             if state ~= 'pending' then
@@ -859,7 +911,7 @@ while scan_complete and #claimed < limit do
                 local version = redis.call('HGET', key, 'version')
                 local retry_count = parse_retry(redis.call('HGET', key, 'retry_count'))
                 local max_retry_count = parse_retry(redis.call('HGET', key, 'max_retry_count'))
-                local failed_workers_key = request_key(token) .. ':failed_workers'
+                local failed_workers_key = request_key(segment) .. ':failed_workers'
                 local failed_workers_type = storage_type(failed_workers_key)
                 local failed_workers_count = failed_workers_type == 'list'
                     and redis.call('LLEN', failed_workers_key) or 0
@@ -889,8 +941,8 @@ while scan_complete and #claimed < limit do
                     discard_queue_member(selected_mode, 'ready', selected_member,
                         'stored Request has invalid version')
                 else
-                    remove_pending_exclusions(selected_mode, token)
-                    remove_ready_event(key, token, selected_mode, selected_member)
+                    remove_pending_exclusions(selected_mode, segment)
+                    remove_ready_event(key, segment, selected_mode, selected_member)
                     redis.call('ZREM', prefix .. 'queue:' .. selected_mode .. ':ready',
                         selected_member)
                     redis.call('HSET', key,
@@ -898,9 +950,9 @@ while scan_complete and #claimed < limit do
                         'lease_time', now_text, 'ack_version', '', 'queue_kind', '',
                         'queue_member', '', 'ready_event', '', 'updated_time', now_text)
                     -- A Request must have one active mode projection even if an
-                    -- earlier damaged index placed the token in the other mode.
-                    remove_active(token, nil)
-                    redis.call('ZADD', prefix .. 'processing:' .. stored_mode, now, token)
+                    -- earlier damaged index placed the segment in the other mode.
+                    remove_active(segment, nil)
+                    redis.call('ZADD', prefix .. 'processing:' .. stored_mode, now, segment)
 
                     local failed_workers = redis.call(
                         'LRANGE', failed_workers_key, 0, MAX_RETRY_COUNT - 1)
@@ -913,7 +965,7 @@ while scan_complete and #claimed < limit do
                         if stored then trace = stored end
                     end
                     table.insert(claimed, cjson.encode({
-                        token = token,
+                        segment = segment,
                         id = redis.call('HGET', key, 'id') or '',
                         task_id = redis.call('HGET', key, 'task_id') or '',
                         trace_id = trace_id,

@@ -79,7 +79,7 @@ async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
         .build()
         .with_concurrency(2);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
     server.join().unwrap();
 
     let trace_ids = engine.scheduler().trace_ids();
@@ -142,7 +142,7 @@ graph:
         .build()
         .with_concurrency(1);
 
-    engine.start().await.unwrap();
+    engine.start_until_idle().await.unwrap();
     server.join().unwrap();
 
     assert_eq!(engine.scheduler().done_len(), 2);

@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
 
-use spider::{net, trace};
-use tokio::sync::{Mutex, RwLock};
+use spider::trace;
+use tokio::sync::{Mutex, RwLock, oneshot};
 use tokio::task::JoinHandle;
 
 use super::wire;
@@ -14,24 +13,35 @@ pub(super) struct Runtime {
     pub(super) epoch: AtomicU64,
     pub(super) lifecycle: Mutex<()>,
     pub(super) activity: RwLock<()>,
-    pub(super) heartbeat_interval: RwLock<Duration>,
-    pub(super) workers: Mutex<HashMap<String, Worker>>,
+    pub(super) heartbeat: std::sync::Mutex<Option<Heartbeat>>,
+    registration: std::sync::Mutex<Registration>,
+    pub(super) token: std::sync::Mutex<Option<String>>,
+    pub(super) can_claim: AtomicBool,
     pub(super) traces: Mutex<TraceCache>,
 }
 
+pub(super) struct Heartbeat {
+    pub(super) stop: oneshot::Sender<()>,
+    pub(super) task: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct Registration {
+    key: Option<String>,
+    concurrency: Option<usize>,
+}
+
 impl Runtime {
-    pub(super) fn new(
-        heartbeat_interval: Duration,
-        trace_cache_capacity: usize,
-        trace_cache_bytes: usize,
-    ) -> Self {
+    pub(super) fn new(trace_cache_capacity: usize, trace_cache_bytes: usize) -> Self {
         Self {
             opened: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             lifecycle: Mutex::new(()),
             activity: RwLock::new(()),
-            heartbeat_interval: RwLock::new(heartbeat_interval),
-            workers: Mutex::new(HashMap::new()),
+            heartbeat: std::sync::Mutex::new(None),
+            registration: std::sync::Mutex::new(Registration::default()),
+            token: std::sync::Mutex::new(None),
+            can_claim: AtomicBool::new(false),
             traces: Mutex::new(TraceCache::new(trace_cache_capacity, trace_cache_bytes)),
         }
     }
@@ -39,24 +49,131 @@ impl Runtime {
     pub(super) fn is_open(&self, epoch: u64) -> bool {
         self.opened.load(Ordering::Acquire) && self.epoch.load(Ordering::Acquire) == epoch
     }
-}
 
-pub(super) struct Worker {
-    pub(super) registration: Arc<Mutex<Registration>>,
-    pub(super) task: JoinHandle<()>,
-}
+    pub(super) fn set_token(&self, token: String) {
+        *self
+            .token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(token);
+    }
 
-pub(super) struct Registration {
-    pub(super) modes: Vec<net::Mode>,
-    pub(super) confirmed: bool,
-}
+    pub(super) fn token(&self) -> Option<String> {
+        self.token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 
-impl Registration {
-    pub(super) fn new(modes: Vec<net::Mode>) -> Self {
-        Self {
-            modes,
-            confirmed: false,
+    pub(super) fn take_token(&self) -> Option<String> {
+        self.token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    pub(super) fn check_concurrency(&self, concurrency: usize) -> Result<(), String> {
+        let registration = self
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(active) = registration.concurrency {
+            if active == concurrency {
+                Ok(())
+            } else {
+                Err(format!(
+                    "API Scheduler Worker lifecycle is frozen with concurrency {active}; received {concurrency}"
+                ))
+            }
+        } else {
+            Ok(())
         }
+    }
+
+    pub(super) fn concurrency(&self) -> Option<usize> {
+        self.registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .concurrency
+    }
+
+    pub(super) fn open_key(&self, concurrency: usize) -> Result<String, String> {
+        let mut registration = self
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(active) = registration.concurrency
+            && active != concurrency
+        {
+            return Err(format!(
+                "API Scheduler Worker lifecycle is frozen with concurrency {active}; received {concurrency}"
+            ));
+        }
+        registration.concurrency = Some(concurrency);
+        Ok(registration
+            .key
+            .get_or_insert_with(|| uuid::Uuid::now_v7().to_string())
+            .clone())
+    }
+
+    pub(super) fn finish_registration(&self) {
+        self.registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .key = None;
+    }
+
+    pub(super) fn clear_registration(&self) {
+        *self
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Registration::default();
+    }
+
+    pub(super) fn is_configurable(&self) -> bool {
+        !self.opened.load(Ordering::Acquire)
+            && self.concurrency().is_none()
+            && self
+                .token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+    }
+
+    pub(super) fn set_heartbeat(&self, heartbeat: Heartbeat) {
+        *self
+            .heartbeat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(heartbeat);
+    }
+
+    pub(super) fn take_heartbeat(&self) -> Option<Heartbeat> {
+        self.heartbeat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    pub(super) fn abandon(&self) {
+        self.opened.store(false, Ordering::Release);
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.can_claim.store(false, Ordering::Release);
+        self.clear_registration();
+        self.take_token();
+        if let Some(heartbeat) = self.take_heartbeat() {
+            heartbeat.abort();
+        }
+    }
+}
+
+impl Heartbeat {
+    pub(super) async fn stop(self) {
+        let _ = self.stop.send(());
+        let _ = self.task.await;
+    }
+
+    fn abort(self) {
+        let _ = self.stop.send(());
+        self.task.abort();
     }
 }
 

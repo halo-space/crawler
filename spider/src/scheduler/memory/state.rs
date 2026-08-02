@@ -94,12 +94,12 @@ pub(super) struct Completion {
 }
 
 impl Completion {
-    pub(super) fn new(payload: &payload::Payload) -> Self {
+    pub(super) fn new(payload: &payload::Payload, worker_id: &str) -> Self {
         Self {
             task_id: payload.task_id.clone(),
             trace_id: payload.trace_id.clone(),
             version: payload.version,
-            worker_id: payload.worker_id.clone(),
+            worker_id: worker_id.to_string(),
             node: payload.node.clone(),
             state: payload.state,
             error: payload.error.clone(),

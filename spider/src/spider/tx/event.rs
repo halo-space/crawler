@@ -76,7 +76,7 @@ impl Target {
 
 pub(crate) struct Event {
     kind: Kind,
-    parent: Option<crate::trace::RuntimeContext>,
+    trace_context: Option<crate::trace::RuntimeContext>,
     permit: Permit,
 }
 
@@ -84,7 +84,7 @@ impl Event {
     pub(super) fn new(kind: Kind, permit: Permit) -> Self {
         Self {
             kind,
-            parent: crate::trace::current_context(),
+            trace_context: crate::trace::current_context(),
             permit,
         }
     }
@@ -92,11 +92,11 @@ impl Event {
     pub(crate) fn accept(self) -> (Kind, Option<crate::trace::RuntimeContext>) {
         let Self {
             kind,
-            parent,
+            trace_context,
             permit,
         } = self;
         drop(permit);
-        (kind, parent)
+        (kind, trace_context)
     }
 }
 

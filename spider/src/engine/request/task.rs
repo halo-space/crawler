@@ -279,7 +279,7 @@ mod tests {
     }
 
     impl Scheduler for FailedAcknowledgement {
-        async fn open(&self) -> Result<(), scheduler::Error> {
+        async fn open(&self, _concurrency: usize) -> Result<(), scheduler::Error> {
             Ok(())
         }
 
@@ -298,17 +298,11 @@ mod tests {
         async fn next_requests(
             &self,
             _: usize,
-            _: &str,
-            _: &[crate::net::Mode],
         ) -> Result<Vec<crate::net::Request>, scheduler::Error> {
             Ok(Vec::new())
         }
 
-        async fn has_pending_requests(
-            &self,
-            _: &str,
-            _: &[crate::net::Mode],
-        ) -> Result<bool, scheduler::Error> {
+        async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
             Ok(false)
         }
 
@@ -424,12 +418,7 @@ mod tests {
             .push(payload::Payload::new().requests(vec![request]))
             .await
             .unwrap();
-        let request = scheduler
-            .next_requests(1, "worker-1", &[crate::net::Mode::Http])
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
+        let request = scheduler.next_requests(1).await.unwrap().pop().unwrap();
 
         execute(
             request,
@@ -530,12 +519,7 @@ mod tests {
             .push(payload::Payload::new().requests(vec![request]))
             .await
             .unwrap();
-        let claimed = scheduler
-            .next_requests(1, "worker-1", &[crate::net::Mode::Http])
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
+        let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
 
         execute(
@@ -555,12 +539,7 @@ mod tests {
         assert_eq!(scheduler.processing_len(), 0);
         assert_eq!(scheduler.queued_len(), 1);
 
-        let reclaimed = scheduler
-            .next_requests(1, "worker-1", &[crate::net::Mode::Http])
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
+        let reclaimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
         assert_eq!(reclaimed.id, request_id);
         assert_eq!(reclaimed.retry_count, 0);
     }

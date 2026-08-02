@@ -47,32 +47,20 @@ pub(super) struct Client {
     base_url: url::Url,
     token: String,
     namespace: String,
-    max_response_bytes: usize,
     max_request_bytes: Arc<AtomicUsize>,
     retry_timeout: Duration,
 }
 
 impl Client {
-    pub(super) fn new(
-        base_url: url::Url,
-        token: String,
-        namespace: String,
-        max_response_bytes: usize,
-    ) -> Result<Self, Error> {
-        Self::build(
-            base_url,
-            token,
-            namespace,
-            max_response_bytes,
-            Timeouts::default(),
-        )
+    pub(super) fn new(base_url: url::Url, token: String, namespace: String) -> Result<Self, Error> {
+        Self::build(base_url, token, namespace, 0, Timeouts::default())
     }
 
     fn build(
         base_url: url::Url,
         token: String,
         namespace: String,
-        max_response_bytes: usize,
+        max_request_bytes: usize,
         timeouts: Timeouts,
     ) -> Result<Self, Error> {
         let http = reqwest::Client::builder()
@@ -85,8 +73,7 @@ impl Client {
             base_url,
             token,
             namespace,
-            max_response_bytes,
-            max_request_bytes: Arc::new(AtomicUsize::new(max_response_bytes)),
+            max_request_bytes: Arc::new(AtomicUsize::new(max_request_bytes)),
             retry_timeout: timeouts.retries,
         })
     }
@@ -94,14 +81,6 @@ impl Client {
     pub(super) fn with_namespace(&self, namespace: String) -> Self {
         Self {
             namespace,
-            ..self.clone()
-        }
-    }
-
-    pub(super) fn with_max_response_bytes(&self, max_response_bytes: usize) -> Self {
-        Self {
-            max_response_bytes,
-            max_request_bytes: Arc::new(AtomicUsize::new(max_response_bytes)),
             ..self.clone()
         }
     }
@@ -116,10 +95,6 @@ impl Client {
             retry_timeout: RETRY_TIMEOUT.min(deadline),
             ..self.clone()
         }
-    }
-
-    pub(super) fn max_response_bytes(&self) -> usize {
-        self.max_response_bytes
     }
 
     pub(super) fn validate_body<T>(&self, body: &T) -> Result<(), scheduler::Error>
@@ -185,6 +160,17 @@ impl Client {
         )
     }
 
+    pub(super) async fn post_once<B, T>(&self, path: &str, body: &B) -> Result<T, scheduler::Error>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        response::decode(
+            self.send_with_attempts(Method::POST, path, Some(body), None, 1)
+                .await?,
+        )
+    }
+
     async fn send<B>(
         &self,
         method: Method,
@@ -195,11 +181,27 @@ impl Client {
     where
         B: Serialize + ?Sized,
     {
+        self.send_with_attempts(method, path, body, operation_key, ATTEMPTS)
+            .await
+    }
+
+    async fn send_with_attempts<B>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+        operation_key: Option<&str>,
+        attempts: usize,
+    ) -> Result<Vec<u8>, scheduler::Error>
+    where
+        B: Serialize + ?Sized,
+    {
         let url = self
             .base_url
             .join(path.trim_start_matches('/'))
             .map_err(|error| scheduler::Error::Message(error.to_string()))?;
-        self.send_url(method, url, body, operation_key).await
+        self.send_url_with_attempts(method, url, body, operation_key, attempts)
+            .await
     }
 
     async fn send_url<B>(
@@ -212,12 +214,27 @@ impl Client {
     where
         B: Serialize + ?Sized,
     {
+        self.send_url_with_attempts(method, url, body, operation_key, ATTEMPTS)
+            .await
+    }
+
+    async fn send_url_with_attempts<B>(
+        &self,
+        method: Method,
+        url: url::Url,
+        body: Option<&B>,
+        operation_key: Option<&str>,
+        attempts: usize,
+    ) -> Result<Vec<u8>, scheduler::Error>
+    where
+        B: Serialize + ?Sized,
+    {
         let body = body
             .map(|body| encode(body, self.max_request_bytes.load(Ordering::Acquire)))
             .transpose()?;
         match tokio::time::timeout(
             self.retry_timeout,
-            self.send_attempts(method, url, body, operation_key),
+            self.send_attempts(method, url, body, operation_key, attempts),
         )
         .await
         {
@@ -235,10 +252,11 @@ impl Client {
         url: url::Url,
         body: Option<Bytes>,
         operation_key: Option<&str>,
+        attempts: usize,
     ) -> Result<Vec<u8>, scheduler::Error> {
         let mut last = None;
 
-        for attempt in 0..ATTEMPTS {
+        for attempt in 0..attempts {
             let mut request = self
                 .http
                 .request(method.clone(), url.clone())
@@ -261,7 +279,7 @@ impl Client {
                 Ok(response) => response,
                 Err(error) => {
                     last = Some(error.to_string());
-                    if attempt + 1 < ATTEMPTS {
+                    if attempt + 1 < attempts {
                         retry(attempt).await;
                         continue;
                     }
@@ -269,32 +287,15 @@ impl Client {
                 }
             };
             let status = response.status();
-            let bytes = match response::read(response, self.max_response_bytes).await {
+            let bytes = match response::read(response).await {
                 Ok(bytes) => bytes,
-                Err(response::ReadError::Transport(error)) => {
+                Err(error) => {
                     last = Some(error);
-                    if attempt + 1 < ATTEMPTS {
+                    if attempt + 1 < attempts {
                         retry(attempt).await;
                         continue;
                     }
                     break;
-                }
-                Err(response::ReadError::TooLarge(message)) => {
-                    if retryable(status) {
-                        last = Some(message);
-                        if attempt + 1 < ATTEMPTS {
-                            retry(attempt).await;
-                            continue;
-                        }
-                        break;
-                    }
-                    return if status.is_success() && method == Method::POST {
-                        Err(scheduler::Error::Unavailable(format!(
-                            "{message}; successful mutation outcome is ambiguous"
-                        )))
-                    } else {
-                        Err(scheduler::Error::Message(message))
-                    };
                 }
             };
 
@@ -303,7 +304,7 @@ impl Client {
             }
             if retryable(status) {
                 last = Some(response::message(status, &bytes));
-                if attempt + 1 < ATTEMPTS {
+                if attempt + 1 < attempts {
                     retry(attempt).await;
                     continue;
                 }
@@ -508,22 +509,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_successful_post_is_ambiguous_but_get_is_not() {
+    async fn response_size_is_independent_from_the_master_request_limit() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let value = "x".repeat(2048);
+        let body = serde_json::to_vec(&value).unwrap();
         let server = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                tokio::spawn(async move {
-                    let mut request = [0; 1024];
-                    let _ = stream.read(&mut request).await;
-                    let _ = stream
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 1025\r\nConnection: close\r\n\r\n",
-                        )
-                        .await;
-                });
-            }
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).await;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
         });
         let client = client(
             format!("http://{address}/"),
@@ -535,11 +535,9 @@ mod tests {
             },
         );
 
-        let post = client.post_empty("mutation", &(), None).await;
-        let get = client.get::<Value>("read").await;
+        let response = client.get::<String>("read").await.unwrap();
         server.await.unwrap();
 
-        assert!(matches!(post, Err(scheduler::Error::Unavailable(_))));
-        assert!(matches!(get, Err(scheduler::Error::Message(_))));
+        assert_eq!(response, value);
     }
 }

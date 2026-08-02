@@ -13,7 +13,7 @@ local function storage_type(key)
     return redis.call('TYPE', key).ok
 end
 
-local function worker_token(worker)
+local function worker_segment(worker)
     local encoded = {}
     for index = 1, string.len(worker) do
         encoded[index] = string.format('%02x', string.byte(worker, index))
@@ -37,7 +37,7 @@ for _, mode in ipairs(modes) do
 
     local queued = redis.call('ZCARD', ready) + redis.call('ZCARD', delayed)
     if queued > 0 then
-        local prefix_member = worker_token(worker_id) .. '|'
+        local prefix_member = worker_segment(worker_id) .. '|'
         local excluded = redis.call('ZLEXCOUNT', exclusions,
             '[' .. prefix_member, '[' .. prefix_member .. string.char(255))
         if excluded > queued then return redis.error_reply('CORRUPT_PENDING_EXCLUSIONS') end
