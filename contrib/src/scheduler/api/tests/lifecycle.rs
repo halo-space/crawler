@@ -103,7 +103,6 @@ async fn close_waits_for_an_in_flight_trace_and_clears_its_cache() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),
@@ -157,7 +156,6 @@ async fn close_waits_for_an_in_flight_claim_and_blocks_later_claims() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),
@@ -205,7 +203,6 @@ async fn close_waits_for_an_in_flight_heartbeat_before_offline() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 50,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),
@@ -292,7 +289,6 @@ async fn cancelled_close_during_heartbeat_cannot_reenable_claims() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 50,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),

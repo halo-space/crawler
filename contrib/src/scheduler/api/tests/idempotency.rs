@@ -60,7 +60,6 @@ async fn claim_reuses_a_key_only_for_automatic_http_retries() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-            "max_request_bytes": 67108864
             }),
         ),
         registered(),
@@ -114,7 +113,6 @@ async fn init_retry_reuses_the_deterministic_body_key() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),
@@ -165,7 +163,6 @@ async fn independent_release_invocations_use_fresh_keys() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),

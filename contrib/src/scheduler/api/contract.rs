@@ -215,18 +215,6 @@ impl scheduler::Scheduler for Api {
                 "Master heartbeat interval must be positive".to_string(),
             ));
         }
-        let max_request_bytes = usize::try_from(policy.max_request_bytes).map_err(|_| {
-            scheduler::Error::Message(
-                "Master request limit exceeds this platform's supported size".to_string(),
-            )
-        })?;
-        if max_request_bytes == 0 {
-            return Err(scheduler::Error::Message(
-                "Master request limit must be positive".to_string(),
-            ));
-        }
-        self.client.set_max_request_bytes(max_request_bytes);
-
         let heartbeat_interval = Duration::from_millis(policy.heartbeat_interval_ms);
         let key = self
             .runtime

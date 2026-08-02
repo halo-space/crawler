@@ -1,8 +1,6 @@
 mod response;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use std::{io, sync::Arc};
 
 use bytes::Bytes;
 use reqwest::{Method, StatusCode};
@@ -47,20 +45,18 @@ pub(super) struct Client {
     base_url: url::Url,
     token: String,
     namespace: String,
-    max_request_bytes: Arc<AtomicUsize>,
     retry_timeout: Duration,
 }
 
 impl Client {
     pub(super) fn new(base_url: url::Url, token: String, namespace: String) -> Result<Self, Error> {
-        Self::build(base_url, token, namespace, 0, Timeouts::default())
+        Self::build(base_url, token, namespace, Timeouts::default())
     }
 
     fn build(
         base_url: url::Url,
         token: String,
         namespace: String,
-        max_request_bytes: usize,
         timeouts: Timeouts,
     ) -> Result<Self, Error> {
         let http = reqwest::Client::builder()
@@ -73,7 +69,6 @@ impl Client {
             base_url,
             token,
             namespace,
-            max_request_bytes: Arc::new(AtomicUsize::new(max_request_bytes)),
             retry_timeout: timeouts.retries,
         })
     }
@@ -85,23 +80,11 @@ impl Client {
         }
     }
 
-    pub(super) fn set_max_request_bytes(&self, max_request_bytes: usize) {
-        self.max_request_bytes
-            .store(max_request_bytes, Ordering::Release);
-    }
-
     pub(super) fn with_retry_deadline(&self, deadline: Duration) -> Self {
         Self {
             retry_timeout: RETRY_TIMEOUT.min(deadline),
             ..self.clone()
         }
-    }
-
-    pub(super) fn validate_body<T>(&self, body: &T) -> Result<(), scheduler::Error>
-    where
-        T: Serialize + ?Sized,
-    {
-        encode(body, self.max_request_bytes.load(Ordering::Acquire)).map(|_| ())
     }
 
     pub(super) async fn get<T>(&self, path: &str) -> Result<T, scheduler::Error>
@@ -229,9 +212,7 @@ impl Client {
     where
         B: Serialize + ?Sized,
     {
-        let body = body
-            .map(|body| encode(body, self.max_request_bytes.load(Ordering::Acquire)))
-            .transpose()?;
+        let body = body.map(encode).transpose()?;
         match tokio::time::timeout(
             self.retry_timeout,
             self.send_attempts(method, url, body, operation_key, attempts),
@@ -319,52 +300,13 @@ impl Client {
     }
 }
 
-fn encode<T>(value: &T, limit: usize) -> Result<Bytes, scheduler::Error>
+fn encode<T>(value: &T) -> Result<Bytes, scheduler::Error>
 where
     T: Serialize + ?Sized,
 {
-    let mut writer = LimitWriter::new(limit);
-    if let Err(error) = serde_json::to_writer(&mut writer, value) {
-        return if writer.exceeded {
-            Err(scheduler::Error::Message(format!(
-                "Master request exceeds the configured {limit} byte limit"
-            )))
-        } else {
-            Err(scheduler::Error::Message(error.to_string()))
-        };
-    }
-    Ok(Bytes::from(writer.bytes))
-}
-
-struct LimitWriter {
-    bytes: Vec<u8>,
-    limit: usize,
-    exceeded: bool,
-}
-
-impl LimitWriter {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            limit,
-            exceeded: false,
-        }
-    }
-}
-
-impl io::Write for LimitWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
-            self.exceeded = true;
-            return Err(io::Error::other("serialized request exceeded its limit"));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    serde_json::to_vec(value)
+        .map(Bytes::from)
+        .map_err(|error| scheduler::Error::Message(error.to_string()))
 }
 
 async fn retry(attempt: usize) {
@@ -417,7 +359,6 @@ mod tests {
             url::Url::parse(&base_url).unwrap(),
             "token".to_string(),
             "default".to_string(),
-            1024,
             timeouts,
         )
         .unwrap()
@@ -493,23 +434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_request_is_rejected_before_network_io() {
-        let client = client("http://127.0.0.1:9/".to_string(), Timeouts::default());
-        let result = client
-            .post_empty(
-                "items",
-                &serde_json::json!({"value": "x".repeat(2048)}),
-                None,
-            )
-            .await;
-
-        assert!(
-            matches!(result, Err(scheduler::Error::Message(message)) if message.contains("request exceeds"))
-        );
-    }
-
-    #[tokio::test]
-    async fn response_size_is_independent_from_the_master_request_limit() {
+    async fn reads_a_large_master_response_without_a_size_policy() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let value = "x".repeat(2048);

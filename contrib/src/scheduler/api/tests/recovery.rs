@@ -364,7 +364,6 @@ async fn different_cold_traces_load_concurrently_within_the_handoff_budget() {
             "lease_timeout_ms": 3000,
             "lease_interval_ms": 1000,
             "heartbeat_interval_ms": 10000,
-            "max_request_bytes": 67108864
         }),
     );
     let trace = serde_json::to_value(Some(trace::Snapshot::code("task-1"))).unwrap();
@@ -424,7 +423,6 @@ async fn a_slow_recovery_failure_does_not_withhold_a_valid_peer() {
             "lease_timeout_ms": 300,
             "lease_interval_ms": 200,
             "heartbeat_interval_ms": 10000,
-            "max_request_bytes": 67108864
         }),
     );
     let (base_url, received, server) = concurrent_server(vec![

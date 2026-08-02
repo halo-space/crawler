@@ -131,7 +131,6 @@ pub(super) struct Policy {
     pub lease_timeout_ms: u64,
     pub lease_interval_ms: u64,
     pub heartbeat_interval_ms: u64,
-    pub max_request_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]

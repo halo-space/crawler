@@ -138,8 +138,8 @@ registration code `100` reports an online ID conflict. The server-generated regi
 stored and returned on heartbeat/offline requests, but it does not participate in Request claim,
 lease, or settlement identity.
 The policy lease timeout and refresh interval must exactly match the Scheduler's configured lease.
-`max_request_bytes` must be positive and is applied before the Worker sends one request body to the
-Master. It does not limit response bodies returned by the Master.
+The API Scheduler adds no configurable byte limit to request bodies sent to the Master or response
+bodies returned by it.
 An unfinished registration key or confirmed token freezes API Scheduler configuration until the
 lifecycle is completed or explicitly closed.
 

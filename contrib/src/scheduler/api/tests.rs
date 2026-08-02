@@ -72,7 +72,6 @@ fn policy() -> Response {
             "lease_timeout_ms": 30000,
             "lease_interval_ms": 10000,
             "heartbeat_interval_ms": 10000,
-            "max_request_bytes": 67108864
         }),
     )
 }

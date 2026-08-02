@@ -47,7 +47,6 @@ impl Api {
             trace: snapshot,
             requests,
         };
-        self.client.validate_body(&body)?;
         let digest = wire::canonical_digest(&body)
             .map_err(|error| scheduler::Error::Message(error.to_string()))?;
         let key = format!("init-{digest}");

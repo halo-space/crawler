@@ -9,7 +9,6 @@ async fn identical_init_bodies_share_a_key_across_tasks() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),
@@ -63,7 +62,6 @@ async fn different_init_bodies_use_different_keys() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),

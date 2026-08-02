@@ -75,7 +75,6 @@ async fn propagates_one_traceparent_across_api_retries() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),
@@ -118,61 +117,6 @@ async fn propagates_one_traceparent_across_api_retries() {
 }
 
 #[tokio::test]
-async fn open_rejects_a_zero_master_request_limit() {
-    let (base_url, received, server) = server(vec![Response::json(
-        "200 OK",
-        json!({
-            "lease_timeout_ms": 30000,
-            "lease_interval_ms": 10000,
-            "heartbeat_interval_ms": 10000,
-            "max_request_bytes": 0
-        }),
-    )]);
-    let api = api(base_url, "token");
-
-    let error = api.open(CONCURRENCY).await.unwrap_err();
-    assert!(
-        matches!(error, scheduler::Error::Message(message) if message.contains("request limit must be positive"))
-    );
-
-    let requests = received.recv().unwrap();
-    server.join().unwrap();
-    assert_eq!(requests.len(), 1);
-}
-
-#[tokio::test]
-async fn master_request_limit_is_applied_before_sending_requests() {
-    let (base_url, received, server) = server(vec![
-        Response::json(
-            "200 OK",
-            json!({
-                "lease_timeout_ms": 30000,
-                "lease_interval_ms": 10000,
-                "heartbeat_interval_ms": 10000,
-                "max_request_bytes": 256
-            }),
-        ),
-        registered(),
-        offline(),
-    ]);
-    let api = api(base_url, "token");
-    api.open(CONCURRENCY).await.unwrap();
-    let request = bound_request(format!("https://example.com/{}", "segment".repeat(128)));
-
-    let result = api
-        .push(payload::Payload::new().requests(vec![request]))
-        .await;
-
-    assert!(
-        matches!(result, Err(scheduler::Error::Message(message)) if message.contains("request exceeds"))
-    );
-    api.close().await.unwrap();
-    let requests = received.recv().unwrap();
-    server.join().unwrap();
-    assert_eq!(requests.len(), 3);
-}
-
-#[tokio::test]
 async fn trace_id_uses_one_escaped_path_segment() {
     let (base_url, received, server) = server(vec![
         Response::json(
@@ -181,7 +125,6 @@ async fn trace_id_uses_one_escaped_path_segment() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
-            "max_request_bytes": 67108864
             }),
         ),
         registered(),
@@ -324,7 +267,6 @@ async fn heartbeat_failure_pauses_claim_and_recovery_resumes_it() {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 200,
-                "max_request_bytes": 67108864
             }),
         ),
         registered(),

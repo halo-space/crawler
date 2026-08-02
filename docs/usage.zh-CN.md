@@ -128,8 +128,8 @@ let scheduler = Api::new("https://master.example.com", api_key)?
 心跳和显式离线分别调用 `/v1/worker/heartbeat` 与 `/v1/worker/offline`。Worker 管理响应固定使用
 `{code, message, data}`，`200` 表示成功，注册时 `100` 表示在线 ID 冲突。服务端生成的注册 token 会在
 心跳和离线请求中原样返回，但不参与 Request 领取、租约或结算身份校验。
-policy 中的租约超时和续租间隔必须与 Scheduler 本地配置完全一致；`max_request_bytes` 必须为正数，
-Worker 会在发送前用它校验发给 Master 的单个请求体。该字段不限制 Master 返回的响应体。
+policy 中的租约超时和续租间隔必须与 Scheduler 本地配置完全一致。API Scheduler 不为发给 Master
+的请求体或 Master 返回的响应体增加字节数配置。
 只要 API Scheduler 仍保留未完成注册 key 或已确认 token，其配置就保持冻结，直到生命周期完成或被
 显式关闭。
 
