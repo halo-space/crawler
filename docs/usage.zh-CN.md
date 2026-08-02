@@ -133,6 +133,13 @@ policy 中的租约超时和续租间隔必须与 Scheduler 本地配置完全�
 只要 API Scheduler 仍保留未完成注册 key 或已确认 token，其配置就保持冻结，直到生命周期完成或被
 显式关闭。
 
+claim 和 release 使用操作级 `Idempotency-Key` 恢复。传输错误、超时或成功响应无法解码时，结果仍未
+确认，因此相同领取参数的下一次 claim 或相同租约身份的下一次 release 会复用保留的 key；尚有未确认
+claim 时，不同领取参数会被拒绝。收到成功结果或确定性失败后清除对应 key。claim 串行执行，排队中的
+claim 会重新检查 Worker 在线状态；claim 重放保留第一次操作的单调起点，未确认的 release key 随租约
+截止而过期。API `close()` 会先停止并等待原心跳任务，再发送离线更新；如果等待过程被取消，下一次
+`close()` 会继续等待同一个任务。
+
 批量领取省略 Trace Snapshot 时，API 恢复会对同一批相同 `trace_id` 只读取一次，并发读取不同
 Trace。Trace 读取、缺失、解码、校验和 task/node 绑定错误只调用 `release`，不调用 `ack` 或
 `failure`，也不消耗 Request 重试；只有 Request Snapshot 或执行状态本身损坏才使用
@@ -348,9 +355,10 @@ Request 进入本地执行槽后先通过 `Scheduler::ack` 确认执行权，长
 每 10 秒续租。最终 Payload 生成前明确丢失执行权时，Engine 终止执行且不提交结算；Payload 生成后
 以 `success / failure` 为最终依据，并发续租错误不能取消结算，临时结算错误只重试同一个 Payload，
 不会重新执行 Request。已确认执行失败时会保留有序且不重复的失败 Worker；未 ack 的领取过期不消费尝试次数。
-每条由成功 `next_requests` 调用返回的 Request，都以该调用前立即记录的单调时刻计算首个本地租约
-截止点，因此 Scheduler 处理与网络耗时会占用这份保守的租约预算。Engine 不会把 Worker 墙钟与
-Scheduler 服务端时间比较；一次成功续租会从自身的单调起点开始计算下一个本地截止点。
+每次逻辑领取都在第一次 `next_requests` 尝试前记录单调时刻，并在临时错误重试间保留；最终返回的
+每条 Request 都以该时刻计算首个本地租约截止点，因此 Scheduler 处理、网络和重试耗时会占用这份
+保守预算。Engine 不会把 Worker 墙钟与 Scheduler 服务端时间比较；一次成功续租会从自身的单调起点
+开始计算下一个本地截止点。
 Memory 只从进程内不可变映射读取 Trace Snapshot。Engine 直接跟踪克隆出来的 Tx 生产者，不再通过固定空闲等待窗口猜测是否仍有输出。
 Engine 内部由一个 Kameo Actor 统一协调，Request 和输出 I/O 仍在独立 Tokio 任务中执行。
 一次领取为空后默认等待一秒再试；`with_idle_interval(duration)` 可替换这个正数且只在启动时加载的
@@ -623,7 +631,8 @@ Reporter 未安装、当前 Request 未被采样或编译期 feature 未开启�
 并发数，并向 `next_requests(limit)` 传入批次上限。能力筛选必须和领取原子完成。Redis 是当前可用的
 持久化 Scheduler 实现，并已通过共享 Scheduler 一致性测试。
 Worker 侧 `contrib::scheduler::api::Api` 适配器也已经实现；对应 Master 服务不属于这个 workspace。
-本仓库只维护 Master 功能和协议设计，服务端、数据库、Cron、Control API 与前端由独立项目负责。
+本仓库只维护 Worker 侧适配器及其客户端 HTTP 合同；Master 服务、服务端协议、数据库、Cron、Control
+API、前端及其设计由独立项目负责。
 可选 `fastrace` 运行期链路追踪已经实现；真实 Browser Downloader 与 HTTP/browser 混合端到端执行
 属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
 `ai::OpenAI` provider，Rules 只保留提示词。

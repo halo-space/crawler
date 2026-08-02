@@ -94,8 +94,3 @@ async fn different_init_bodies_use_different_keys() {
     assert_eq!(keys.len(), 2);
     assert_ne!(keys[0], keys[1]);
 }
-
-#[test]
-fn invocation_keys_are_always_fresh() {
-    assert_ne!(Api::invocation_key(), Api::invocation_key());
-}

@@ -53,7 +53,7 @@ pub(super) struct Worker {
     pub token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct Claim {
     pub limit: usize,
     pub worker_id: String,
@@ -77,7 +77,7 @@ pub(super) struct Identity {
     pub node: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub(super) struct Lease {
     pub id: String,
     pub task_id: String,

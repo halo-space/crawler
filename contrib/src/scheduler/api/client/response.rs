@@ -16,6 +16,17 @@ where
     })
 }
 
+pub(super) fn operation<T>(bytes: Vec<u8>) -> Result<T, scheduler::Error>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(&bytes).map_err(|error| {
+        ambiguous(&format!(
+            "Master returned an invalid operation response: {error}"
+        ))
+    })
+}
+
 pub(super) fn empty(bytes: Vec<u8>) -> Result<(), scheduler::Error> {
     if bytes.is_empty() {
         return Ok(());

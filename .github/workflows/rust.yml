@@ -36,11 +36,11 @@ jobs:
     - name: Check workspace
       run: cargo check --workspace --all-targets
     - name: Run tests
-      run: cargo test --workspace
+      run: cargo test --workspace --all-targets --features runtime-tracing
     - name: Run Clippy
-      run: cargo clippy --workspace --all-targets -- -D warnings
+      run: cargo clippy --workspace --all-targets --features runtime-tracing -- -D warnings
     - name: Build documentation
-      run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --features runtime-tracing
     - name: Check whitespace
       run: |
         empty_tree=$(git hash-object -t tree /dev/null)

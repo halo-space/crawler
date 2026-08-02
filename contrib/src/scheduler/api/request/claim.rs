@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use spider::{net, scheduler, trace};
 
@@ -14,21 +15,28 @@ impl Api {
             return Ok(Vec::new());
         }
 
-        let claim_started = tokio::time::Instant::now();
+        let _claim = self.runtime.claim.lock().await;
+        if !self.runtime.can_claim.load(Ordering::Acquire) {
+            return Ok(Vec::new());
+        }
         let lease = scheduler::Scheduler::lease(self)
             .expect("API Scheduler always defines a Request lease");
-        let (lease_deadline, handoff_deadline) = claim_deadlines(claim_started, lease)?;
         let worker_id = self.worker.id()?;
         let body = wire::Claim {
             limit,
             worker_id: worker_id.to_string(),
             modes: self.worker.modes().to_vec(),
         };
-        let key = Self::invocation_key();
-        let response = self
+        let (key, claim_started) = self.runtime.claim_operation(&body)?;
+        let (lease_deadline, handoff_deadline) = claim_deadlines(claim_started, lease)?;
+        let result = self
             .client
-            .post::<_, wire::ClaimResponse>("v1/worker/requests/claim", &body, Some(&key))
-            .await?;
+            .post_operation::<_, wire::ClaimResponse>("v1/worker/requests/claim", &body, &key)
+            .await;
+        if result.is_ok() || result.as_ref().is_err_and(|error| !error.is_transient()) {
+            self.runtime.confirm_claim(&key);
+        }
+        let response = result?;
         if response.requests.len() > limit {
             let error = scheduler::Error::Message(format!(
                 "Master returned {} Requests for claim limit {limit}",
@@ -86,7 +94,7 @@ impl Api {
                 let (restore, recovery) = restore.into_recovery();
                 let settlement = tokio::time::timeout_at(settlement_deadline, async {
                     match recovery {
-                        Recovery::Release => self.release_restore(claimed).await,
+                        Recovery::Release => self.release_restore(claimed, lease_deadline).await,
                         Recovery::Failure => self.fail_restore(claimed, &restore).await,
                     }
                 })
@@ -179,11 +187,9 @@ impl Api {
         let results =
             futures_util::future::join_all(claims.into_iter().map(|(index, claimed)| async move {
                 let identity = wire::Lease::from_claim(&claimed.identity);
-                let key = Self::invocation_key();
                 let result = tokio::time::timeout_at(
                     deadline,
-                    self.client
-                        .post_empty("v1/worker/requests/release", &identity, Some(&key)),
+                    self.release_identity_until(&identity, deadline),
                 )
                 .await
                 .unwrap_or_else(|_| {
@@ -216,14 +222,12 @@ impl Api {
         }
     }
 
-    async fn release_restore(&self, claimed: &wire::Claimed) -> Result<(), scheduler::Error> {
-        let key = Self::invocation_key();
-        self.client
-            .post_empty(
-                "v1/worker/requests/release",
-                &wire::Lease::from_claim(&claimed.identity),
-                Some(&key),
-            )
+    async fn release_restore(
+        &self,
+        claimed: &wire::Claimed,
+        lease_deadline: tokio::time::Instant,
+    ) -> Result<(), scheduler::Error> {
+        self.release_identity_until(&wire::Lease::from_claim(&claimed.identity), lease_deadline)
             .await
     }
 
@@ -306,7 +310,8 @@ impl Api {
                 message: "claimed Request mode is not supported by the claiming Worker".to_string(),
             }));
         }
-        validate_execution(&claimed.execution, &snapshot, &claimed.identity, worker_id)
+        validate_execution(&claimed.execution, &snapshot).map_err(RestoreError::Request)?;
+        validate_claim(&claimed.execution, &claimed.identity, worker_id)
             .map_err(RestoreError::Claim)?;
         if claimed.identity.worker_id != worker_id {
             return Err(RestoreError::Claim(scheduler::Error::InvalidRequest {
@@ -316,27 +321,8 @@ impl Api {
         }
 
         let trace_id = claimed.identity.trace_id.clone();
-        let trace = if let Some(value) = claimed.trace.clone() {
-            let snapshot = serde_json::from_value::<trace::Snapshot>(value).map_err(|error| {
-                RestoreError::Trace(scheduler::Error::InvalidTrace {
-                    id: trace_id.clone(),
-                    message: format!("claimed Trace Snapshot cannot be decoded: {error}"),
-                })
-            })?;
-            snapshot.validate().map_err(|message| {
-                RestoreError::Trace(scheduler::Error::InvalidTrace {
-                    id: trace_id.clone(),
-                    message,
-                })
-            })?;
-            if snapshot.task_id != claimed.identity.task_id {
-                return Err(RestoreError::Trace(scheduler::Error::InvalidTrace {
-                    id: trace_id,
-                    message: "Trace Snapshot task_id does not match its claimed Request"
-                        .to_string(),
-                }));
-            }
-            self.cache_trace(trace_id.clone(), snapshot)
+        let trace = if let Some(value) = claimed.trace.as_ref() {
+            self.restore_inline_trace(claimed, value)
                 .await
                 .map_err(RestoreError::Trace)?
         } else if let Some(snapshot) = self.cached_trace(&trace_id).await {
@@ -389,19 +375,69 @@ impl Api {
         Ok(request)
     }
 
+    async fn restore_inline_trace(
+        &self,
+        claimed: &wire::Claimed,
+        value: &serde_json::Value,
+    ) -> Result<Arc<trace::Snapshot>, scheduler::Error> {
+        let trace_id = claimed.identity.trace_id.clone();
+        let snapshot =
+            serde_json::from_value::<trace::Snapshot>(value.clone()).map_err(|error| {
+                scheduler::Error::InvalidTrace {
+                    id: trace_id.clone(),
+                    message: format!("claimed Trace Snapshot cannot be decoded: {error}"),
+                }
+            })?;
+        snapshot
+            .validate()
+            .map_err(|message| scheduler::Error::InvalidTrace {
+                id: trace_id.clone(),
+                message,
+            })?;
+        if snapshot.task_id != claimed.identity.task_id {
+            return Err(scheduler::Error::InvalidTrace {
+                id: trace_id,
+                message: "Trace Snapshot task_id does not match its claimed Request".to_string(),
+            });
+        }
+        self.cache_trace(claimed.identity.trace_id.clone(), snapshot)
+            .await
+    }
+
     async fn prepare_traces(
         &self,
         claimed: &[wire::Claimed],
         deadline: tokio::time::Instant,
     ) -> HashMap<String, Result<Arc<trace::Snapshot>, TraceError>> {
-        let mut ids = HashSet::with_capacity(claimed.len());
+        let mut traces = HashMap::with_capacity(claimed.len());
         for request in claimed {
-            if request.trace.is_none() {
-                ids.insert(request.identity.trace_id.clone());
+            if validate_identity(&request.identity).is_err() {
+                continue;
+            }
+            let Some(value) = request.trace.as_ref() else {
+                continue;
+            };
+            if let Ok(snapshot) = self.restore_inline_trace(request, value).await {
+                traces
+                    .entry(request.identity.trace_id.clone())
+                    .or_insert(Ok(snapshot));
             }
         }
 
-        futures_util::future::join_all(ids.into_iter().map(|id| async move {
+        let mut ids = HashSet::with_capacity(claimed.len());
+        for request in claimed {
+            if request.trace.is_some() || traces.contains_key(&request.identity.trace_id) {
+                continue;
+            }
+            let trace_id = request.identity.trace_id.clone();
+            if let Some(snapshot) = self.cached_trace(&trace_id).await {
+                traces.insert(trace_id, Ok(snapshot));
+            } else {
+                ids.insert(trace_id);
+            }
+        }
+
+        let loaded = futures_util::future::join_all(ids.into_iter().map(|id| async move {
             let loaded = tokio::time::timeout_at(deadline, self.load_trace(&id))
                 .await
                 .map_err(|_| {
@@ -417,9 +453,9 @@ impl Api {
                 });
             (id, loaded)
         }))
-        .await
-        .into_iter()
-        .collect()
+        .await;
+        traces.extend(loaded);
+        traces
     }
 }
 
@@ -525,34 +561,14 @@ fn recovery_message(
 fn validate_execution(
     execution: &wire::Execution,
     snapshot: &net::request::Snapshot,
-    identity: &wire::Identity,
-    worker_id: &str,
 ) -> Result<(), scheduler::Error> {
-    let id = identity.id.clone();
-    if execution.version != identity.version {
-        return Err(scheduler::Error::InvalidRequest {
-            id,
-            message: "claimed Request execution version does not match its identity".to_string(),
-        });
-    }
+    let id = snapshot.id.clone();
     if execution.next_time < 0 || execution.lease_time <= 0 {
         return Err(scheduler::Error::InvalidRequest {
             id,
             message:
                 "claimed Request next_time must not be negative and lease_time must be positive"
                     .to_string(),
-        });
-    }
-    if execution.leased_by.trim().is_empty() {
-        return Err(scheduler::Error::InvalidRequest {
-            id,
-            message: "claimed Request leased_by must not be empty".to_string(),
-        });
-    }
-    if execution.leased_by != identity.worker_id {
-        return Err(scheduler::Error::InvalidRequest {
-            id,
-            message: "claimed Request execution owner does not match its identity".to_string(),
         });
     }
     if execution.retry_count < 0 || execution.retry_count >= snapshot.max_retry_count {
@@ -576,6 +592,33 @@ fn validate_execution(
         return Err(scheduler::Error::InvalidRequest {
             id,
             message: "claimed Request failed_workers exceed retry_count".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_claim(
+    execution: &wire::Execution,
+    identity: &wire::Identity,
+    worker_id: &str,
+) -> Result<(), scheduler::Error> {
+    let id = identity.id.clone();
+    if execution.version != identity.version {
+        return Err(scheduler::Error::InvalidRequest {
+            id,
+            message: "claimed Request execution version does not match its identity".to_string(),
+        });
+    }
+    if execution.leased_by.trim().is_empty() {
+        return Err(scheduler::Error::InvalidRequest {
+            id,
+            message: "claimed Request leased_by must not be empty".to_string(),
+        });
+    }
+    if execution.leased_by != identity.worker_id {
+        return Err(scheduler::Error::InvalidRequest {
+            id,
+            message: "claimed Request execution owner does not match its identity".to_string(),
         });
     }
     if execution
@@ -668,17 +711,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_rejects_an_empty_lease_and_the_same_failed_worker() {
+    async fn restore_classifies_damaged_state_separately_from_worker_eligibility() {
         let api = Api::new("https://master.example.com", "token").unwrap();
         let mut empty_lease = claimed(net::Mode::Http);
         empty_lease.execution.lease_time = 0;
         assert!(matches!(
             api.restore(&empty_lease, "worker-1", &[net::Mode::Http])
                 .await,
-            Err(RestoreError::Claim(_))
+            Err(RestoreError::Request(_))
         ));
 
         let mut failed = claimed(net::Mode::Http);
+        failed.snapshot["max_retry_count"] = serde_json::json!(2);
         failed.execution.retry_count = 1;
         failed.execution.failed_workers.push("worker-1".to_string());
         assert!(matches!(

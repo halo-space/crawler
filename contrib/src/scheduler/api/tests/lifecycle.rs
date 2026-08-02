@@ -326,7 +326,17 @@ async fn cancelled_close_during_heartbeat_cannot_reenable_claims() {
             .load(std::sync::atomic::Ordering::Acquire)
     );
 
+    let closing = {
+        let api = api.clone();
+        tokio::spawn(async move { api.close().await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        !closing.is_finished(),
+        "a repeated close did not continue waiting for the active heartbeat"
+    );
     resume.send(()).unwrap();
+    closing.await.unwrap().unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
         while !heartbeat.is_finished() {
             tokio::task::yield_now().await;
@@ -340,10 +350,38 @@ async fn cancelled_close_during_heartbeat_cannot_reenable_claims() {
             .load(std::sync::atomic::Ordering::Acquire)
     );
 
-    api.close().await.unwrap();
     let requests = received.recv().unwrap();
     server.join().unwrap();
     assert_eq!(requests.len(), 4);
     assert!(requests[2].path.ends_with("/worker/heartbeat"));
     assert!(requests[3].path.ends_with("/worker/offline"));
+}
+
+#[tokio::test]
+async fn a_claim_waiting_for_serialization_rechecks_worker_liveness() {
+    let (base_url, received, server) = server(vec![policy(), registered(), offline()]);
+    let api = Arc::new(api(base_url, "token"));
+    api.open(CONCURRENCY).await.unwrap();
+    let claim = api.runtime.claim.lock().await;
+
+    let queued = {
+        let api = api.clone();
+        tokio::spawn(async move { api.claim(1).await })
+    };
+    tokio::task::yield_now().await;
+    api.runtime
+        .can_claim
+        .store(false, std::sync::atomic::Ordering::Release);
+    drop(claim);
+
+    assert!(queued.await.unwrap().unwrap().is_empty());
+    api.close().await.unwrap();
+
+    let requests = received.recv().unwrap();
+    server.join().unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.path.ends_with("/v1/worker/requests/claim"))
+    );
 }

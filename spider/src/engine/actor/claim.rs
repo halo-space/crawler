@@ -99,8 +99,8 @@ async fn claim<S>(
 where
     S: scheduler::Scheduler,
 {
+    let claim_started = Instant::now();
     for attempt in 0..MAX_ATTEMPTS {
-        let claim_started = Instant::now();
         match scheduler.next_requests(limit).await {
             Ok(requests) => return Ok((requests, claim_started)),
             Err(error) if error.is_transient() && attempt + 1 < MAX_ATTEMPTS => {
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_retry_uses_successful_claim_start_for_the_batch() {
+    async fn transient_retry_keeps_the_first_claim_start_for_the_batch() {
         let requests = vec![
             net::Request::follow("https://example.com/one").unwrap(),
             net::Request::follow("https://example.com/two").unwrap(),
@@ -267,8 +267,8 @@ mod tests {
 
         let attempts = scheduler.attempts();
         assert_eq!(attempts.len(), 2);
-        assert!(claim_started >= attempts[0] + RETRY_DELAY);
-        assert!(claim_started <= attempts[1]);
+        assert!(claim_started <= attempts[0]);
+        assert!(claim_started < attempts[1]);
         assert_eq!(
             claimed
                 .iter()

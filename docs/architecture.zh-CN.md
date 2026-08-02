@@ -34,16 +34,16 @@
 | Item Store | 已实现 | 独立的 `open / close / submit(&Payload)` 持久化合同；默认 JSONL 输出与 Jsonl 自管失败快照；附件下载计划在 v5 实现 |
 | Worker 能力领取 | 已实现 | 每个 Scheduler 自己持有冻结的 Request modes，能力筛选与后端领取保持原子 |
 | Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；完整实现 namespace Scheduler/Init、Worker 注册/心跳与 Lua 原子转换 |
-| API Scheduler 适配器 | 已实现 | 通过规划中的 Master API 完成注册/心跳的 Worker 侧 Scheduler；Master 服务属于独立项目 |
+| API Scheduler 适配器 | 已实现 | 通过外部 Master API 完成注册/心跳的 Worker 侧 Scheduler；Master 服务属于独立项目 |
 | 运行期链路追踪 | 已实现 | 可选的逐 Request `fastrace` 根链路与有界生命周期 span；不等于业务 `trace_id` |
 
 XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护不完整的 XPath 子集。
 Healing 不是通用 selector 阶段。目前只有 CSS 提供 Healing；Regex 与 JSON 保持各自的精确选择
 语义，XML selector 当前也没有实现。
 
-crawler workspace 不包含、也不实现 Master 服务。本仓库只负责 Worker 侧 API Scheduler 适配器和
-双方使用的爬虫合同；本地 `docs/master/` 只记录 Master 的功能、协议、数据库和前端设计。Master
-服务端、Migration、Cron、Control API 与管理前端规划在独立项目实现。
+crawler workspace 不包含、也不实现 Master 服务，只负责 Worker 侧 API Scheduler 适配器及其客户端
+HTTP 合同。Master 服务、服务端协议、数据库、Migration、Cron、Control API、管理前端及其设计均由
+独立项目负责。
 Item 持久化严格属于 Worker：默认使用 `item::Jsonl`，`.with_store(...)` 只用于替换为 Worker
 自己的业务存储后端。一次 Engine 运行只能在启动时绑定一个 Store；运行时不在多个 Store 之间
 路由 Item，也不维护 Store 注册表。Master 不参与 Item 持久化，本 workspace 及其路线图也不定义
@@ -148,7 +148,7 @@ task_id + trace_id + immutable Trace Snapshot + initial Requests
 身份都直接拒绝。从进入队列的 Request Snapshot 开始，两项身份以及其引用的 Trace Snapshot 都是
 必需数据。代码模式由 `dsl` 为空的 Trace Snapshot 表示，不能用缺少 Trace 表示。
 
-Trace Snapshot 保存本轮 Request 共享的 `task_id`、参数、可选附件配置、持久化目标和优先级，不保存 schema 版本、Task revision 或静态推导的 Request mode 集合。Rules Snapshot 额外包含完整 DSL，其中可选的 `spider.version` 必须非空，`spider.timezone` 必须是有效 IANA 时区；代码 Snapshot 的 `dsl` 固定为空。
+Trace Snapshot 保存本轮 Request 共享的 `task_id`、参数、可选附件配置和优先级，不保存 schema 版本、Task revision 或静态推导的 Request mode 集合。Rules Snapshot 额外包含完整 DSL，其中可选的 `spider.version` 必须非空，`spider.timezone` 必须是有效 IANA 时区；代码 Snapshot 的 `dsl` 固定为空。
 
 Request Snapshot 保存稳定 `node` 和可执行请求字段，不保存 handler、函数指针、闭包或进程内对象：
 
@@ -231,6 +231,9 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 一次 `next_requests(limit)` 返回空集合只表示当前领取没有结果，不能结束仍在运行的 Worker。Actor 按
 启动时冻结的空闲间隔等待后继续领取，并且始终最多只有一个领取调用。这样 Redis 或 API Scheduler
 在进程启动后收到的新任务无需重新启动 Engine 就能被消费。
+
+临时领取错误使用有界的本地重试。后续重试成功返回 Request 时，整批租约调度仍使用第一次尝试的开始
+时间，不能从成功尝试重新计算预算，因为更早一次未确认的领取可能已经在后端建立租约。
 
 `Runtime::start()` 在组件 `open` 前安装 SIGINT 和 SIGTERM 监听。信号在 `open`、`before_spider` 或运行
 初始化期间到达时，已经开始的阶段允许完成，但不再进入后续启动阶段。Actor 已运行时，收到信号后不再
@@ -425,6 +428,14 @@ API Scheduler 使用现有认证客户端调用 `GET /v1/worker/policy` 以及 `
 两种实现都只用心跳在线状态控制后续领取。它与 Request 执行权明确分离：Worker 离线不会取消已经由
 `next_requests` 返回的 Request，Request 续租成功也不能证明 Worker 仍处于注册在线状态。
 
+API 的 claim 和 release 在结果未确认时保留各自的 `Idempotency-Key`。传输错误、超时或成功响应无法
+解码时，相同领取参数的下一次 claim 或相同租约身份的下一次 release 会复用原 key；尚有未确认 claim
+时，不同领取参数会被拒绝。收到成功结果或确定性失败后清除对应 key。claim 调用会串行执行，避免同一
+重放批次返回给两个调用方；排队中的 claim 在访问 Master 前会重新检查 Worker 在线状态。claim 重放沿用
+第一次操作的单调起点，未确认的 release key 则随对应租约截止而过期，不会在 Worker 生命周期内无限增长。
+API `close()` 会先停止并等待原心跳任务结束，再发送离线更新；如果等待过程被取消，下一次 `close()` 会
+继续等待同一个心跳任务，不会丢失已有停止状态。
+
 API 批量领取省略 Trace Snapshot 时，Worker 对同一批相同 `trace_id` 只读取一次，并发读取不同
 Trace。Trace 读取、缺失、解码、校验或 task/node 绑定失败都只对该 Request 调用 `release`，不调用
 `ack/failure`，也不消耗 Request 重试；只有 Request Snapshot 或执行状态本身损坏才执行
@@ -477,10 +488,10 @@ sequenceDiagram
 - `ack` 在 Downloader 执行前发生；ack 失败时不会继续下载该 Request。
 - `release` 用于主动归还尚未完成的执行权，不等于失败，也不增加重试次数。
 - 租约维护覆盖下载、解析以及最终 `success / failure` 重试过程。
-- Engine 在每次 `next_requests` 尝试前立即记录单调 `claim_started`，只有调用成功时才保留该时刻。
-  每条返回的 Request 都以该时刻加 Scheduler 超时作为首个本地租约截止点，因此 Scheduler 处理与网络
-  耗时会占用这份保守预算；Engine 不会将 Worker 墙钟与 Scheduler 服务端时间比较。一次成功续租从自身
-  单调起点开始计算下一个本地截止点。
+- Engine 在一次逻辑领取的第一次 `next_requests` 尝试前记录单调 `claim_started`，并在临时错误重试间
+  保留该时刻。最终返回的每条 Request 都以该时刻加 Scheduler 超时作为首个本地租约截止点，因此
+  Scheduler 处理、网络和重试耗时都会占用这份保守预算；Engine 不会将 Worker 墙钟与 Scheduler 服务端
+  时间比较。一次成功续租从自身单调起点开始计算下一个本地截止点。
 - 最终 Payload 生成前，明确丢失执行权、租约过期或其他不可重试的续租错误会终止执行且不进入结算；临时续租错误在当前 lease deadline 内重试，下载和解析继续运行。
 - 执行生成不可变最终 Payload 后，以 `success / failure` 为最终依据。并发续租错误只停止后续续租，不能取消结算；临时结算错误只重试同一个 Payload，不重新执行 Request。
 - Middleware Retry 是当前 Worker 内的下载、解析或 Item 提交重试。
@@ -837,7 +848,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `spider/src/engine/rules/executor/bind.rs` | 执行有序 bind pipeline、transform 和 template |
 | `spider/src/engine/rules/executor/condition.rs` | 判断一条 edge 条件 |
 | `spider/src/engine/rules/executor/build.rs` | 从已启用 edge 构造 Request 与 Item 值 |
-| `spider/src/middleware/registry.rs` | 只注册并解析 Middleware 实现和 Spec |
+| `spider/src/middleware/registry.rs` | 注册 Middleware 实现、解析并排序有效 Spec、执行各阶段 hook 及生成重试策略 |
 | `spider/src/downloader/http.rs` | 执行 HTTP 请求、redirect、headers、cookies 与 Response 转换 |
 | `spider/src/downloader/http/pool.rs` | 按 proxy/TLS 键管理 Client 复用、过期与关闭 |
 | `spider/src/net/request/contract.rs` | Request、mode、state、proxy 与 TLS 公共合同 |

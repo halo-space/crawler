@@ -111,11 +111,20 @@ pub(super) fn start_heartbeat(
     token: String,
     interval: Duration,
 ) -> state::Heartbeat {
-    let (stop, mut stopping) = tokio::sync::oneshot::channel();
+    let (stop, mut stopping) = tokio::sync::watch::channel(false);
+    let (ended, stopped) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(async move {
+        let _ended = HeartbeatEnd(ended);
         loop {
+            if *stopping.borrow() {
+                return;
+            }
             tokio::select! {
-                _ = &mut stopping => return,
+                changed = stopping.changed() => {
+                    if changed.is_err() || *stopping.borrow() {
+                        return;
+                    }
+                }
                 _ = tokio::time::sleep(interval) => {}
             }
             if !runtime.is_open(epoch) {
@@ -153,7 +162,19 @@ pub(super) fn start_heartbeat(
             }
         }
     });
-    state::Heartbeat { stop, task }
+    state::Heartbeat {
+        stop,
+        stopped,
+        task,
+    }
+}
+
+struct HeartbeatEnd(tokio::sync::watch::Sender<bool>);
+
+impl Drop for HeartbeatEnd {
+    fn drop(&mut self) {
+        let _ = self.0.send_replace(true);
+    }
 }
 
 pub(super) async fn offline(

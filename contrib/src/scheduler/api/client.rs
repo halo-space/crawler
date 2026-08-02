@@ -128,6 +128,22 @@ impl Client {
         )
     }
 
+    pub(super) async fn post_operation<B, T>(
+        &self,
+        path: &str,
+        body: &B,
+        operation_key: &str,
+    ) -> Result<T, scheduler::Error>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        response::operation(
+            self.send(Method::POST, path, Some(body), Some(operation_key))
+                .await?,
+        )
+    }
+
     pub(super) async fn post_empty<B>(
         &self,
         path: &str,

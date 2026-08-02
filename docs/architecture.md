@@ -34,7 +34,7 @@ The workspace contains four crates:
 | Item Store | Implemented | Independent `open / close / submit(&Payload)` persistence contract; default JSONL output and Jsonl-owned failure snapshots; attachment download is planned for v5 |
 | Capability-aware claiming | Implemented | Each Scheduler owns frozen Request modes; claim filtering remains backend-atomic |
 | Redis Scheduler | Implemented | Redis 7+ standalone only; complete namespaced Scheduler/Init contract, Worker registration/heartbeat, and Lua-atomic transitions |
-| API Scheduler adapter | Implemented | Worker-side Scheduler with registration/heartbeat over the planned Master API; the Master service belongs to a separate project |
+| API Scheduler adapter | Implemented | Worker-side Scheduler with registration/heartbeat over an external Master API; the Master service belongs to a separate project |
 | Runtime tracing | Implemented | Optional per-Request `fastrace` roots and bounded lifecycle spans; distinct from business `trace_id` |
 
 XPath has been removed from the roadmap. CSS is the sole HTML selector path; the project does not maintain a partial XPath implementation.
@@ -42,9 +42,8 @@ Healing is not a generic selector stage. Only CSS exposes Healing; Regex and JSO
 selection semantics, and XML selection is not currently implemented.
 
 The crawler workspace does not contain or implement the Master service. It owns only the Worker-side
-API Scheduler adapter and the crawler contracts consumed over HTTP. The local `docs/master/` files
-record the Master feature, wire, database, and frontend design; the server, migrations, Cron, Control
-API, and frontend are planned for a separate project.
+API Scheduler adapter and its client-side HTTP contract. The Master service, server-side protocol,
+database, migrations, Cron, Control API, frontend, and their design belong to a separate project.
 Item persistence remains strictly inside the Worker: `item::Jsonl` is the default and
 `.with_store(...)` may replace it with a Worker-owned business backend. One Engine run has exactly one
 Store selected at startup; the runtime does not route Items between Stores or maintain a Store registry.
@@ -152,7 +151,7 @@ before submission. `Scheduler::init` and `Scheduler::push` reject either identit
 queued Request Snapshot onward, both identities and the referenced Trace Snapshot are mandatory.
 Code mode is represented by a Trace Snapshot with no DSL, never by an absent Trace.
 
-A Trace Snapshot holds run-level configuration shared by Requests: `task_id`, parameters, optional attachment configuration, persistence target, and priority. It has no schema version, Task revision, or derived Request-mode collection. A Rules Snapshot additionally contains the complete DSL, including its optional non-empty `spider.version` and valid IANA `spider.timezone`; a code Snapshot has an empty `dsl`.
+A Trace Snapshot holds run-level configuration shared by Requests: `task_id`, parameters, optional attachment configuration, and priority. It has no schema version, Task revision, or derived Request-mode collection. A Rules Snapshot additionally contains the complete DSL, including its optional non-empty `spider.version` and valid IANA `spider.timezone`; a code Snapshot has an empty `dsl`.
 
 A Request Snapshot stores its stable `node` and executable request fields. It never stores handlers, function pointers, closures, or process-local objects:
 
@@ -238,6 +237,10 @@ An empty `next_requests(limit)` result means only that the current claim returne
 terminates a live Worker. The Actor waits for the frozen idle interval and claims again; there is still
 at most one active claim. This lets Redis and API Schedulers accept work published after the process
 started without a second Engine lifecycle.
+
+Transient claim failures use bounded local retries. If a later retry returns Requests, the batch keeps
+the first attempt's start time for lease scheduling rather than restarting its budget at the successful
+attempt, because an earlier unconfirmed claim may already have established the backend lease.
 
 `Runtime::start()` installs SIGINT and SIGTERM listeners before component `open`. If a signal arrives
 during `open`, `before_spider`, or run initialization, the active stage is allowed to finish and no
@@ -475,6 +478,17 @@ future claims. It is deliberately separate from Request execution ownership: goi
 cancels a Request already returned by `next_requests`, and Request lease refresh never proves that the
 Worker process is registered online.
 
+API claim and release operations retain their `Idempotency-Key` while the result is uncertain. A
+transport error, timeout, or successful response that cannot be decoded reuses the same key on the
+next claim with identical parameters or release with the same lease identity. A different claim is
+rejected while an earlier claim remains unresolved. A successful result or deterministic failure
+clears the retained key. Claim calls are serialized so one replay cannot return the same batch to two
+callers, and a queued claim rechecks Worker liveness before contacting Master. Claim replay preserves
+the first operation's monotonic start; unresolved release keys expire with their lease instead of
+growing for the lifetime of the Worker. API `close()` stops and awaits the existing heartbeat task
+before sending the offline update. If that wait is cancelled, a later `close()` continues waiting for
+the same heartbeat task instead of losing its shutdown state.
+
 When an API claim omits a Trace Snapshot, the Worker loads each cold `trace_id` once and loads
 different Traces concurrently. Trace read, missing, decode, validation, or task/node binding errors
 release that Request without `ack`/`failure` and without consuming a Request retry. Only a damaged
@@ -529,11 +543,12 @@ The important semantics are:
 - `ack` happens before Downloader execution. A failed ack prevents the download.
 - `release` returns unfinished ownership voluntarily; it is not failure and does not increment retry count.
 - Lease maintenance covers download, parsing, and retries of final `success / failure` settlement.
-- Immediately before each `next_requests` attempt, Engine records a monotonic `claim_started` and
-  retains it only for a successful call. For every Request returned by that call, that instant plus
-  the Scheduler timeout is its initial local lease deadline. Scheduler and network latency therefore
-  consume part of this conservative budget; Engine never compares a Worker's wall clock with Scheduler
-  server time. A successful refresh begins the next local deadline from its own monotonic start.
+- Immediately before the first `next_requests` attempt of one logical claim, Engine records a
+  monotonic `claim_started` and retains it across transient retries. For every Request eventually
+  returned by that claim, that instant plus the Scheduler timeout is its initial local lease deadline.
+  Scheduler, network, and retry latency therefore consume part of this conservative budget; Engine
+  never compares a Worker's wall clock with Scheduler server time. A successful refresh begins the
+  next local deadline from its own monotonic start.
 - Before a final Payload exists, explicit ownership loss, lease expiry, or another terminal refresh error cancels execution and prevents settlement. Transient refresh errors retry within the current lease deadline while execution continues.
 - After execution produces an immutable final Payload, `success / failure` is authoritative. A concurrent refresh error stops further refreshes but cannot cancel settlement; transient settlement errors retry the same Payload without executing the Request again.
 - Middleware Retry is a local Worker retry for downloading, parsing, or Item submission.
@@ -921,7 +936,7 @@ the Store contract.
 | `spider/src/engine/rules/executor/bind.rs` | Evaluate ordered bind pipelines, transforms, and templates |
 | `spider/src/engine/rules/executor/condition.rs` | Evaluate one edge condition |
 | `spider/src/engine/rules/executor/build.rs` | Construct Request and Item values from an enabled edge |
-| `spider/src/middleware/registry.rs` | Register and resolve Middleware implementations and Specs only |
+| `spider/src/middleware/registry.rs` | Register Middleware implementations, resolve and order effective Specs, execute hooks, and derive retry policies |
 | `spider/src/downloader/http.rs` | Execute HTTP requests, redirects, headers, cookies, and response conversion |
 | `spider/src/downloader/http/pool.rs` | Key, reuse, expire, and close proxy/TLS-specific HTTP clients |
 | `spider/src/net/request/contract.rs` | Public Request, mode, state, proxy, and TLS contract |

@@ -143,6 +143,15 @@ bodies returned by it.
 An unfinished registration key or confirmed token freezes API Scheduler configuration until the
 lifecycle is completed or explicitly closed.
 
+Claim and release use operation-scoped `Idempotency-Key` recovery. A transport error, timeout, or
+successful response that cannot be decoded leaves the result uncertain, so the next claim with the
+same parameters or release with the same lease identity reuses the retained key. A different claim is
+rejected while an earlier claim remains unresolved. A successful result or deterministic failure
+clears the key. Claims are serialized, queued claims recheck Worker liveness, claim replay keeps the
+first operation's monotonic start, and unresolved release keys expire with their lease. API `close()`
+stops and waits for the existing heartbeat task before sending the offline update. If that wait is
+cancelled, another `close()` continues waiting for the same task.
+
 For a batch claim without embedded Trace Snapshots, API recovery reads each cold `trace_id` once and
 loads different Traces concurrently. Trace read, missing, decode, validation, and task/node binding
 errors call `release` only; they do not call `ack` or `failure`, and do not consume a Request retry.
@@ -352,10 +361,11 @@ and refresh interval; Memory defaults to a 30-second timeout and a 10-second int
 ownership loss before the final Payload exists stops execution without settlement. Once that Payload
 exists, `success / failure` is authoritative: a concurrent refresh error cannot cancel settlement,
 and transient settlement errors retry the same Payload without re-executing the Request.
-For every Request returned by a successful `next_requests` call, Engine derives its initial local lease
-deadline from a monotonic instant recorded immediately before that attempt, so Scheduler and network
-latency consume part of the conservative lease budget. It never compares a Worker's wall clock with
-Scheduler server time; a successful refresh starts the next local deadline from its own monotonic start.
+For every Request returned by one logical `next_requests` claim, Engine derives its initial local lease
+deadline from a monotonic instant recorded before the first attempt and retained across transient
+retries, so Scheduler, network, and retry latency consume part of the conservative lease budget. It
+never compares a Worker's wall clock with Scheduler server time; a successful refresh starts the next
+local deadline from its own monotonic start.
 Failures after acknowledgment preserve ordered, duplicate-free failed Worker history; claim expiry
 before acknowledgment does not consume an attempt. Memory reads Trace Snapshots only from its
 immutable in-process map.
@@ -657,8 +667,9 @@ concurrency to `open(concurrency)` and a batch size to `next_requests(limit)`. C
 must remain atomic with claim. Redis is the available
 persistent Scheduler implementation and is covered by the shared Scheduler conformance suite.
 The Worker-side `contrib::scheduler::api::Api` adapter is also implemented. Its corresponding Master
-service is not part of this workspace: this repository maintains only the Master feature and protocol
-design, while another project owns the server, database, Cron, Control API, and frontend.
+service is not part of this workspace. This repository maintains only the Worker-side adapter and its
+client-side HTTP contract; a separate project owns the Master service, server-side protocol, database,
+Cron, Control API, frontend, and their design.
 Optional `fastrace` runtime tracing is implemented; a real Browser Downloader and mixed HTTP/browser
 end-to-end execution remain v5 work. AI provider configuration is already Worker-local: one reusable
 `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.

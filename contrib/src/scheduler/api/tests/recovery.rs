@@ -52,6 +52,46 @@ async fn damaged_snapshots_are_failed_without_withholding_valid_claims() {
 }
 
 #[tokio::test]
+async fn damaged_execution_state_is_failed_instead_of_released() {
+    let mut damaged_retry = bound_request("https://example.com/damaged-retry");
+    damaged_retry.id = "damaged-retry".to_string();
+    let mut damaged_retry = claimed(net::request::Snapshot::try_from(damaged_retry).unwrap());
+    damaged_retry["execution"]["retry_count"] = json!(-1);
+
+    let mut damaged_workers = bound_request("https://example.com/damaged-workers");
+    damaged_workers.id = "damaged-workers".to_string();
+    damaged_workers.max_retry_count = 3;
+    let mut damaged_workers = claimed(net::request::Snapshot::try_from(damaged_workers).unwrap());
+    damaged_workers["execution"]["retry_count"] = json!(2);
+    damaged_workers["execution"]["failed_workers"] = json!(["worker-2", "worker-2"]);
+
+    let (base_url, received, server) = server(vec![
+        policy(),
+        registered(),
+        Response::json(
+            "200 OK",
+            json!({"requests": [damaged_retry, damaged_workers]}),
+        ),
+        Response::empty("204 No Content"),
+        Response::empty("204 No Content"),
+        Response::empty("204 No Content"),
+        Response::empty("204 No Content"),
+        offline(),
+    ]);
+    let api = api(base_url, "token");
+    api.open(CONCURRENCY).await.unwrap();
+
+    assert!(api.next_requests(2).await.unwrap().is_empty());
+    api.close().await.unwrap();
+
+    let requests = received.recv().unwrap();
+    server.join().unwrap();
+    assert_eq!(count(&requests, "/requests/ack"), 2);
+    assert_eq!(count(&requests, "/requests/failure"), 2);
+    assert_eq!(count(&requests, "/requests/release"), 0);
+}
+
+#[tokio::test]
 async fn a_duplicate_claimed_request_is_rejected_and_released_once() {
     let mut request = bound_request("https://example.com/valid");
     request.id = "request-1".to_string();
@@ -341,6 +381,38 @@ async fn requests_with_the_same_cold_trace_share_one_read() {
 }
 
 #[tokio::test]
+async fn a_later_inline_trace_restores_an_earlier_cold_claim_without_remote_loading() {
+    let mut cold = bound_request("https://example.com/cold");
+    cold.id = "cold-request".to_string();
+    let mut inline = bound_request("https://example.com/inline");
+    inline.id = "inline-request".to_string();
+    let mut cold = claimed(net::request::Snapshot::try_from(cold).unwrap());
+    let inline = claimed(net::request::Snapshot::try_from(inline).unwrap());
+    cold["trace"] = serde_json::Value::Null;
+
+    let (base_url, received, server) = trace_unavailable_server(json!({
+        "requests": [cold, inline]
+    }));
+    let api = api(base_url, "token");
+    api.open(CONCURRENCY).await.unwrap();
+
+    let requests = api.next_requests(2).await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.id.as_str())
+            .collect::<Vec<_>>(),
+        ["cold-request", "inline-request"]
+    );
+    api.close().await.unwrap();
+
+    let requests = received.recv().unwrap();
+    server.join().unwrap();
+    assert_eq!(count(&requests, "/v1/worker/traces/trace-1"), 0);
+    assert_eq!(count(&requests, "/requests/release"), 0);
+}
+
+#[tokio::test]
 async fn different_cold_traces_load_concurrently_within_the_handoff_budget() {
     let lease = scheduler::Lease::new(Duration::from_secs(3), Duration::from_secs(1)).unwrap();
     let mut first = bound_request("https://example.com/first");
@@ -473,4 +545,54 @@ fn count(requests: &[Request], suffix: &str) -> usize {
         .iter()
         .filter(|request| request.path.ends_with(suffix))
         .count()
+}
+
+fn trace_unavailable_server(
+    claim: serde_json::Value,
+) -> (
+    String,
+    std::sync::mpsc::Receiver<Vec<Request>>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let stop = request.path.ends_with("/v1/worker/offline");
+            let response = if request.path.ends_with("/v1/worker/policy") {
+                policy()
+            } else if request.path.ends_with("/v1/worker/register") {
+                registered()
+            } else if request.path.ends_with("/v1/worker/requests/claim") {
+                Response::json("200 OK", claim.clone())
+            } else if request.path.contains("/v1/worker/traces/") {
+                unavailable("Trace store unavailable")
+            } else if request.path.ends_with("/v1/worker/requests/release") {
+                Response::empty("204 No Content")
+            } else if stop {
+                offline()
+            } else {
+                panic!("unexpected API Scheduler test request: {}", request.path);
+            };
+            requests.push(request);
+            let headers = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.status,
+                response.body.len()
+            );
+            if stream.write_all(headers.as_bytes()).is_ok() {
+                let _ = stream.write_all(&response.body);
+                let _ = stream.flush();
+            }
+            if stop {
+                break;
+            }
+        }
+        sender.send(requests).unwrap();
+    });
+    (format!("http://{address}"), receiver, server)
 }

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use spider::trace;
-use tokio::sync::{Mutex, RwLock, oneshot};
+use spider::{scheduler, trace};
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 
 use super::wire;
@@ -13,15 +13,20 @@ pub(super) struct Runtime {
     pub(super) epoch: AtomicU64,
     pub(super) lifecycle: Mutex<()>,
     pub(super) activity: RwLock<()>,
+    // Prevents an idempotent claim replay from returning one batch to two callers.
+    pub(super) claim: Mutex<()>,
     pub(super) heartbeat: std::sync::Mutex<Option<Heartbeat>>,
     registration: std::sync::Mutex<Registration>,
+    pending_claim: std::sync::Mutex<Option<PendingClaim>>,
+    releases: std::sync::Mutex<HashMap<wire::Lease, PendingRelease>>,
     pub(super) token: std::sync::Mutex<Option<String>>,
     pub(super) can_claim: AtomicBool,
     pub(super) traces: Mutex<TraceCache>,
 }
 
 pub(super) struct Heartbeat {
-    pub(super) stop: oneshot::Sender<()>,
+    pub(super) stop: watch::Sender<bool>,
+    pub(super) stopped: watch::Receiver<bool>,
     pub(super) task: JoinHandle<()>,
 }
 
@@ -31,6 +36,17 @@ struct Registration {
     concurrency: Option<usize>,
 }
 
+struct PendingClaim {
+    value: wire::Claim,
+    key: String,
+    started: tokio::time::Instant,
+}
+
+struct PendingRelease {
+    key: String,
+    expires: tokio::time::Instant,
+}
+
 impl Runtime {
     pub(super) fn new(trace_cache_capacity: usize, trace_cache_bytes: usize) -> Self {
         Self {
@@ -38,8 +54,11 @@ impl Runtime {
             epoch: AtomicU64::new(0),
             lifecycle: Mutex::new(()),
             activity: RwLock::new(()),
+            claim: Mutex::new(()),
             heartbeat: std::sync::Mutex::new(None),
             registration: std::sync::Mutex::new(Registration::default()),
+            pending_claim: std::sync::Mutex::new(None),
+            releases: std::sync::Mutex::new(HashMap::new()),
             token: std::sync::Mutex::new(None),
             can_claim: AtomicBool::new(false),
             traces: Mutex::new(TraceCache::new(trace_cache_capacity, trace_cache_bytes)),
@@ -115,7 +134,7 @@ impl Runtime {
             .clone())
     }
 
-    pub(super) fn finish_registration(&self) {
+    pub(super) fn confirm_registration(&self) {
         self.registration
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -127,6 +146,94 @@ impl Runtime {
             .registration
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Registration::default();
+    }
+
+    pub(super) fn claim_operation(
+        &self,
+        claim: &wire::Claim,
+    ) -> Result<(String, tokio::time::Instant), scheduler::Error> {
+        let mut pending = self
+            .pending_claim
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(operation) = pending.as_ref() {
+            if operation.value == *claim {
+                return Ok((operation.key.clone(), operation.started));
+            }
+            return Err(scheduler::Error::Unavailable(
+                "API Scheduler has an unresolved claim with different parameters".to_string(),
+            ));
+        }
+
+        let key = uuid::Uuid::now_v7().to_string();
+        let started = tokio::time::Instant::now();
+        *pending = Some(PendingClaim {
+            value: claim.clone(),
+            key: key.clone(),
+            started,
+        });
+        Ok((key, started))
+    }
+
+    pub(super) fn confirm_claim(&self, key: &str) {
+        let mut pending = self
+            .pending_claim
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending
+            .as_ref()
+            .is_some_and(|operation| operation.key == key)
+        {
+            *pending = None;
+        }
+    }
+
+    pub(super) fn release_key(&self, lease: &wire::Lease, expires: tokio::time::Instant) -> String {
+        let now = tokio::time::Instant::now();
+        let mut releases = self
+            .releases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        releases.retain(|_, pending| pending.expires > now);
+        if let Some(pending) = releases.get(lease) {
+            return pending.key.clone();
+        }
+
+        let key = uuid::Uuid::now_v7().to_string();
+        if expires > now {
+            releases.insert(
+                lease.clone(),
+                PendingRelease {
+                    key: key.clone(),
+                    expires,
+                },
+            );
+        }
+        key
+    }
+
+    pub(super) fn confirm_release(&self, lease: &wire::Lease, key: &str) {
+        let mut releases = self
+            .releases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if releases
+            .get(lease)
+            .is_some_and(|pending| pending.key == key)
+        {
+            releases.remove(lease);
+        }
+    }
+
+    pub(super) fn clear_operations(&self) {
+        *self
+            .pending_claim
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.releases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     pub(super) fn is_configurable(&self) -> bool {
@@ -146,11 +253,34 @@ impl Runtime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(heartbeat);
     }
 
-    pub(super) fn take_heartbeat(&self) -> Option<Heartbeat> {
-        self.heartbeat
+    pub(super) async fn stop_heartbeat(&self) {
+        let Some(mut stopped) = self
+            .heartbeat
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+            .as_ref()
+            .map(Heartbeat::stop)
+        else {
+            return;
+        };
+        if *stopped.borrow() {
+            return;
+        }
+        while stopped.changed().await.is_ok() {
+            if *stopped.borrow() {
+                return;
+            }
+        }
+    }
+
+    pub(super) fn clear_stopped_heartbeat(&self) {
+        let mut heartbeat = self
+            .heartbeat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if heartbeat.as_ref().is_some_and(Heartbeat::is_stopped) {
+            heartbeat.take();
+        }
     }
 
     pub(super) fn abandon(&self) {
@@ -158,21 +288,29 @@ impl Runtime {
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.can_claim.store(false, Ordering::Release);
         self.clear_registration();
+        self.clear_operations();
         self.take_token();
-        if let Some(heartbeat) = self.take_heartbeat() {
-            heartbeat.abort();
-        }
+        self.heartbeat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }
 
 impl Heartbeat {
-    pub(super) async fn stop(self) {
-        let _ = self.stop.send(());
-        let _ = self.task.await;
+    fn stop(&self) -> watch::Receiver<bool> {
+        let _ = self.stop.send_replace(true);
+        self.stopped.clone()
     }
 
-    fn abort(self) {
-        let _ = self.stop.send(());
+    fn is_stopped(&self) -> bool {
+        *self.stopped.borrow()
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        let _ = self.stop.send_replace(true);
         self.task.abort();
     }
 }

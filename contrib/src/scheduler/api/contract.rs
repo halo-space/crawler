@@ -147,10 +147,6 @@ impl Api {
         self.require_open()?;
         Ok(activity)
     }
-
-    pub(super) fn invocation_key() -> String {
-        uuid::Uuid::now_v7().to_string()
-    }
 }
 
 fn header_value(value: &str) -> bool {
@@ -221,7 +217,7 @@ impl scheduler::Scheduler for Api {
             .open_key(concurrency)
             .map_err(scheduler::Error::Message)?;
         let token = worker::register(&self.client, &self.worker, concurrency, &key).await?;
-        self.runtime.finish_registration();
+        self.runtime.confirm_registration();
         let epoch = self
             .runtime
             .epoch
@@ -248,9 +244,8 @@ impl scheduler::Scheduler for Api {
         self.runtime.epoch.fetch_add(1, Ordering::AcqRel);
         self.runtime.can_claim.store(false, Ordering::Release);
 
-        if let Some(heartbeat) = self.runtime.take_heartbeat() {
-            heartbeat.stop().await;
-        }
+        self.runtime.stop_heartbeat().await;
+        self.runtime.clear_stopped_heartbeat();
         self.runtime.can_claim.store(false, Ordering::Release);
         if let Some(token) = self.runtime.token() {
             let worker_id = self.worker.id()?;
@@ -265,6 +260,7 @@ impl scheduler::Scheduler for Api {
             }
         }
         self.runtime.clear_registration();
+        self.runtime.clear_operations();
         self.runtime.traces.lock().await.clear();
         Ok(())
     }
