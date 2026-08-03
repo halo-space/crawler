@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[derive(Debug, Default)]
 pub(super) struct State {
     pub(super) trace_snapshots: HashMap<String, Arc<trace::Snapshot>>,
-    pub(super) request_digests: HashMap<String, [u8; 32]>,
+    pub(super) request_hashes: HashMap<String, [u8; 32]>,
     pub(super) queue: Queue,
     pub(super) processing: HashMap<String, net::Request>,
     pub(super) acknowledged: HashSet<(String, i64)>,
@@ -18,7 +18,7 @@ pub(super) struct State {
 
 impl State {
     pub(super) fn contains(&self, id: &str) -> bool {
-        self.request_digests.contains_key(id)
+        self.request_hashes.contains_key(id)
     }
 
     pub(super) fn queued_len(&self) -> usize {

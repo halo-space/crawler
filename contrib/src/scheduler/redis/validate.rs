@@ -32,21 +32,21 @@ pub(super) fn counter(value: &stats::Counter) -> bool {
         && value.download >= 0
 }
 
-pub(super) fn snapshot_digest(
+pub(super) fn snapshot_hash(
     snapshot: &net::request::Snapshot,
     expected: &str,
     id: &str,
 ) -> Result<(), scheduler::Error> {
     let actual = snapshot
-        .digest()
+        .hash()
         .map_err(|error| scheduler::Error::InvalidRequest {
             id: id.to_string(),
-            message: format!("stored Request Snapshot digest cannot be calculated: {error}"),
+            message: format!("stored Request Snapshot hash cannot be calculated: {error}"),
         })?;
     if hex(&actual) != expected {
         return Err(scheduler::Error::InvalidRequest {
             id: id.to_string(),
-            message: "stored Request Snapshot digest does not match its content".to_string(),
+            message: "stored Request Snapshot hash does not match its content".to_string(),
         });
     }
     Ok(())

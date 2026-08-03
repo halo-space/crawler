@@ -4,7 +4,7 @@
 
 `crawler` 是一个使用 Rust 编写的爬虫运行时。默认单进程形态提供内存调度器、HTTP 下载器、中间件
 生命周期、异步 Spider 处理器、规则模式、CSS Healing、AI Selector 和本地 JSONL 数据输出；`contrib`
-提供 Redis Scheduler 和分布式中间件，并保持同一套 Engine 合同。运行时已完成 Task/Trace 运行种子、
+提供 Redis/MySQL Scheduler 和分布式中间件，并保持同一套 Engine 合同。运行时已完成 Task/Trace 运行种子、
 按 Worker 能力领取 Request，以及确定性的响应字符集解码。
 
 完整的当前功能、运行模型与扩展边界见[架构与功能说明](architecture.zh-CN.md)。
@@ -92,8 +92,8 @@ Redis 会限制每次领取的重复维护工作：一次 `next_requests` 每个
 mode，最多提升并巡检 128 条延迟 Request。在回收、延迟提升、巡检或选择任务时发现单条 Request 记录缺失，
 会清理对应的悬挂索引；合法 processing Hash 的 score 或 mode 投影不一致会原地修复，不消费重试次数；
 Request Hash 或队列记录本身非法时才会移出活动索引，写入完成记录并转为失败终态。这些记录都不会阻塞
-后续正常 Request。领取返回前，Worker 会重新计算不可变 Request Snapshot 的摘要；摘要不一致会进入同一
-恢复路径，不会执行该 Request。已通过摘要验证的 Snapshot 重试上限不能被可变 Hash 覆盖；单条恢复失败也
+后续正常 Request。领取返回前，Worker 会重新计算不可变 Request Snapshot 的 hash；hash 不一致会进入同一
+恢复路径，不会执行该 Request。已通过 hash 验证的 Snapshot 重试上限不能被可变 Hash 覆盖；单条恢复失败也
 不能扣留同批合法 Request。共享索引的 Redis 类型损坏则会在状态写入前明确使本次领取失败。Request
 Snapshot 的 `max_retry_count` 必须位于 `1..=128`；恢复以不可变 Snapshot 为准，可变 Hash 不能扩大该值。
 当前 key 布局不迁移旧 Redis namespace，部署时使用新的 namespace。
@@ -109,6 +109,48 @@ mode 的 ready 写入不会丢失已有进度。选择不会越过尚未确认�
 Cluster 将作为独立 Scheduler 设计。需要可恢复持久化时，必须启用 AOF（`appendonly yes`）并配置
 `maxmemory-policy noeviction`。`appendfsync` 是运维侧在更强持久性与写入吞吐/延迟之间的选择
 （例如 `always` 与 `everysec`）。
+
+## MySQL Scheduler
+
+`contrib::scheduler::mysql::MySql` 面向 MySQL 9，完整实现与 Memory/Redis 相同的 `Scheduler` 和
+`Init` 合同。隔离边界直接使用 DSN 中选择的数据库，不增加 namespace：
+
+```rust
+use contrib::scheduler::mysql::MySql;
+use spider::{engine, net};
+
+let scheduler = MySql::new("mysql://crawler:secret@127.0.0.1:3306/crawler")?
+    .with_worker_id("worker-01")?
+    .with_worker_host("crawler-node-01")?
+    .with_worker_version("1.0.0")?
+    .with_modes([net::Mode::Http])?;
+
+let mut engine = engine::Engine::new()
+    .with_scheduler(scheduler)
+    .with_spider(BasicSpider::new())
+    .build();
+
+engine.start().await?;
+```
+
+建表由运维人员显式执行 [contrib/sql/mysql/schema.sql](../contrib/sql/mysql/schema.sql)。
+`MySql::open()` 不执行 DDL；它只建立连接池，校验七张必需表、全部运行期字段的类型和可空性、NO PAD 的
+`utf8mb4_0900_bin` 身份/合同文本列、`InnoDB` 和使用完整字段的原子性唯一键，然后注册 Worker 并启动心跳。
+所有连接使用 `READ COMMITTED`。领取先用 keyset 游标按 priority/FIFO 扫描候选，再通过
+`FOR UPDATE OF r SKIP LOCKED` 锁定事实 Request；锁住的队首会被跳过并继续向后扫描，直到拿满请求数量或
+确实没有合格候选。领取、租约恢复、
+ack/release、续租、成功/失败结算、统计合并和重试入队都在数据库事务内完成。
+
+`requests.snapshot` 保存不可变 JSON Snapshot，`snapshot_hash` 保存 32 字节 SHA-256；
+`queues.sequence` 每次重新入队都会生成新的自增序号，因此优先级相同时保持与 Redis 相同的 FIFO
+语义。`created_time / updated_time` 使用 `DATETIME(3)` 便于运维查询；`lease_time`、`next_time`、
+`start_time / end_time` 等运行期时间继续使用毫秒整数，与其他 Scheduler 语义一致。
+
+MySQL Scheduler 直接操作 DSN 数据库，不经过 Master。无法向 Worker 开放数据库连接时，使用下面的
+API Scheduler，由独立 Master 项目在服务端实现同一套事务语义。两者只是不同的 Scheduler 装配，
+Item 仍由 Worker 上独立配置的 Store 持久化。
+
+## API Scheduler
 
 API Scheduler 使用已有 HTTP transport、namespace 和认证，同时持有完全相同的 Worker 配置与生命周期：
 
@@ -628,8 +670,8 @@ Reporter 未安装、当前 Request 未被采样或编译期 feature 未开启�
 - 本地 JSONL Item 输出
 
 每个 Scheduler 自己持有 Worker 身份和支持的下载模式；Engine 只向 `open(concurrency)` 传入冻结的
-并发数，并向 `next_requests(limit)` 传入批次上限。能力筛选必须和领取原子完成。Redis 是当前可用的
-持久化 Scheduler 实现，并已通过共享 Scheduler 一致性测试。
+并发数，并向 `next_requests(limit)` 传入批次上限。能力筛选必须和领取原子完成。Redis 与 MySQL 是当前
+可用的持久化 Scheduler 实现，并已通过共享 Scheduler 一致性测试。
 Worker 侧 `contrib::scheduler::api::Api` 适配器也已经实现；对应 Master 服务不属于这个 workspace。
 本仓库只维护 Worker 侧适配器及其客户端 HTTP 合同；Master 服务、服务端协议、数据库、Cron、Control
 API、前端及其设计由独立项目负责。
@@ -637,7 +679,7 @@ API、前端及其设计由独立项目负责。
 属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
 `ai::OpenAI` provider，Rules 只保留提示词。
 Memory 使用内部身份 `local`，默认支持 HTTP，可通过 `Memory::with_modes(...)` 替换能力集合；它不注册、
-也不发送心跳。Redis 和 API 要求在 Scheduler 上配置稳定的 Worker ID、host 和 version，
+也不发送心跳。Redis、MySQL 和 API 要求在 Scheduler 上配置稳定的 Worker ID、host 和 version，
 `with_modes(...)` 冻结其下载能力。缺少元数据或 mode 集合为空会在 Scheduler 配置/open 时被拒绝。
 
 媒体对象规范化不会下载文件。Item 附件下载规划为独立的 v5 变更；它与 Browser Downloader 并列，

@@ -124,7 +124,7 @@ for index, request in ipairs(requests) do
         'mode', request.mode,
         'priority', request.priority,
         'snapshot', request.snapshot,
-        'digest', request.digest,
+        'snapshot_hash', request.snapshot_hash,
         'state', 'pending',
         'version', request.version,
         'next_time', request.next_time,

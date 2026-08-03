@@ -15,9 +15,9 @@ async fn replace_snapshot_url(
         .query_async(connection)
         .await
         .unwrap();
-    let digest: String = redis::cmd("HGET")
+    let snapshot_hash: String = redis::cmd("HGET")
         .arg(&key)
-        .arg("digest")
+        .arg("snapshot_hash")
         .query_async(&mut *connection)
         .await
         .unwrap();
@@ -35,13 +35,13 @@ async fn replace_snapshot_url(
 
     let unchanged: String = redis::cmd("HGET")
         .arg(&key)
-        .arg("digest")
+        .arg("snapshot_hash")
         .query_async(&mut *connection)
         .await
         .unwrap();
     assert_eq!(
-        unchanged, digest,
-        "the tamper must not update the stored digest"
+        unchanged, snapshot_hash,
+        "the tamper must not update the stored Snapshot hash"
     );
 }
 
@@ -100,7 +100,7 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert!(error.contains("digest does not match its content"));
+    assert!(error.contains("hash does not match its content"));
     assert!(!scheduler.has_pending_requests().await.unwrap());
 
     scheduler.close().await.unwrap();
@@ -252,10 +252,10 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
 
     let mut connection = server.connection().await;
     let source_key = key::request(&namespace, "retry-source");
-    let (snapshot, digest): (String, String) = redis::cmd("HMGET")
+    let (snapshot, snapshot_hash): (String, String) = redis::cmd("HMGET")
         .arg(&source_key)
         .arg("snapshot")
-        .arg("digest")
+        .arg("snapshot_hash")
         .query_async(&mut connection)
         .await
         .unwrap();
@@ -264,8 +264,8 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
         .arg(&target_key)
         .arg("snapshot")
         .arg(snapshot)
-        .arg("digest")
-        .arg(digest)
+        .arg("snapshot_hash")
+        .arg(snapshot_hash)
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();

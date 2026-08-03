@@ -3,12 +3,12 @@
 [简体中文](README.zh-CN.md) | English
 
 `crawler` is a Rust crawler runtime for code-driven and YAML Rules-driven workloads. The same Engine
-contract supports local execution and durable Redis scheduling.
+contract supports local execution and durable Redis or MySQL 9 scheduling.
 
 ## Highlights
 
 - Code mode and YAML Rules mode share the same Spider, Request, Response, Item, Middleware, and Engine.
-- Memory and Redis Scheduler implementations, plus the Worker-side API Scheduler adapter, use one
+- Memory, Redis, and MySQL Scheduler implementations, plus the Worker-side API Scheduler adapter, use one
   scheduling contract.
 - HTTP downloading includes retries, bounded bodies, redirects, cookies, proxy/TLS settings, and
   deterministic response decoding.
@@ -45,7 +45,7 @@ engine.start().await?;
 
 `start()` keeps the Worker alive while the queue is empty and shuts down cleanly on SIGINT/SIGTERM.
 The default runtime uses the in-memory Scheduler and writes Items as JSONL below `./data/items/`.
-Redis replaces only the scheduling dependency; Item persistence remains independently
+Redis or MySQL replaces only the scheduling dependency; Item persistence remains independently
 replaceable.
 
 ## Workspace
@@ -54,7 +54,7 @@ replaceable.
 | --- | --- |
 | `spider` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
 | `macros` | Spider, handler, and Item derive macros |
-| `contrib` | Redis Scheduler, the Worker-side API Scheduler adapter, and distributed middleware implementations |
+| `contrib` | Redis/MySQL Schedulers, the Worker-side API Scheduler adapter, and distributed middleware implementations |
 | `examples` | Executable code-mode and Rules-mode examples |
 
 ## Documentation

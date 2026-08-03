@@ -136,20 +136,20 @@ impl scheduler::Scheduler for Memory {
         let mut queued = Vec::with_capacity(payload.requests.len());
         for request in payload.requests {
             let snapshot = queue::snapshot(request)?;
-            let digest = snapshot
-                .digest()
+            let snapshot_hash = snapshot
+                .hash()
                 .map_err(|error| scheduler::Error::Message(error.to_string()))?;
-            queued.push((snapshot, digest));
+            queued.push((snapshot, snapshot_hash));
         }
 
         let mut state = self.state();
         if let Some(id) = queued
             .iter()
-            .find(|(snapshot, digest)| {
+            .find(|(snapshot, snapshot_hash)| {
                 state
-                    .request_digests
+                    .request_hashes
                     .get(&snapshot.id)
-                    .is_some_and(|current| current != digest)
+                    .is_some_and(|current| current != snapshot_hash)
             })
             .map(|(snapshot, _)| snapshot.id.as_str())
         {
@@ -159,11 +159,13 @@ impl scheduler::Scheduler for Memory {
         }
         validate::ownership(&state, queued.iter().map(|(snapshot, _)| snapshot))?;
         let now = crate::utils::time::now_millis();
-        for (snapshot, digest) in queued {
+        for (snapshot, snapshot_hash) in queued {
             if state.contains(&snapshot.id) {
                 continue;
             }
-            state.request_digests.insert(snapshot.id.clone(), digest);
+            state
+                .request_hashes
+                .insert(snapshot.id.clone(), snapshot_hash);
             state.enqueue(snapshot, now);
         }
         Ok(())
@@ -370,10 +372,10 @@ impl scheduler::Init for Memory {
         let mut queue = Vec::with_capacity(requests.len());
         for request in requests {
             let snapshot = queue::snapshot(request)?;
-            let digest = snapshot
-                .digest()
+            let snapshot_hash = snapshot
+                .hash()
                 .map_err(|error| scheduler::Error::Message(error.to_string()))?;
-            queue.push((snapshot, digest));
+            queue.push((snapshot, snapshot_hash));
         }
 
         let mut state = self.state();
@@ -394,8 +396,10 @@ impl scheduler::Init for Memory {
 
         state.trace_snapshots.insert(trace_id, Arc::new(snapshot));
         let now = crate::utils::time::now_millis();
-        for (snapshot, digest) in queue {
-            state.request_digests.insert(snapshot.id.clone(), digest);
+        for (snapshot, snapshot_hash) in queue {
+            state
+                .request_hashes
+                .insert(snapshot.id.clone(), snapshot_hash);
             state.enqueue(snapshot, now);
         }
         Ok(())

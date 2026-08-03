@@ -1,7 +1,7 @@
 mod body;
 pub mod config;
 mod contract;
-pub mod digest;
+pub mod hash;
 pub mod snapshot;
 mod template;
 mod transport;

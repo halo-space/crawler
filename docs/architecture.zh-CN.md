@@ -4,7 +4,7 @@
 
 ## 1. 定位与当前范围
 
-`crawler` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 提供 Redis 7 单实例 Scheduler，用于持久化多 Worker 队列。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
+`crawler` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 提供 Redis 7 单实例与 MySQL 9 Scheduler，用于持久化多 Worker 队列。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
 
 当前 workspace 包含四个 crate：
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | `spider` | 核心运行时、公共数据对象、扩展合同，以及默认 Memory Scheduler 和 HTTP Downloader |
 | `macros` | `#[spider]` 过程宏；生成代码模式 Spider 的构造、node 注册和分发连接代码 |
-| `contrib` | Redis Scheduler、Worker 侧 API Scheduler 适配器与分布式 Middleware 实现 |
+| `contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式 Middleware 实现 |
 | `examples` | 可运行的代码模式和 Rules 模式示例 |
 
 ### 1.1 能力状态
@@ -34,6 +34,7 @@
 | Item Store | 已实现 | 独立的 `open / close / submit(&Payload)` 持久化合同；默认 JSONL 输出与 Jsonl 自管失败快照；附件下载计划在 v5 实现 |
 | Worker 能力领取 | 已实现 | 每个 Scheduler 自己持有冻结的 Request modes，能力筛选与后端领取保持原子 |
 | Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；完整实现 namespace Scheduler/Init、Worker 注册/心跳与 Lua 原子转换 |
+| MySQL Scheduler | 已实现 | MySQL 9；使用 DSN 数据库隔离、显式建表脚本、事务领取/结算与 Worker 注册/心跳 |
 | API Scheduler 适配器 | 已实现 | 通过外部 Master API 完成注册/心跳的 Worker 侧 Scheduler；Master 服务属于独立项目 |
 | 运行期链路追踪 | 已实现 | 可选的逐 Request `fastrace` 根链路与有界生命周期 span；不等于业务 `trace_id` |
 
@@ -73,6 +74,7 @@ flowchart LR
     S["Scheduler 合同"]
     M["Memory Scheduler"]
     Z["Redis 7 Scheduler"]
+    Q["MySQL 9 Scheduler"]
     W["Request 执行任务"]
     MW["Middleware Registry"]
     D["Downloader"]
@@ -90,6 +92,7 @@ flowchart LR
     A --> S
     S --> M
     S --> Z
+    S --> Q
     A --> W
     W --> MW
     W --> D
@@ -229,7 +232,7 @@ Event permit 在 `Tx` 发送前获取，并在 Engine Actor 开始处理该 Even
 ### 5.2 空闲轮询与关闭
 
 一次 `next_requests(limit)` 返回空集合只表示当前领取没有结果，不能结束仍在运行的 Worker。Actor 按
-启动时冻结的空闲间隔等待后继续领取，并且始终最多只有一个领取调用。这样 Redis 或 API Scheduler
+启动时冻结的空闲间隔等待后继续领取，并且始终最多只有一个领取调用。这样 Redis、MySQL 或 API Scheduler
 在进程启动后收到的新任务无需重新启动 Engine 就能被消费。
 
 临时领取错误使用有界的本地重试。后续重试成功返回 Request 时，整批租约调度仍使用第一次尝试的开始
@@ -311,7 +314,7 @@ Memory 在一个受互斥锁保护的状态中原子维护队列、已知 Reques
 
 - 同一 payload 内的重复 Request ID 会被拒绝；已存在 ID 与初始 Request Snapshot 完全一致时是 no-op，不同 Snapshot 则冲突并拒绝整批；
 - 一批数据同时包含一致的已有 Snapshot 和新 Request 时，只原子写入缺失 Request；
-- Memory 保存每个规范化初始 Request Snapshot 的 SHA-256 摘要用于重放比较；这是 Scheduler 身份保护，不是 URL 或业务去重；
+- Memory 保存每个规范化初始 Request Snapshot 的 SHA-256 hash 用于重放比较；这是 Scheduler 身份保护，不是 URL 或业务去重；
 - ID 去重防止同一 Request 对象重复入队，URL 或业务字段去重仍由 Dedup Middleware 负责；
 - ready 队列先按较高 `priority` 出队，同优先级按 FIFO；未来执行时间由 delayed 队列管理；
 - `Memory::new()` 只拥有进程内 Scheduler 状态，内部身份固定为 `local`，默认只支持 HTTP；`Memory::with_modes(...)` 可替换启动时冻结的 mode 集合；
@@ -389,9 +392,9 @@ mode 的低优先级候选。`has_pending_requests` 直接比较两个队列的�
 提升、巡检或 ready 队列选择发现记录缺失时，会移除悬挂的索引项；合法 Hash 对应的 processing 投影不一致
 会原地修复；Request 或队列状态本身损坏时，才会移除其活动索引、记录终态失败及完成记录，然后继续选择
 后续正常 Request。这不会吞掉共享索引损坏：共享索引的 Redis 类型非法时，领取会在任何状态写入前失败。
-ready 队列清理同样最多丢弃 128 条非法条目，之后交给下一次领取继续处理。Claim 会把持久化摘要与不可变
-Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算规范摘要，不一致时按 key 片段恢复且不会
-返回为可执行任务。摘要有效时，其中不可变的重试上限控制恢复并修正可变 Hash 中的不一致值。单条损坏记录
+ready 队列清理同样最多丢弃 128 条非法条目，之后交给下一次领取继续处理。Claim 会把持久化 hash 与不可变
+Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算规范 hash，不一致时按 key 片段恢复且不会
+返回为可执行任务。hash 有效时，其中不可变的重试上限控制恢复并修正可变 Hash 中的不一致值。单条损坏记录
 恢复失败不能扣留同一次原子领取中的合法 Request；损坏记录继续保持 processing，交给正常租约超时恢复。
 每个 Request Snapshot 的 `max_retry_count` 必须位于 `1..=128`；恢复以不可变 Snapshot 为准，并以此约束
 失败 Worker 历史，可变 Hash 不能扩大该值。当前内部 key 布局不迁移旧 Redis namespace。
@@ -402,30 +405,60 @@ Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算�
 持久化强度与写入吞吐/延迟之间选择：`always` 缩小持久化窗口但降低吞吐，`everysec` 通常吞吐更高，
 但已确认写入可能暴露约一秒。Redis 容量应与独立配置的 Item Store 分开监控。
 
-### 6.4 分布式 Worker 注册
+### 6.4 MySQL 9 实现与事务边界
 
-Redis 保存 `worker_id`、host、version、modes、concurrency、`last_heartbeat`、后端生成的 token、
+`contrib::scheduler::mysql::MySql` 是另一套完整的 `Scheduler` 和 `Init` 实现，Worker 直接连接 DSN
+指定的 MySQL 9 数据库。数据库名就是隔离边界，不增加 namespace。生产表由运维人员执行
+`contrib/sql/mysql/schema.sql` 创建；`open()` 不执行 DDL，只建立连接池，并校验必需表、关键列、
+`InnoDB`、NO PAD 的 `utf8mb4_0900_bin` 身份/合同文本列，以及保证 Request/队列/结算唯一性的索引。
+
+连接会话固定使用 `READ COMMITTED`。领取先按全局 priority/FIFO 顺序使用 keyset 游标扫描队列，再用
+`FOR UPDATE OF r SKIP LOCKED` 逐条重新校验并锁定候选 Request。另一个领取或 Request 重放持有的锁会被
+直接跳过，游标继续越过该有序前缀，直到拿满请求数量或确实没有合格候选。这样既规避 MySQL
+先应用 `LIMIT`、再执行 `SKIP LOCKED` 导致的少领，也不串行化并发 Worker。领取不会等待重放持有的
+Request 锁；重放可能短暂等待当前事务已经领中的 Request，但领取遇到后续由重放锁住的记录会直接跳过，
+因此不会闭合成反向锁序死锁。领取事务推进 version、写入
+`leased_by`、删除队列成员，并在提交前使用数据库当前时间统一刷新所有返回 Request 的 `lease_time`。过期租约恢复、ack、
+release、refresh、success、failure、失败 Worker 记录、completion、Trace stats 与重试重新入队也分别
+在单个事务中完成；SQLx 的 MySQL 原生错误号用于区分临时可用性错误、唯一键冲突和统计溢出。
+
+`requests` 是可变执行状态的事实来源，同时保存不可变 `snapshot JSON` 与 `snapshot_hash BINARY(32)`。
+`queues` 只保存 pending 投影；每次 release、失败重试或租约恢复重新入队时都会获得新的自增
+`sequence`，与 Redis 一样按 priority 后 FIFO 领取。`failed_workers` 按 position 保存排除历史，
+`completions(request_id, version)` 保证结算重放幂等，`trace_stats` 在结算事务中原子累加。
+
+所有表都有 `DATETIME(3)` 的 `created_time / updated_time` 供运维观察；`next_time`、`lease_time`、
+`last_heartbeat`、`offline_time` 和执行起止时间继续使用毫秒整数，以保持 Scheduler 合同一致。
+MySQL Scheduler 同样直接维护 `workers` 表和心跳。它不经过 Master，也不持久化 Item；API Scheduler
+仍是数据库凭据不能下发给 Worker 时的可替换远程入口，Master 实现属于独立项目。
+
+### 6.5 分布式 Worker 注册
+
+Redis 与 MySQL 保存 `worker_id`、host、version、modes、concurrency、`last_heartbeat`、注册 token、
 `offline_time` 与 `created_time`。未来的 Master 服务端持有对应的 API Worker 记录，并可从连接来源补充
-可选 IP；Worker 侧 API Scheduler 适配器不持久化这些服务端状态。Redis 还保存本次配置的心跳超时，
+可选 IP；Worker 侧 API Scheduler 适配器不持久化这些服务端状态。Redis 与 MySQL 还保存本次配置的心跳超时，
 因此已有注册使用自己的超时判断在线状态，新进程不能通过缩短超时抢占它。每次成功的新注册都会替换元数据、
-时间和 token，并清空 `offline_time`；crawler 合同不增加 instance ID、state 枚举、更新时间或注册历史。
-Redis 的 IP 留空，API 服务端可以从连接来源补充。Token 在 Worker ID 被重新注册后隔离旧进程的心跳与
+时间和 token，并清空 `offline_time`；Worker 逻辑合同不增加 instance ID、state 枚举或注册历史。
+MySQL 仍按 workspace 的统一表约束保留 `updated_time` 供运维查看。
+Redis/MySQL 的 IP 留空，API 服务端可以从连接来源补充。Token 在 Worker ID 被重新注册后隔离旧进程的心跳与
 显式离线更新，但不参与领取、pending、Request 租约或结算校验。
 
 每个分布式 Scheduler 句柄只在本地运行期内保留尚未确认响应的注册操作 key。API 将它作为请求幂等键，
-Redis 将它作为 Lua 的临时参数，用于生成并识别同一个已存 token，不向 Worker Hash 增加字段。重放会恢复
+并接收服务端生成的 token；Redis 用 Lua 从该 key 派生 token，MySQL 则对 Worker ID 与本地操作 key
+计算 hash 后写入注册行。重放会恢复
 在线心跳状态且不修改 `created_time`；注册响应确认后立即清除本地 key，下一轮生命周期使用新的注册。
-进程退出也会丢失这份本地恢复状态，随后仍按正常心跳超时恢复。Redis 领取只在 Worker 合法显式离线或
-心跳超时时返回空集合；Worker 不存在、Redis 类型错误、身份不一致以及心跳或离线字段损坏都返回
+进程退出也会丢失这份本地恢复状态，随后仍按正常心跳超时恢复。Redis/MySQL 领取只在 Worker 合法显式离线或
+心跳超时时返回空集合；Worker 不存在，或注册、心跳、离线元数据损坏/不兼容时返回
 Scheduler 错误，不能伪装成队列暂时为空。
 第一次注册尝试会把 concurrency 与操作 key 一起冻结；重放必须使用相同 concurrency，直到 `close()`
 结束本轮生命周期后才能换值。只要仍保留未完成注册 key 或已经确认的 token，Scheduler 配置就保持冻结，
-避免重试时把旧恢复状态用于另一个 Worker 或 namespace；显式 `close()` 可以放弃尚未确认的本地注册。Redis 在新注册或重放成功时
-原子重建 Worker Hash，只保留文档约定的持久字段。
+避免重试时把旧恢复状态用于另一个 Worker 或 namespace/数据库；显式 `close()` 可以放弃尚未确认的本地注册。
+新注册或过期 Worker 接管会原子重建 Redis Hash 或替换 MySQL 行；重放只恢复心跳/在线字段，并保留
+`created_time`。
 
 API Scheduler 使用现有认证客户端调用 `GET /v1/worker/policy` 以及 `POST /v1/worker/register`、
-`/heartbeat`、`/offline`。API 心跳间隔来自服务端 policy，Redis 的间隔与超时在本地 Scheduler 配置。
-两种实现都只用心跳在线状态控制后续领取。它与 Request 执行权明确分离：Worker 离线不会取消已经由
+`/heartbeat`、`/offline`。API 心跳间隔来自服务端 policy，Redis/MySQL 的间隔与超时在本地 Scheduler 配置。
+三种分布式实现都只用心跳在线状态控制后续领取。它与 Request 执行权明确分离：Worker 离线不会取消已经由
 `next_requests` 返回的 Request，Request 续租成功也不能证明 Worker 仍处于注册在线状态。
 
 API 的 claim 和 release 在结果未确认时保留各自的 `Idempotency-Key`。传输错误、超时或成功响应无法
@@ -860,7 +893,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `spider/src/scheduler/contract.rs` | Scheduler 公共合同 |
 | `spider/src/scheduler/init.rs` | 运行种子初始化合同 |
 | `spider/src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |
-| `spider/src/net/request/digest.rs` | 对初始 Request Snapshot 做规范化流式摘要，供 Memory 与 Redis 共用重放比较 |
+| `spider/src/net/request/hash.rs` | 计算初始 Request Snapshot 的规范 hash，供 Memory、Redis 与 MySQL 共用重放比较 |
 | `spider/src/scheduler/memory/claim.rs` | 协调一次按能力领取，从排队 Snapshot 生成 processing Request |
 | `spider/src/scheduler/memory/queue.rs` | ready/delayed 排队顺序 |
 | `spider/src/scheduler/memory/reclaim.rs` | 回收已 ack 与未 ack 的过期租约 |
@@ -888,6 +921,12 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `contrib/src/scheduler/redis/trace.rs` | Redis Trace Snapshot 读取与校验 |
 | `contrib/src/scheduler/redis/settle.rs` | Redis ack、release、续租、success 与 failure 转换 |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | key 隔离、Lua 加载、边界校验和错误映射 |
+| `contrib/src/scheduler/mysql/contract.rs` | MySQL 对外类型、连接池生命周期及 Scheduler/Init 合同连接 |
+| `contrib/src/scheduler/mysql/request.rs` | 事务重放、有序游标领取、Request 恢复和租约回收 |
+| `contrib/src/scheduler/mysql/trace.rs` | 事务化运行初始化与 Trace Snapshot 读取 |
+| `contrib/src/scheduler/mysql/settle.rs` | MySQL ack、release、续租、success/failure、completion 与统计转换 |
+| `contrib/src/scheduler/mysql/worker.rs` | MySQL Worker 注册、在线领取门禁、心跳与离线生命周期 |
+| `contrib/src/scheduler/mysql/{schema,decode,error}.rs` | schema/collation 校验、MySQL 9 文本解码与原生错误分类 |
 | `contrib/src/scheduler/api/worker.rs` | API Worker 注册、心跳与离线协议 |
 | `contrib/src/scheduler/api/request/claim.rs` | API 批量领取、Trace 去重并发恢复、错误分类和租约约束下的结算 |
 | `contrib/src/scheduler/api/request/trace.rs` | API Trace 读取、缓存与校验 |
@@ -902,7 +941,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 ### 版本边界
 
 - v3：按 Worker 能力范围原子领取 Request；确定性响应字符集解码，以及基于 fixture 的更完整页面回归。这些合同均已实现。
-- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例 Scheduler、RedisBloom Dedup、共享 Redis RateLimit、Engine 级 Worker 本地 `ai::OpenAI` provider 注入，以及可选的逐 Request `fastrace` 运行期追踪均已实现。
+- v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例与 MySQL 9 Scheduler、RedisBloom Dedup、共享 Redis RateLimit、Engine 级 Worker 本地 `ai::OpenAI` provider 注入，以及可选的逐 Request `fastrace` 运行期追踪均已实现。
 - v5：真实 Browser Downloader、HTTP/browser 混合端到端 Engine 验收，以及独立的 Item 附件下载。附件下载和 Browser 下载是互不依赖的两个交付项；按能力领取的语义仍属于 v3 合同。
 
 这些能力必须沿用当前核心合同：

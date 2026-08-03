@@ -72,7 +72,7 @@ for _, request in ipairs(requests) do
         return 'CORRUPT_DELAYED_QUEUE'
     end
     local exists = redis.call('EXISTS', key)
-    if exists == 1 and redis.call('HGET', key, 'digest') ~= request.digest then
+    if exists == 1 and redis.call('HGET', key, 'snapshot_hash') ~= request.snapshot_hash then
         return 'CONFLICT:' .. request.id
     end
 end
@@ -137,7 +137,7 @@ for _, request in ipairs(requests) do
             'mode', request.mode,
             'priority', request.priority,
             'snapshot', request.snapshot,
-            'digest', request.digest,
+            'snapshot_hash', request.snapshot_hash,
             'state', 'pending',
             'version', request.version,
             'next_time', request.next_time,

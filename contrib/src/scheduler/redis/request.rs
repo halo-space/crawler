@@ -61,7 +61,7 @@ struct Queued {
     retry_count: i32,
     max_retry_count: i32,
     snapshot: String,
-    digest: String,
+    snapshot_hash: String,
 }
 
 #[derive(Deserialize)]
@@ -79,7 +79,7 @@ struct Claimed {
     leased_by: String,
     lease_time: String,
     snapshot: String,
-    digest: String,
+    snapshot_hash: String,
     trace: Option<String>,
     #[serde(default)]
     failed_workers: Vec<String>,
@@ -97,8 +97,8 @@ impl Redis {
     fn stored(request: net::Request) -> Result<Queued, scheduler::Error> {
         let snapshot =
             net::request::Snapshot::try_from(request).map_err(scheduler::Error::Message)?;
-        let digest = snapshot
-            .digest()
+        let snapshot_hash = snapshot
+            .hash()
             .map_err(|error| scheduler::Error::Message(error.to_string()))?;
         let id = snapshot.id.clone();
         Ok(Queued {
@@ -114,7 +114,7 @@ impl Redis {
             retry_count: snapshot.retry_count,
             max_retry_count: snapshot.max_retry_count,
             snapshot: serde_json::to_string(&snapshot).map_err(message)?,
-            digest: validate::hex(&digest),
+            snapshot_hash: validate::hex(&snapshot_hash),
         })
     }
 
@@ -417,7 +417,7 @@ impl Redis {
                 id: claimed.id.clone(),
                 message: error.to_string(),
             })?;
-        validate::snapshot_digest(&snapshot, &claimed.digest, &claimed.id)?;
+        validate::snapshot_hash(&snapshot, &claimed.snapshot_hash, &claimed.id)?;
         let mode = parse_mode(&claimed.mode)?;
         for (field, matches) in [
             ("id", snapshot.id == claimed.id),
@@ -520,8 +520,8 @@ impl Redis {
 
 fn snapshot_retry_limit(claimed: &Claimed) -> Option<i32> {
     let snapshot = serde_json::from_str::<net::request::Snapshot>(&claimed.snapshot).ok()?;
-    let actual = snapshot.digest().ok()?;
-    let matches = validate::hex(&actual) == claimed.digest
+    let actual = snapshot.hash().ok()?;
+    let matches = validate::hex(&actual) == claimed.snapshot_hash
         && snapshot.id == claimed.id
         && snapshot.task_id == claimed.task_id
         && snapshot.trace_id == claimed.trace_id

@@ -4,7 +4,7 @@
 
 `crawler` is a Rust crawler runtime. Its default single-process topology uses the in-memory
 Scheduler, HTTP downloader, middleware hooks, async Spider handlers, CSS healing, explicit AI
-selectors, and local JSONL item output. `contrib` provides a Redis Scheduler and distributed
+selectors, and local JSONL item output. `contrib` provides Redis/MySQL Schedulers and distributed
 middleware while preserving the same Engine contract. The runtime includes Task/Trace run seeds,
 capability-aware Scheduler claims, and deterministic response charset decoding.
 
@@ -92,7 +92,7 @@ for each requested mode. Missing per-Request records found while recovering, pro
 or selecting work have their dangling indexes removed. A valid processing Hash repairs a stale score
 or misplaced mode projection without consuming a retry; an invalid Hash or queue record is removed
 from active indexes and moved to terminal failure with a completion record. Neither blocks later valid
-Requests. Before returning a claim, the Worker recalculates the immutable Request Snapshot digest;
+Requests. Before returning a claim, the Worker recalculates the immutable Request Snapshot hash;
 a mismatch follows the same recovery path and is never executed. A verified Snapshot retry limit
 cannot be overridden by the mutable Hash, and a failed recovery cannot withhold valid Requests from
 the same claim. A corrupt shared index type instead fails the claim explicitly before state mutation.
@@ -115,6 +115,53 @@ multi-key Lua transitions rely on single-instance atomicity, so Cluster will be 
 design. For durable use, enable AOF (`appendonly yes`) and set `maxmemory-policy noeviction`.
 `appendfsync` is an operator choice between stronger durability and write throughput/latency (for
 example, `always` versus `everysec`).
+
+## MySQL Scheduler
+
+`contrib::scheduler::mysql::MySql` targets MySQL 9 and completely implements the same `Scheduler`
+and `Init` contracts as Memory and Redis. Isolation comes directly from the database selected by the
+DSN; there is no additional namespace:
+
+```rust
+use contrib::scheduler::mysql::MySql;
+use spider::{engine, net};
+
+let scheduler = MySql::new("mysql://crawler:secret@127.0.0.1:3306/crawler")?
+    .with_worker_id("worker-01")?
+    .with_worker_host("crawler-node-01")?
+    .with_worker_version("1.0.0")?
+    .with_modes([net::Mode::Http])?;
+
+let mut engine = engine::Engine::new()
+    .with_scheduler(scheduler)
+    .with_spider(BasicSpider::new())
+    .build();
+
+engine.start().await?;
+```
+
+Operators explicitly install [contrib/sql/mysql/schema.sql](../contrib/sql/mysql/schema.sql).
+`MySql::open()` never executes DDL. It creates the pool, validates the seven required tables, all
+operational column types and nullability, NO PAD `utf8mb4_0900_bin` identity/contract text, `InnoDB`,
+and full-column atomicity-critical unique keys, then registers the Worker and starts its heartbeat.
+Connections use `READ COMMITTED`. Claim scans priority/FIFO candidates with a keyset cursor and locks
+each authoritative Request with `FOR UPDATE OF r SKIP LOCKED`. A locked prefix is skipped and scanning
+continues until the requested limit is filled or no eligible candidate remains. Claim, lease recovery,
+ack/release, lease refresh, success/failure settlement, statistics merging, and retry enqueueing use
+database transactions.
+
+`requests.snapshot` stores the immutable JSON Snapshot and `snapshot_hash` stores its 32-byte
+SHA-256. Every transition back into `queues` receives a new auto-increment `sequence`, preserving the
+same priority-then-FIFO semantics as Redis. `created_time / updated_time` are `DATETIME(3)` for
+operations and inspection; runtime timestamps such as `lease_time`, `next_time`, and
+`start_time / end_time` remain integer milliseconds across Scheduler implementations.
+
+The MySQL Scheduler connects directly to its DSN database and does not pass through Master. Where
+Workers cannot receive database credentials, use the API Scheduler below and implement the same
+transaction semantics in the separate Master project. Both are replaceable Scheduler assemblies;
+Items still go to the independently configured Worker Store.
+
+## API Scheduler
 
 The API Scheduler owns the same Worker configuration and lifecycle while using its existing HTTP
 transport, namespace, and authentication:
@@ -664,8 +711,8 @@ cargo doc --workspace --no-deps
 
 Each Scheduler owns its Worker identity and supported download modes; Engine supplies only frozen
 concurrency to `open(concurrency)` and a batch size to `next_requests(limit)`. Capability filtering
-must remain atomic with claim. Redis is the available
-persistent Scheduler implementation and is covered by the shared Scheduler conformance suite.
+must remain atomic with claim. Redis and MySQL are the available
+persistent Scheduler implementations and are covered by the shared Scheduler conformance suite.
 The Worker-side `contrib::scheduler::api::Api` adapter is also implemented. Its corresponding Master
 service is not part of this workspace. This repository maintains only the Worker-side adapter and its
 client-side HTTP contract; a separate project owns the Master service, server-side protocol, database,
@@ -674,7 +721,7 @@ Optional `fastrace` runtime tracing is implemented; a real Browser Downloader an
 end-to-end execution remain v5 work. AI provider configuration is already Worker-local: one reusable
 `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.
 Memory uses the internal identity `local`, defaults to HTTP mode, and can replace its capability set
-with `Memory::with_modes(...)`; it does not register or heartbeat. Redis and API require stable Worker
+with `Memory::with_modes(...)`; it does not register or heartbeat. Redis, MySQL, and API require stable Worker
 ID, host, and version values on the Scheduler, while `with_modes(...)` freezes their download
 capabilities. Missing metadata or an empty mode set is rejected during Scheduler configuration/open.
 

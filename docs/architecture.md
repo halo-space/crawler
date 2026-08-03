@@ -4,7 +4,7 @@ This document describes the features implemented by the current source tree, the
 
 ## 1. Positioning and Current Scope
 
-`crawler` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` provides a Redis 7 standalone Scheduler for durable multi-Worker queues. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
+`crawler` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` provides Redis 7 standalone and MySQL 9 Schedulers for durable multi-Worker queues. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
 
 The workspace contains four crates:
 
@@ -12,7 +12,7 @@ The workspace contains four crates:
 | --- | --- |
 | `spider` | Core runtime, public data objects, extension contracts, default Memory Scheduler, and HTTP Downloader |
 | `macros` | The `#[spider]` procedural macro, including code-mode construction, node registration, and dispatch bindings |
-| `contrib` | Replaceable Redis Scheduler, Worker-side API Scheduler adapter, and distributed Middleware implementations |
+| `contrib` | Replaceable Redis/MySQL Schedulers, Worker-side API Scheduler adapter, and distributed Middleware implementations |
 | `examples` | Runnable code-mode and Rules-mode examples |
 
 ### 1.1 Capability Status
@@ -34,6 +34,7 @@ The workspace contains four crates:
 | Item Store | Implemented | Independent `open / close / submit(&Payload)` persistence contract; default JSONL output and Jsonl-owned failure snapshots; attachment download is planned for v5 |
 | Capability-aware claiming | Implemented | Each Scheduler owns frozen Request modes; claim filtering remains backend-atomic |
 | Redis Scheduler | Implemented | Redis 7+ standalone only; complete namespaced Scheduler/Init contract, Worker registration/heartbeat, and Lua-atomic transitions |
+| MySQL Scheduler | Implemented | MySQL 9; DSN-database isolation, operator-installed schema, transactional claim/settlement, and Worker registration/heartbeat |
 | API Scheduler adapter | Implemented | Worker-side Scheduler with registration/heartbeat over an external Master API; the Master service belongs to a separate project |
 | Runtime tracing | Implemented | Optional per-Request `fastrace` roots and bounded lifecycle spans; distinct from business `trace_id` |
 
@@ -75,6 +76,7 @@ flowchart LR
     S["Scheduler contract"]
     M["Memory Scheduler"]
     Z["Redis 7 Scheduler"]
+    Q["MySQL 9 Scheduler"]
     W["Request Task"]
     MW["Middleware Registry"]
     D["Downloader"]
@@ -92,6 +94,7 @@ flowchart LR
     A --> S
     S --> M
     S --> Z
+    S --> Q
     A --> W
     W --> MW
     W --> D
@@ -235,7 +238,7 @@ An Event permit is acquired before `Tx` sends an Event and released when the Eng
 
 An empty `next_requests(limit)` result means only that the current claim returned no work. It never
 terminates a live Worker. The Actor waits for the frozen idle interval and claims again; there is still
-at most one active claim. This lets Redis and API Schedulers accept work published after the process
+at most one active claim. This lets Redis, MySQL, and API Schedulers accept work published after the process
 started without a second Engine lifecycle.
 
 Transient claim failures use bounded local retries. If a later retry returns Requests, the batch keeps
@@ -325,7 +328,7 @@ Memory atomically maintains its queues, known Request IDs, processing records, a
 
 - duplicate Request IDs within one Payload are rejected; replaying an existing ID with the same initial Request Snapshot is a no-op, while a different Snapshot conflicts and rejects the whole collection;
 - a collection containing matching existing Snapshots and new Requests atomically inserts only the missing Requests;
-- Memory keeps a SHA-256 digest of each canonical initial Request Snapshot for replay comparison; this is Scheduler identity protection, not URL/business deduplication;
+- Memory keeps a SHA-256 hash of each canonical initial Request Snapshot for replay comparison; this is Scheduler identity protection, not URL/business deduplication;
 - ID uniqueness prevents the same Request object from being enqueued twice; URL and business-field deduplication remain Dedup Middleware responsibilities;
 - the ready queue uses higher `priority` first and FIFO within one priority; a delayed queue holds future `next_time` values;
 - `Memory::new()` owns process-local Scheduler state, uses the internal identity `local`, and defaults to HTTP capability; `Memory::with_modes(...)` replaces the frozen mode set;
@@ -423,9 +426,9 @@ queue state is quarantined by removing its active entries, recording a terminal 
 completion, then continuing with later valid Requests. This does not hide shared-index corruption:
 an invalid Redis type for a shared index rejects the claim before it mutates state. Ready-queue
 cleanup is likewise bounded to 128 discarded invalid entries before the claim yields to a later
-invocation. Claim returns the persisted digest with the immutable Request Snapshot; Rust recalculates
-the canonical digest before overlaying mutable execution fields. A mismatch follows key-segment-scoped
-recovery and is never returned as executable work. When that digest is valid, its immutable retry
+invocation. Claim returns the persisted hash with the immutable Request Snapshot; Rust recalculates
+the canonical hash before overlaying mutable execution fields. A mismatch follows key-segment-scoped
+recovery and is never returned as executable work. When that hash is valid, its immutable retry
 limit controls recovery and repairs a mismatched mutable Hash value. Recovery failure for one damaged
 record does not withhold valid Requests already claimed in the same atomic operation; the damaged
 record remains processing for normal lease-timeout recovery. Every Request Snapshot requires
@@ -442,38 +445,78 @@ smaller persistence window, while `everysec` commonly offers higher throughput w
 one second of acknowledged-write exposure. Operators must monitor Redis capacity independently of
 the configured Item Store.
 
-### 6.4 Distributed Worker Registration
+### 6.4 MySQL 9 Implementation and Transaction Boundaries
 
-Redis stores `worker_id`, host, version, modes, concurrency, `last_heartbeat`, a backend-generated
+`contrib::scheduler::mysql::MySql` is another complete `Scheduler` and `Init` implementation. A
+Worker connects directly to the MySQL 9 database selected by its DSN; that database is the isolation
+boundary and there is no namespace. Operators create production tables with
+`contrib/sql/mysql/schema.sql`. `open()` never runs DDL: it creates the pool and validates required
+tables, critical columns, `InnoDB`, NO PAD `utf8mb4_0900_bin` identity/contract text columns, and the unique
+indexes that preserve Request, queue, and settlement atomicity.
+
+Every connection uses `READ COMMITTED`. Claim scans the priority/FIFO queue with a keyset cursor, then
+rechecks and locks each candidate Request with `FOR UPDATE OF r SKIP LOCKED`. A lock held by another
+claim or Request replay is skipped without blocking, and the cursor continues beyond that ordered
+prefix until the requested limit is filled or no eligible candidate remains. This avoids MySQL's
+`LIMIT`-before-`SKIP LOCKED` underfill without serializing concurrent Workers. Claim never waits for a
+Request lock held by replay; replay may briefly wait for a Request already claimed in the active
+transaction, but claim skips any later replay-held row instead of completing a lock-order cycle. The
+claim transaction advances execution version, writes
+`leased_by`, removes the queue projection, and refreshes every returned `lease_time` from database time
+immediately before commit.
+Lease recovery, ack, release, refresh, success, failure,
+failed-Worker history, completion records, Trace statistics, and retry enqueueing are also committed
+within their owning transaction. SQLx errors are classified with the native MySQL error number so
+availability failures, unique conflicts, and statistic overflow retain the correct Scheduler meaning.
+
+`requests` is the mutable execution source of truth and also stores an immutable `snapshot JSON` plus
+`snapshot_hash BINARY(32)`. `queues` is only the pending projection. Release, failure retry, and lease
+recovery allocate a fresh auto-increment `sequence`, preserving priority followed by FIFO just like
+Redis. `failed_workers` stores ordered exclusions, `completions(request_id, version)` makes settlement
+replay idempotent, and `trace_stats` merges counters atomically in settlement transactions.
+
+Every table has `DATETIME(3)` `created_time / updated_time` columns for operations and inspection.
+`next_time`, `lease_time`, `last_heartbeat`, `offline_time`, and execution timestamps remain integer
+milliseconds across Scheduler implementations. MySQL also owns its `workers` table and heartbeat.
+It does not pass through Master and never persists Items. API Scheduler remains the replaceable remote
+entry where Workers cannot receive database credentials; the Master implementation belongs to its
+separate project.
+
+### 6.5 Distributed Worker Registration
+
+Redis and MySQL store `worker_id`, host, version, modes, concurrency, `last_heartbeat`, a registration
 token, `offline_time`, and `created_time`. The future Master service owns the equivalent server-side
 API Worker record and may additionally derive an optional IP from the connection; the Worker-side API
-Scheduler adapter does not persist this server state. Redis also stores the
+Scheduler adapter does not persist this server state. Redis and MySQL also store the
 configured heartbeat timeout so an existing registration, rather than a replacement process, defines
 its own online window. Every successful new
 registration replaces the metadata, timestamps, and token and clears `offline_time`; no instance ID,
-state enum, update time, or registration history is part of the crawler contract. Redis leaves IP
+state enum, or registration history is part of the logical Worker contract. MySQL additionally keeps
+`updated_time` as the workspace-wide operational table timestamp. Redis/MySQL leave IP
 unset, while an API server may derive it from the connection. Token fences heartbeat and explicit
 offline updates after a Worker ID is registered again; it is not validated by claim, pending, Request
 lease, or settlement operations.
 
 Each distributed Scheduler handle keeps an unfinished register operation key only in local runtime
-memory until its response is confirmed. API sends it as the request idempotency key; Redis passes it
-to Lua, which derives and recognizes the same stored token without adding a Worker hash field. A
+memory until its response is confirmed. API sends it as the request idempotency key and receives the
+service-generated token. Redis passes it to Lua, which derives the stored token; MySQL hashes the
+Worker ID with its local operation key before writing the row. A
 replay restores the online heartbeat state without changing `created_time`; a confirmed registration
 clears the local key, so the next lifecycle is a new registration. Process loss also loses this local
-recovery state and falls back to the normal heartbeat timeout. Redis claim returns no work for a valid
-explicit-offline or heartbeat-timeout state. A missing Worker, wrong Redis type, mismatched identity,
-or malformed heartbeat/offline fields is a Scheduler error rather than an empty queue result.
+recovery state and falls back to the normal heartbeat timeout. Redis/MySQL claim returns no work for a valid
+explicit-offline or heartbeat-timeout state. A missing Worker or malformed/incompatible registration,
+heartbeat, or offline metadata is a Scheduler error rather than an empty queue result.
 The first registration attempt freezes its concurrency together with the operation key. Replays must
 use that same concurrency; a different value is rejected until `close()` ends the lifecycle. While an
 unfinished registration key or confirmed token is retained, the Scheduler configuration is frozen so
-a retry cannot apply old recovery state to a different Worker or namespace. An explicit
-`close()` abandons an unconfirmed local registration. Redis atomically rebuilds the Worker Hash on a
-successful new registration or replay, leaving exactly the documented persistent fields.
+a retry cannot apply old recovery state to a different Worker or namespace/database. An explicit
+`close()` abandons an unconfirmed local registration. A successful new registration or expired-Worker
+takeover rebuilds the Redis Hash or replaces the MySQL row. A replay only restores heartbeat/online
+fields and preserves `created_time`.
 
 API Scheduler uses its existing authenticated client for `GET /v1/worker/policy` and
 `POST /v1/worker/register`, `/heartbeat`, and `/offline`. The policy supplies heartbeat interval;
-Redis configures interval and timeout locally. In both implementations, heartbeat liveness gates only
+Redis/MySQL configure interval and timeout locally. In all three distributed implementations, heartbeat liveness gates only
 future claims. It is deliberately separate from Request execution ownership: going offline never
 cancels a Request already returned by `next_requests`, and Request lease refresh never proves that the
 Worker process is registered online.
@@ -948,7 +991,7 @@ the Store contract.
 | `spider/src/scheduler/contract.rs` | Public Scheduler contract |
 | `spider/src/scheduler/init.rs` | Run-seed initialization contract |
 | `spider/src/scheduler/memory.rs` | Public Memory implementation and submodule composition |
-| `spider/src/net/request/digest.rs` | Canonically hash initial Request Snapshots for replay comparison; shared by Memory and Redis |
+| `spider/src/net/request/hash.rs` | Calculate canonical initial Request Snapshot hashes for replay comparison; shared by Memory, Redis, and MySQL |
 | `spider/src/scheduler/memory/claim.rs` | Coordinate one capability-aware claim from queued Snapshot to processing Request |
 | `spider/src/scheduler/memory/queue.rs` | Ready/delayed queue ordering |
 | `spider/src/scheduler/memory/reclaim.rs` | Recover expired acknowledged and unacknowledged leases |
@@ -976,6 +1019,12 @@ the Store contract.
 | `contrib/src/scheduler/redis/trace.rs` | Redis Trace Snapshot reads and validation |
 | `contrib/src/scheduler/redis/settle.rs` | Redis acknowledgement, release, refresh, success, and failure transitions |
 | `contrib/src/scheduler/redis/{key,script,validate,error}.rs` | Key isolation, Lua loading, boundary validation, and error mapping |
+| `contrib/src/scheduler/mysql/contract.rs` | MySQL public type, pool lifecycle, and Scheduler/Init contract wiring |
+| `contrib/src/scheduler/mysql/request.rs` | Transactional replay, ordered cursor claim, Request restore, and lease recovery |
+| `contrib/src/scheduler/mysql/trace.rs` | Transactional run initialization and Trace Snapshot reads |
+| `contrib/src/scheduler/mysql/settle.rs` | MySQL acknowledgement, release, refresh, success/failure, completion, and stats transitions |
+| `contrib/src/scheduler/mysql/worker.rs` | MySQL Worker registration, online gating, heartbeat, and offline lifecycle |
+| `contrib/src/scheduler/mysql/{schema,decode,error}.rs` | Schema/collation validation, MySQL 9 text decoding, and native error classification |
 | `contrib/src/scheduler/api/worker.rs` | API Worker registration, heartbeat, and offline protocol |
 | `contrib/src/scheduler/api/request/claim.rs` | API batch claim, Trace de-duplication/concurrent recovery, recovery classification, and lease-bounded settlement |
 | `contrib/src/scheduler/api/request/trace.rs` | API Trace loading, caching, and validation |
@@ -990,7 +1039,7 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 ### Release Boundaries
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
-- v4: the shared backend-neutral Scheduler conformance suite, the Redis 7 standalone Scheduler, RedisBloom Dedup, shared Redis RateLimit, Engine-level Worker-local `ai::OpenAI` provider injection, and optional per-Request `fastrace` runtime tracing are implemented.
+- v4: the shared backend-neutral Scheduler conformance suite, Redis 7 standalone and MySQL 9 Schedulers, RedisBloom Dedup, shared Redis RateLimit, Engine-level Worker-local `ai::OpenAI` provider injection, and optional per-Request `fastrace` runtime tracing are implemented.
 - v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance, and a separate Item attachment downloader. Attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:

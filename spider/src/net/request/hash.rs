@@ -17,7 +17,7 @@ pub enum Error {
 pub(super) fn calculate(snapshot: &net::request::Snapshot) -> Result<[u8; 32], Error> {
     let view = View::new(snapshot);
     let mut hasher = Sha256::new();
-    hasher.update(b"memory-request-snapshot-v1\0");
+    hasher.update(b"crawler-request-snapshot-v1\0");
     serde_json::to_writer(Sink(&mut hasher), &view)?;
     Ok(hasher.finalize().into())
 }
@@ -254,14 +254,10 @@ mod tests {
         field: &str,
         change: impl FnOnce(&mut net::request::Snapshot),
     ) {
-        let expected = base.digest().unwrap();
+        let expected = base.hash().unwrap();
         let mut changed = base.clone();
         change(&mut changed);
-        assert_ne!(
-            expected,
-            changed.digest().unwrap(),
-            "{field} was not hashed"
-        );
+        assert_ne!(expected, changed.hash().unwrap(), "{field} was not hashed");
     }
 
     #[test]
@@ -270,18 +266,18 @@ mod tests {
         let body = net::Body::Bytes(bytes);
         let encoded = serde_json::to_vec(&Body::new(&body)).unwrap();
         let snapshot = snapshot(body);
-        let first = snapshot.digest().unwrap();
-        let second = snapshot.digest().unwrap();
+        let first = snapshot.hash().unwrap();
+        let second = snapshot.hash().unwrap();
         let mut json = snapshot.clone();
         json.body = net::Body::Json(serde_json::json!([]));
 
         assert!(encoded.len() < 256);
         assert_eq!(first, second);
-        assert_ne!(first, json.digest().unwrap());
+        assert_ne!(first, json.hash().unwrap());
     }
 
     #[test]
-    fn request_execution_fields_participate_in_the_digest() {
+    fn request_execution_fields_participate_in_the_hash() {
         let base = snapshot(net::Body::Empty);
         assert_changed(&base, "headers", |snapshot| {
             snapshot.headers.try_set("x-test", "one").unwrap();

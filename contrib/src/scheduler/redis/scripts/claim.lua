@@ -979,7 +979,7 @@ while scan_complete and #claimed < limit do
                         leased_by = worker_id,
                         lease_time = now_text,
                         snapshot = redis.call('HGET', key, 'snapshot') or '',
-                        digest = redis.call('HGET', key, 'digest') or '',
+                        snapshot_hash = redis.call('HGET', key, 'snapshot_hash') or '',
                         trace = trace,
                         failed_workers = failed_workers
                     }))
