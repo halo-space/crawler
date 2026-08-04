@@ -341,7 +341,7 @@ Memory atomically maintains its queues, known Request IDs, processing records, a
 - ordered duplicate-free `Request.failed_workers` is preserved and validated by the strict Request Snapshot contract;
 - repeated `success / failure` with the same Request identity and terminal state is idempotent, while mismatched task, trace, node, version, or state is rejected; the Scheduler's own leased Worker is the execution owner and the Payload `worker_id` is diagnostic metadata, not a second settlement credential;
 - `failure` preserves Request ID while advancing queue retry count, then requeues or enters failed when retries are exhausted.
-- Request Snapshot restoration, version/retry overflow, and queue-conversion failures produce explicit terminal diagnostics with the original Request ID instead of silently dropping work. Trace loading is not a Memory failure path; API Trace recovery has separate release semantics below.
+- Request Snapshot restoration, version/retry overflow, and queue-conversion failures produce explicit terminal diagnostics with the original Request ID instead of silently dropping work. Trace loading is not a Memory failure path; distributed Scheduler Trace recovery uses the release semantics below.
 
 Memory is an unregistered process-local Scheduler. It does not discover or select among a fleet of
 Workers; registration, heartbeat, and cross-Worker eligibility belong to the concrete distributed
@@ -403,6 +403,13 @@ of truth. A valid processing Hash repairs a stale score or wrong-mode projection
 retry state, while an invalid Hash is quarantined. Every transition clears both known mode
 projections before publishing its single current membership when it changes active ownership.
 
+After a claim is decoded and restored, Redis refreshes each executable Request once with Redis
+server time before returning it to the Engine. This handoff refresh validates the current Worker
+ownership but intentionally does not require `ack`, because the Request has not reached the
+Downloader yet; the public `refresh_lease` operation remains ack-gated. The returned Request carries
+the refreshed `lease_time`. A failed handoff refresh keeps that Request out of the executable result
+and surfaces the Scheduler error.
+
 Recurring maintenance is deliberately bounded under backlog: one `next_requests` invocation recovers
 at most 64 expired leases from each mode and inspects at most 128 processing records across both
 modes. The per-mode recovery share prevents equal Redis timestamps in one backlog from starving the
@@ -432,9 +439,12 @@ recovery and is never returned as executable work. When that hash is valid, its 
 limit controls recovery and repairs a mismatched mutable Hash value. Recovery failure for one damaged
 record does not withhold valid Requests already claimed in the same atomic operation; the damaged
 record remains processing for normal lease-timeout recovery. Every Request Snapshot requires
-`max_retry_count` in `1..=128`; the immutable Snapshot value controls recovery and bounds failed-Worker
-history, while the mutable Hash cannot expand it. The current internal key layout does not migrate older
-Redis namespaces.
+`max_retry_count` in `1..=128`; Redis copies this value into the Scheduler-owned Hash field
+`retry_limit` when the Request is first stored. Retry transitions require it to agree with the
+Snapshot value, and Rust recovery repairs it only from a hash- and identity-validated Snapshot. A
+Snapshot that cannot provide that trusted limit is quarantined without consuming another retry. The
+mutable `max_retry_count` field is observational only and cannot expand the Snapshot limit. The
+current internal key layout does not migrate older Redis namespaces.
 
 The implementation targets one Redis 7+ standalone primary. It intentionally does not support
 Redis Cluster, because its namespace spans several keys and its Lua transitions rely on
@@ -532,13 +542,14 @@ growing for the lifetime of the Worker. API `close()` stops and awaits the exist
 before sending the offline update. If that wait is cancelled, a later `close()` continues waiting for
 the same heartbeat task instead of losing its shutdown state.
 
-When an API claim omits a Trace Snapshot, the Worker loads each cold `trace_id` once and loads
-different Traces concurrently. Trace read, missing, decode, validation, or task/node binding errors
-release that Request without `ack`/`failure` and without consuming a Request retry. Only a damaged
-Request Snapshot or execution state uses `ack + failure`. Claim recovery and each recovery settlement
-share a lease handoff deadline; one slow item cannot serially consume the whole batch lease. Successfully
-restored Requests are returned in the server claim order, and release attempts are independent so one
-failed release does not prevent the remaining claims from being returned.
+Redis, MySQL, and API claims restore each Request against its immutable Trace Snapshot. Trace read,
+missing, decode, validation, or task/node binding errors release that Request without `ack`/`failure`
+and without consuming a Request retry. Only a damaged Request Snapshot or execution state enters the
+Scheduler's Request recovery/failure path. For API claims that omit Trace data, the Worker loads each
+cold `trace_id` once, loads different Traces concurrently, and shares one lease handoff deadline across
+claim recovery and its release calls so one slow item cannot serially consume the whole batch lease.
+Successfully restored API Requests retain server claim order, and release attempts are independent so
+one failed release does not prevent the remaining claims from being returned.
 
 ## 7. Complete Request Lifecycle
 
@@ -826,8 +837,9 @@ after_spider
 `Middleware::Next<T>` contains only `Continue(T)` and `Skip`. `Skip` is normal filtering and does not invoke the corresponding error hook. The Registry merges default Specs with object-local Specs, then orders them by `order` and declaration sequence.
 
 Request middleware may change only fields owned by its stage. `before_scheduler` must preserve
-`id / task_id / trace_id / node`; after a Request is claimed, `before_download` must also preserve `node` so
-execution and lease settlement cannot refer to different work. `before_download` may still change
+`id / task_id / trace_id / node`; after a Request is claimed, `before_download` must also preserve
+`node / mode` so execution and lease settlement cannot refer to different work and cannot bypass the
+Worker capability selection already performed by the Scheduler. `before_download` may still change
 transport fields such as URL and headers.
 
 Built-in implementations:

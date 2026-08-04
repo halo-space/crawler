@@ -1,7 +1,9 @@
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use futures_util::FutureExt;
 use kameo::actor::Spawn;
 
 use crate::spider::tx::{Event, Events};
@@ -125,34 +127,63 @@ where
     }
 
     pub async fn open(&self) -> Result<(), crate::Error> {
-        if let Err(error) = self.scheduler.open(self.concurrency).await {
-            return Err(crate::Error::Scheduler(error));
-        }
+        protect(async {
+            self.scheduler
+                .open(self.concurrency)
+                .await
+                .map_err(crate::Error::Scheduler)
+        })
+        .await?;
 
-        if let Err(error) = self.downloader.open().await {
-            if let Err(close_error) = self.scheduler.close().await {
+        if let Err(error) =
+            protect(async { self.downloader.open().await.map_err(crate::Error::Download) }).await
+        {
+            if let Err(close_error) = protect(async {
+                self.scheduler
+                    .close()
+                    .await
+                    .map_err(crate::Error::Scheduler)
+            })
+            .await
+            {
                 tracing::warn!(
                     error = %close_error,
                     "failed to close Scheduler after Downloader open failed"
                 );
             }
-            return Err(crate::Error::Download(error));
+            return Err(error);
         }
 
-        if let Err(error) = self.store.open().await {
-            if let Err(close_error) = self.downloader.close().await {
+        if let Err(error) =
+            protect(async { self.store.open().await.map_err(crate::Error::Item) }).await
+        {
+            if let Err(close_error) = protect(async {
+                self.downloader
+                    .close()
+                    .await
+                    .map_err(crate::Error::Download)
+            })
+            .await
+            {
                 tracing::warn!(
                     error = %close_error,
                     "failed to close Downloader after Item Store open failed"
                 );
             }
-            if let Err(close_error) = self.scheduler.close().await {
+            if let Err(close_error) = protect(async {
+                self.scheduler
+                    .close()
+                    .await
+                    .map_err(crate::Error::Scheduler)
+            })
+            .await
+            {
                 tracing::warn!(
                     error = %close_error,
                     "failed to close Scheduler after Item Store open failed"
                 );
             }
-            return Err(crate::Error::Item(error));
+            return Err(error);
         }
 
         Ok(())
@@ -160,14 +191,38 @@ where
 
     pub async fn close(&self) -> Result<(), crate::Error> {
         let mut first_error = None;
-        if let Err(error) = self.downloader.close().await {
-            first_error.get_or_insert(crate::Error::Download(error));
+        if let Err(error) = protect(async {
+            self.downloader
+                .close()
+                .await
+                .map_err(crate::Error::Download)
+        })
+        .await
+        {
+            first_error = Some(error);
         }
-        if let Err(error) = self.store.close().await {
-            first_error.get_or_insert(crate::Error::Item(error));
+        if let Err(error) =
+            protect(async { self.store.close().await.map_err(crate::Error::Item) }).await
+        {
+            if first_error.is_some() {
+                tracing::warn!(error = %error, "additional Item Store close failure");
+            } else {
+                first_error = Some(error);
+            }
         }
-        if let Err(error) = self.scheduler.close().await {
-            first_error.get_or_insert(crate::Error::Scheduler(error));
+        if let Err(error) = protect(async {
+            self.scheduler
+                .close()
+                .await
+                .map_err(crate::Error::Scheduler)
+        })
+        .await
+        {
+            if first_error.is_some() {
+                tracing::warn!(error = %error, "additional Scheduler close failure");
+            } else {
+                first_error = Some(error);
+            }
         }
         first_error.map_or(Ok(()), Err)
     }
@@ -193,7 +248,15 @@ where
         shutdown: &mut ShutdownSignal,
     ) -> Result<(), crate::Error> {
         self.validate()?;
-        let Some(shutdown_requested) = open_while_listening(self.open(), shutdown).await? else {
+        let opened = open_while_listening(protect(self.open()), shutdown).await;
+        let Some(shutdown_requested) = (match opened {
+            Ok(value) => value,
+            // `open` owns rollback for every stage it has started. Calling
+            // `close` here would close those components a second time and
+            // could invalidate a Scheduler/Store lifecycle that is already
+            // back in its closed state.
+            Err(error) => return Err(error),
+        }) else {
             return Ok(());
         };
 
@@ -202,13 +265,8 @@ where
         } else {
             self.execute_lifecycle(exit_when_idle, shutdown).await
         };
-        let closing = self.close().await;
-
-        match (execution, closing) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), _) => Err(error),
-            (Ok(()), Err(error)) => Err(error),
-        }
+        let closing = protect(self.close()).await;
+        lifecycle_result(execution, closing)
     }
 
     async fn execute_lifecycle(
@@ -217,12 +275,12 @@ where
         shutdown: &mut ShutdownSignal,
     ) -> Result<(), crate::Error> {
         let before_spider = complete_while_listening(
-            async {
+            protect(async {
                 self.registry
                     .before_spider(&self.middlewares)
                     .await
                     .map_err(crate::Error::Middleware)
-            },
+            }),
             shutdown,
         )
         .await;
@@ -232,12 +290,24 @@ where
             Ok((None, false)) => unreachable!(),
             Err(error) => Err(error),
         };
-        let after_spider = self
-            .registry
-            .after_spider(&self.middlewares)
-            .await
-            .map_err(crate::Error::Middleware);
-        execution.and(after_spider)
+        let after_spider = protect(async {
+            self.registry
+                .after_spider(&self.middlewares)
+                .await
+                .map_err(crate::Error::Middleware)
+        })
+        .await;
+        match (execution, after_spider) {
+            (Ok(()), result) => result,
+            (Err(error), Err(after_error)) => {
+                tracing::warn!(
+                    error = %after_error,
+                    "after_spider failed after Engine execution failed"
+                );
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+        }
     }
 
     async fn coordinate(
@@ -250,7 +320,8 @@ where
         };
         events.set_limit(self.event_limit);
         let (init, shutdown_requested) =
-            complete_while_listening(self.init.init(self.scheduler.clone()), shutdown).await?;
+            complete_while_listening(protect(self.init.init(self.scheduler.clone())), shutdown)
+                .await?;
         if shutdown_requested {
             return Ok(());
         }
@@ -320,6 +391,40 @@ where
     }
 }
 
+fn lifecycle_result(
+    execution: Result<(), crate::Error>,
+    closing: Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    match (execution, closing) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Err(close_error)) => {
+            tracing::warn!(error = %close_error, "Engine close failed after execution failed");
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+    }
+}
+
+async fn protect<T>(
+    future: impl Future<Output = Result<T, crate::Error>>,
+) -> Result<T, crate::Error> {
+    AssertUnwindSafe(future)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|payload| Err(crate::Error::message(panic_message(payload))))
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        format!("engine lifecycle panicked: {message}")
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        format!("engine lifecycle panicked: {message}")
+    } else {
+        "engine lifecycle panicked".to_string()
+    }
+}
+
 async fn open_while_listening(
     opening: impl Future<Output = Result<(), crate::Error>>,
     shutdown: &mut ShutdownSignal,
@@ -343,11 +448,26 @@ async fn complete_while_listening<T>(
     tokio::select! {
         biased;
         signal = shutdown.as_mut() => {
-            signal?;
-            if started.load(std::sync::atomic::Ordering::Relaxed) {
-                Ok((Some(tracked.await?), true))
+            // A shutdown signal can fail (for example, when the OS signal
+            // listener cannot be installed).  Once the lifecycle stage has
+            // been polled, it still owns resources that must be allowed to
+            // finish before that error is returned.
+            let stage_result = if started.load(std::sync::atomic::Ordering::Relaxed) {
+                Some(tracked.await)
             } else {
-                Ok((None, true))
+                None
+            };
+            match (signal, stage_result) {
+                (Err(error), Some(Err(stage_error))) => {
+                    tracing::warn!(
+                        error = %stage_error,
+                        "Engine lifecycle stage failed while handling a shutdown listener error"
+                    );
+                    Err(error)
+                }
+                (Err(error), _) => Err(error),
+                (Ok(()), Some(result)) => Ok((Some(result?), true)),
+                (Ok(()), None) => Ok((None, true)),
             }
         }
         result = &mut tracked => Ok((Some(result?), false)),

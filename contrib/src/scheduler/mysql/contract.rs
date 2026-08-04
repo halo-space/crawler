@@ -260,27 +260,27 @@ impl scheduler::Scheduler for MySql {
 
     async fn ack(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
         let _activity = self.enter().await?;
-        self.acknowledge(payload).await
+        self.acknowledge(payload, self.worker.id()?).await
     }
 
     async fn release(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
         let _activity = self.enter().await?;
-        self.return_to_queue(payload).await
+        self.return_to_queue(payload, self.worker.id()?).await
     }
 
     async fn refresh_lease(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
         let _activity = self.enter().await?;
-        self.refresh(payload).await
+        self.refresh(payload, self.worker.id()?).await
     }
 
     async fn success(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
         let _activity = self.enter().await?;
-        self.succeed(payload).await
+        self.succeed(payload, self.worker.id()?).await
     }
 
     async fn failure(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
         let _activity = self.enter().await?;
-        self.fail(payload).await
+        self.fail(payload, self.worker.id()?).await
     }
 }
 

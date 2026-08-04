@@ -1,5 +1,5 @@
 use serde::Serialize;
-use spider::{payload, scheduler, stats};
+use spider::{net, payload, scheduler, stats};
 
 use super::Redis;
 use super::error::redis as redis_error;
@@ -90,6 +90,7 @@ impl Redis {
     pub(super) async fn acknowledge(
         &self,
         payload: &payload::Payload,
+        worker_id: &str,
     ) -> Result<(), scheduler::Error> {
         payload
             .validate_ack()
@@ -103,6 +104,7 @@ impl Redis {
             .key(self.keys.request(&payload.id))
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
+            .arg(worker_id)
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
@@ -112,6 +114,7 @@ impl Redis {
     pub(super) async fn return_to_queue(
         &self,
         payload: &payload::Payload,
+        worker_id: &str,
     ) -> Result<(), scheduler::Error> {
         payload
             .validate_release()
@@ -128,16 +131,42 @@ impl Redis {
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
             .arg(key::segment(&payload.id))
+            .arg(worker_id)
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
         Self::result(result, &payload.id)
     }
 
-    pub(super) async fn refresh(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
+    pub(super) async fn refresh(
+        &self,
+        payload: &payload::Payload,
+        worker_id: &str,
+    ) -> Result<(), scheduler::Error> {
         payload
             .validate_refresh_lease()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
+        self.refresh_execution(payload, worker_id, true)
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn refresh_claimed_lease(
+        &self,
+        request: &net::Request,
+        worker_id: &str,
+    ) -> Result<i64, scheduler::Error> {
+        let mut payload = payload::Payload::for_request(request, worker_id);
+        payload.state = net::State::Processing;
+        self.refresh_execution(&payload, worker_id, false).await
+    }
+
+    async fn refresh_execution(
+        &self,
+        payload: &payload::Payload,
+        worker_id: &str,
+        require_ack: bool,
+    ) -> Result<i64, scheduler::Error> {
         let encoded = Self::encode(&Execution::new(payload)?)?;
         let mut connection = self.connection().await?;
         let result: String = self
@@ -149,13 +178,30 @@ impl Redis {
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
             .arg(key::segment(&payload.id))
+            .arg(worker_id)
+            .arg(if require_ack { 1 } else { 0 })
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
-        Self::result(result, &payload.id)
+        if result == "OK" {
+            return Ok(0);
+        }
+        if let Some(lease_time) = result.strip_prefix("OK:") {
+            return lease_time.parse::<i64>().map_err(|error| {
+                scheduler::Error::Message(format!(
+                    "Redis refresh returned an invalid lease_time for {}: {error}",
+                    payload.id
+                ))
+            });
+        }
+        Self::result(result, &payload.id).map(|_| 0)
     }
 
-    pub(super) async fn succeed(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
+    pub(super) async fn succeed(
+        &self,
+        payload: &payload::Payload,
+        worker_id: &str,
+    ) -> Result<(), scheduler::Error> {
         payload
             .validate_success()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
@@ -172,13 +218,18 @@ impl Redis {
             .arg(key::segment(&payload.id))
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
+            .arg(worker_id)
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
         Self::result(result, &payload.id)
     }
 
-    pub(super) async fn fail(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
+    pub(super) async fn fail(
+        &self,
+        payload: &payload::Payload,
+        worker_id: &str,
+    ) -> Result<(), scheduler::Error> {
         payload
             .validate_failure()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
@@ -196,6 +247,7 @@ impl Redis {
             .arg(key::segment(&payload.id))
             .arg(encoded)
             .arg(self.lease.timeout().as_millis() as i64)
+            .arg(worker_id)
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;

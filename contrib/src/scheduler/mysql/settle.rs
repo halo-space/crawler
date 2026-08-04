@@ -1,3 +1,4 @@
+use serde_json::Value;
 use spider::{net, payload, scheduler, stats};
 use sqlx::{MySql, Row as _, Transaction};
 
@@ -17,14 +18,16 @@ struct Request {
     leased_by: String,
     lease_time: i64,
     retry_count: i32,
-    max_retry_count: i32,
     ack_version: Option<i64>,
+    snapshot: Value,
+    snapshot_hash: Vec<u8>,
 }
 
 impl Scheduler {
     pub(super) async fn acknowledge(
         &self,
         payload: &payload::Payload,
+        worker_id: &str,
     ) -> Result<(), scheduler::Error> {
         payload
             .validate_ack()
@@ -33,7 +36,7 @@ impl Scheduler {
         let mut transaction = pool.begin().await.map_err(sql_error)?;
         let request = lock_request(&mut transaction, &payload.id).await?;
         let now = database_time(&mut transaction).await?;
-        validate_execution(&request, payload, now, self.lease, false)?;
+        validate_execution(&request, payload, worker_id, now, self.lease, false)?;
         sqlx::query(
             "UPDATE requests SET ack_version = version, updated_time = CURRENT_TIMESTAMP(3) \
              WHERE id = ?",
@@ -48,6 +51,7 @@ impl Scheduler {
     pub(super) async fn return_to_queue(
         &self,
         payload: &payload::Payload,
+        worker_id: &str,
     ) -> Result<(), scheduler::Error> {
         payload
             .validate_release()
@@ -56,7 +60,7 @@ impl Scheduler {
         let mut transaction = pool.begin().await.map_err(sql_error)?;
         let request = lock_request(&mut transaction, &payload.id).await?;
         let now = database_time(&mut transaction).await?;
-        validate_execution(&request, payload, now, self.lease, false)?;
+        validate_execution(&request, payload, worker_id, now, self.lease, false)?;
 
         sqlx::query(
             "INSERT INTO queues \
@@ -73,7 +77,11 @@ impl Scheduler {
         transaction.commit().await.map_err(sql_error)
     }
 
-    pub(super) async fn refresh(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
+    pub(super) async fn refresh(
+        &self,
+        payload: &payload::Payload,
+        worker_id: &str,
+    ) -> Result<(), scheduler::Error> {
         payload
             .validate_refresh_lease()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
@@ -81,7 +89,7 @@ impl Scheduler {
         let mut transaction = pool.begin().await.map_err(sql_error)?;
         let request = lock_request(&mut transaction, &payload.id).await?;
         let now = database_time(&mut transaction).await?;
-        validate_execution(&request, payload, now, self.lease, true)?;
+        validate_execution(&request, payload, worker_id, now, self.lease, true)?;
         sqlx::query(
             "UPDATE requests SET lease_time = ?, updated_time = CURRENT_TIMESTAMP(3) \
              WHERE id = ?",
@@ -94,7 +102,11 @@ impl Scheduler {
         transaction.commit().await.map_err(sql_error)
     }
 
-    pub(super) async fn succeed(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
+    pub(super) async fn succeed(
+        &self,
+        payload: &payload::Payload,
+        worker_id: &str,
+    ) -> Result<(), scheduler::Error> {
         payload
             .validate_success()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
@@ -102,12 +114,12 @@ impl Scheduler {
         let pool = self.pool().await?;
         let mut transaction = pool.begin().await.map_err(sql_error)?;
         let request = lock_request(&mut transaction, &payload.id).await?;
-        if completion_matches(&mut transaction, payload).await? {
+        if completion_matches(&mut transaction, payload, worker_id).await? {
             transaction.commit().await.map_err(sql_error)?;
             return Ok(());
         }
         let now = database_time(&mut transaction).await?;
-        validate_execution(&request, payload, now, self.lease, true)?;
+        validate_execution(&request, payload, worker_id, now, self.lease, true)?;
 
         merge_stats(&mut transaction, &payload.trace_id, counters).await?;
         insert_completion(&mut transaction, payload, &request.leased_by).await?;
@@ -115,7 +127,11 @@ impl Scheduler {
         transaction.commit().await.map_err(sql_error)
     }
 
-    pub(super) async fn fail(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
+    pub(super) async fn fail(
+        &self,
+        payload: &payload::Payload,
+        worker_id: &str,
+    ) -> Result<(), scheduler::Error> {
         payload
             .validate_failure()
             .map_err(|message| scheduler::Error::Message(message.to_string()))?;
@@ -123,12 +139,13 @@ impl Scheduler {
         let pool = self.pool().await?;
         let mut transaction = pool.begin().await.map_err(sql_error)?;
         let request = lock_request(&mut transaction, &payload.id).await?;
-        if completion_matches(&mut transaction, payload).await? {
+        if completion_matches(&mut transaction, payload, worker_id).await? {
             transaction.commit().await.map_err(sql_error)?;
             return Ok(());
         }
         let now = database_time(&mut transaction).await?;
-        validate_execution(&request, payload, now, self.lease, true)?;
+        validate_execution(&request, payload, worker_id, now, self.lease, true)?;
+        let retry_limit = trusted_retry_limit(&request, &payload.id)?;
         let retry_count = request.retry_count.checked_add(1).ok_or_else(|| {
             scheduler::Error::Message(format!("request retry overflow: {}", payload.id))
         })?;
@@ -161,7 +178,7 @@ impl Scheduler {
 
         merge_stats(&mut transaction, &payload.trace_id, counters).await?;
         insert_completion(&mut transaction, payload, &request.leased_by).await?;
-        if retry_count < request.max_retry_count {
+        if retry_count < retry_limit {
             sqlx::query(
                 "INSERT INTO queues \
                  (request_id, mode, priority, next_time, created_time, updated_time) \
@@ -174,24 +191,26 @@ impl Scheduler {
             .await
             .map_err(sql_error)?;
             sqlx::query(
-                "UPDATE requests SET state = 'pending', retry_count = ?, next_time = 0, \
+                "UPDATE requests SET state = 'pending', retry_count = ?, max_retry_count = ?, next_time = 0, \
                         leased_by = '', lease_time = 0, ack_version = NULL, \
                         updated_time = CURRENT_TIMESTAMP(3) \
                  WHERE id = ?",
             )
             .bind(retry_count)
+            .bind(retry_limit)
             .bind(&payload.id)
             .execute(&mut *transaction)
             .await
             .map_err(sql_error)?;
         } else {
             sqlx::query(
-                "UPDATE requests SET state = 'failed', retry_count = ?, next_time = 0, \
+                "UPDATE requests SET state = 'failed', retry_count = ?, max_retry_count = ?, next_time = 0, \
                         leased_by = '', lease_time = 0, ack_version = NULL, \
                         updated_time = CURRENT_TIMESTAMP(3) \
                  WHERE id = ?",
             )
             .bind(retry_count)
+            .bind(retry_limit)
             .bind(&payload.id)
             .execute(&mut *transaction)
             .await
@@ -207,7 +226,7 @@ async fn lock_request(
 ) -> Result<Request, scheduler::Error> {
     let row = sqlx::query(
         "SELECT task_id, trace_id, node, mode, priority, state, version, leased_by, \
-                lease_time, retry_count, max_retry_count, ack_version \
+                lease_time, retry_count, ack_version, snapshot, snapshot_hash \
          FROM requests WHERE id = ? FOR UPDATE",
     )
     .bind(id)
@@ -226,14 +245,51 @@ async fn lock_request(
         leased_by: decode::string(&row, "leased_by")?,
         lease_time: row.try_get("lease_time").map_err(sql_error)?,
         retry_count: row.try_get("retry_count").map_err(sql_error)?,
-        max_retry_count: row.try_get("max_retry_count").map_err(sql_error)?,
         ack_version: row.try_get("ack_version").map_err(sql_error)?,
+        snapshot: row.try_get("snapshot").map_err(sql_error)?,
+        snapshot_hash: row.try_get("snapshot_hash").map_err(sql_error)?,
     })
+}
+
+fn trusted_retry_limit(request: &Request, id: &str) -> Result<i32, scheduler::Error> {
+    let snapshot = serde_json::from_value::<net::request::Snapshot>(request.snapshot.clone())
+        .map_err(|error| scheduler::Error::InvalidRequest {
+            id: id.to_string(),
+            message: format!("stored Request Snapshot cannot be decoded: {error}"),
+        })?;
+    let actual = snapshot
+        .hash()
+        .map_err(|error| scheduler::Error::InvalidRequest {
+            id: id.to_string(),
+            message: format!("stored Request Snapshot hash cannot be computed: {error}"),
+        })?;
+    if request.snapshot_hash.as_slice() != actual
+        || snapshot.task_id != request.task_id
+        || snapshot.trace_id != request.trace_id
+        || snapshot.node != request.node
+        || snapshot_mode(&snapshot.mode) != request.mode
+        || snapshot.priority != request.priority
+        || !(1..=net::request::MAX_RETRY_COUNT).contains(&snapshot.max_retry_count)
+    {
+        return Err(scheduler::Error::InvalidRequest {
+            id: id.to_string(),
+            message: "stored Request Snapshot hash or identity does not match its row".to_string(),
+        });
+    }
+    Ok(snapshot.max_retry_count)
+}
+
+fn snapshot_mode(mode: &net::Mode) -> &'static str {
+    match mode {
+        net::Mode::Http => "http",
+        net::Mode::Browser => "browser",
+    }
 }
 
 fn validate_execution(
     request: &Request,
     payload: &payload::Payload,
+    worker_id: &str,
     now: i64,
     lease: scheduler::Lease,
     require_ack: bool,
@@ -256,7 +312,7 @@ fn validate_execution(
     if request.state != "processing" {
         return Err(scheduler::Error::StateMismatch(payload.id.clone()));
     }
-    if request.leased_by.is_empty() || request.lease_time <= 0 {
+    if request.leased_by != worker_id || request.lease_time <= 0 {
         return Err(scheduler::Error::LeaseMismatch(payload.id.clone()));
     }
     if now.saturating_sub(request.lease_time) >= lease.timeout().as_millis() as i64 {
@@ -271,6 +327,7 @@ fn validate_execution(
 async fn completion_matches(
     transaction: &mut Transaction<'_, MySql>,
     payload: &payload::Payload,
+    worker_id: &str,
 ) -> Result<bool, scheduler::Error> {
     let row = sqlx::query(
         "SELECT task_id, trace_id, node, worker_id, state \
@@ -305,10 +362,14 @@ async fn completion_matches(
     if decode::string(&row, "state")? != state(payload.state) {
         return Err(scheduler::Error::StateMismatch(payload.id.clone()));
     }
-    if decode::string(&row, "worker_id")?.is_empty() {
+    let completed_by = decode::string(&row, "worker_id")?;
+    if completed_by.is_empty() {
         return Err(scheduler::Error::Message(
             "completion is missing its observed execution Worker".to_string(),
         ));
+    }
+    if completed_by != worker_id {
+        return Err(scheduler::Error::LeaseMismatch(payload.id.clone()));
     }
     Ok(true)
 }

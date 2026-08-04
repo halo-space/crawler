@@ -327,7 +327,7 @@ Memory 在一个受互斥锁保护的状态中原子维护队列、已知 Reques
 - `Request.failed_workers` 按发生顺序保存且不重复，严格的 Request Snapshot 合同会完整保留并校验该字段；
 - `success / failure` 对同一 Request 身份和同一终态的重复提交幂等，但会拒绝 task、trace、node、version 或 state 不匹配的提交；Scheduler 自己持有的租约 Worker 才是执行权来源，Payload 的 `worker_id` 仅是诊断元数据，不是第二套结算凭据；
 - `failure` 保持 Request ID并增加队列重试次数；有剩余额度时回填，额度耗尽后进入 failed 终态。
-- Request Snapshot 恢复、version/retry 溢出或队列转换失败都会形成带原 Request ID 和原因的显式终态记录，不允许只增加计数后丢弃。Trace 读取不是 Memory 的失败路径；API Trace 恢复使用下文独立的 release 语义。
+- Request Snapshot 恢复、version/retry 溢出或队列转换失败都会形成带原 Request ID 和原因的显式终态记录，不允许只增加计数后丢弃。Trace 读取不是 Memory 的失败路径；分布式 Scheduler 的 Trace 恢复使用下文独立的 release 语义。
 
 Memory 是不注册到集群的进程内 Scheduler，不会发现或选择 Worker 集合。注册、心跳和跨 Worker
 领取资格留给确实需要它们的分布式 Scheduler。它从
@@ -396,8 +396,15 @@ ready 队列清理同样最多丢弃 128 条非法条目，之后交给下一次
 Request Snapshot 一起返回；Rust 在覆盖可变执行字段前重新计算规范 hash，不一致时按 key 片段恢复且不会
 返回为可执行任务。hash 有效时，其中不可变的重试上限控制恢复并修正可变 Hash 中的不一致值。单条损坏记录
 恢复失败不能扣留同一次原子领取中的合法 Request；损坏记录继续保持 processing，交给正常租约超时恢复。
-每个 Request Snapshot 的 `max_retry_count` 必须位于 `1..=128`；恢复以不可变 Snapshot 为准，并以此约束
-失败 Worker 历史，可变 Hash 不能扩大该值。当前内部 key 布局不迁移旧 Redis namespace。
+Claim 解码并恢复后，Redis 会在把每条可执行 Request 返回给 Engine 前用 Redis server time 刷新一次租约。
+该 handoff 刷新校验当前 Worker 的所有权，但故意不要求 `ack`，因为 Request 尚未进入 Downloader；公开的
+`refresh_lease` 仍然要求先 `ack`。返回的 Request 携带刷新后的 `lease_time`；handoff 刷新失败的 Request
+不会作为可执行结果返回，并向上暴露 Scheduler 错误。
+每个 Request Snapshot 的 `max_retry_count` 必须位于 `1..=128`；Request 首次写入时 Redis 将它复制到
+Scheduler 自己维护的 Hash 字段 `retry_limit`。重试转换前必须确认它与 Snapshot 中的值一致，Rust 恢复也只会
+使用通过 hash 与身份校验的 Snapshot 修正该字段；无法提供可信重试上限的损坏 Snapshot 会直接隔离为终态，
+不再消耗一次重试。可变的 `max_retry_count` 仅用于观察，不能扩大 Snapshot 规定的上限。当前内部 key 布局
+不迁移旧 Redis namespace。
 
 该实现只面向 Redis 7+ 单实例 primary，不支持 Redis Cluster。namespace 跨多个 key，Lua 状态转换依赖
 单实例原子性，因此 Cluster 是未来独立的 Scheduler 设计，而不是该类型的连接参数。需要可恢复持久化时，
@@ -469,11 +476,12 @@ API 的 claim 和 release 在结果未确认时保留各自的 `Idempotency-Key`
 API `close()` 会先停止并等待原心跳任务结束，再发送离线更新；如果等待过程被取消，下一次 `close()` 会
 继续等待同一个心跳任务，不会丢失已有停止状态。
 
-API 批量领取省略 Trace Snapshot 时，Worker 对同一批相同 `trace_id` 只读取一次，并发读取不同
-Trace。Trace 读取、缺失、解码、校验或 task/node 绑定失败都只对该 Request 调用 `release`，不调用
-`ack/failure`，也不消耗 Request 重试；只有 Request Snapshot 或执行状态本身损坏才执行
-`ack + failure`。恢复和每条恢复结算共用 lease handoff deadline，不能串行耗尽整批租约；成功恢复的
-Request 保持服务端领取顺序返回，逐条 release 互不阻塞，单条失败不妨碍其他条归还。
+Redis、MySQL 和 API 领取都必须使用不可变 Trace Snapshot 恢复每条 Request。Trace 读取、缺失、解码、
+校验或 task/node 绑定失败只对该 Request 调用 `release`，不调用 `ack/failure`，也不消耗 Request 重试；
+只有 Request Snapshot 或执行状态本身损坏才进入 Scheduler 的 Request 恢复或失败路径。API 批量领取省略
+Trace 时，Worker 对同一批相同 `trace_id` 只读取一次，并发读取不同 Trace；恢复和每条 release 共用 lease
+handoff deadline，不能串行耗尽整批租约。成功恢复的 API Request 保持服务端领取顺序返回，逐条 release
+互不阻塞，单条失败不妨碍其他条归还。
 
 ## 7. 单条 Request 的完整生命周期
 
@@ -739,8 +747,9 @@ after_spider
 `Middleware::Next<T>` 只有 `Continue(T)` 与 `Skip`。`Skip` 是正常过滤，不进入对应 error hook。Registry 合并默认 Spec 与对象局部 Spec，再按 `order` 和声明顺序执行。
 
 Request Middleware 只能修改当前阶段拥有的字段。`before_scheduler` 不得修改
-`id / task_id / trace_id / node`；Request 领取后，`before_download` 还不得修改 `node`，避免实际执行
-与租约结算指向不同任务。`before_download` 仍可修改 URL、headers 等运输字段。
+`id / task_id / trace_id / node`；Request 领取后，`before_download` 还不得修改 `node / mode`，避免实际执行
+与租约结算指向不同任务，或绕过 Scheduler 已完成的 Worker 能力筛选。`before_download` 仍可修改 URL、headers
+等运输字段。
 
 内置实现：
 

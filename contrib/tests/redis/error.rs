@@ -167,7 +167,28 @@ async fn malformed_records_do_not_discard_valid_claims_from_the_same_call() {
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, "valid-request");
     settlement::succeed(&scheduler, &claimed[0]).await;
-    for id in ["broken-trace", "broken-state", "broken-request"] {
+    let trace_state = redis::cmd("HGET")
+        .arg(key::request(&namespace, "broken-trace"))
+        .arg("state")
+        .query_async::<String>(&mut connection)
+        .await
+        .unwrap();
+    let trace_retry = redis::cmd("HGET")
+        .arg(key::request(&namespace, "broken-trace"))
+        .arg("retry_count")
+        .query_async::<i32>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(trace_state, "pending");
+    assert_eq!(trace_retry, 0);
+    let trace_failed_workers = redis::cmd("LLEN")
+        .arg(key::failed_workers(&namespace, "broken-trace"))
+        .query_async::<i64>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(trace_failed_workers, 0);
+
+    for id in ["broken-state", "broken-request"] {
         let state = redis::cmd("HGET")
             .arg(key::request(&namespace, id))
             .arg("state")
@@ -176,6 +197,18 @@ async fn malformed_records_do_not_discard_valid_claims_from_the_same_call() {
             .unwrap();
         assert_eq!(state, "failed");
     }
+
+    redis::cmd("HSET")
+        .arg(format!("{namespace}:traces"))
+        .arg("broken-trace-id")
+        .arg(serde_json::to_string(&trace::Snapshot::code("broken-task")).unwrap())
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    let repaired = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    assert_eq!(repaired.id, "broken-trace");
+    assert_eq!(repaired.retry_count, 0);
+    settlement::succeed(&scheduler, &repaired).await;
 
     scheduler.close().await.unwrap();
     server.clear(&namespace).await;
@@ -193,7 +226,7 @@ async fn failed_recovery_does_not_withhold_a_valid_claim() {
 
     let mut damaged = request::new("failed-recovery", "https://example.com/failed-recovery");
     damaged.priority = 20;
-    damaged.max_retry_count = 2;
+    damaged.max_retry_count = 3;
     let mut valid = request::new(
         "valid-after-recovery",
         "https://example.com/valid-after-recovery",
@@ -205,10 +238,17 @@ async fn failed_recovery_does_not_withhold_a_valid_claim() {
         .unwrap();
 
     let mut connection = server.connection().await;
+    let damaged_key = key::request(&namespace, "failed-recovery");
     redis::cmd("HSET")
-        .arg(key::request(&namespace, "failed-recovery"))
-        .arg("snapshot")
-        .arg("{")
+        .arg(&damaged_key)
+        .arg("retry_count")
+        .arg(1)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    redis::cmd("RPUSH")
+        .arg(key::failed_workers(&namespace, "failed-recovery"))
+        .arg("")
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
@@ -234,7 +274,7 @@ async fn failed_recovery_does_not_withhold_a_valid_claim() {
         let events = events.lock().unwrap();
         let warning = events
             .iter()
-            .find(|event| event.contains("failed to recover damaged Redis Request"))
+            .find(|event| event.contains("Redis Request restoration settlement failed"))
             .expect("failed recovery must be observable");
         for value in [
             "request_id",

@@ -47,9 +47,10 @@ struct Expired {
     node: String,
     mode: String,
     priority: i32,
+    snapshot: Value,
+    snapshot_hash: Vec<u8>,
     version: i64,
     retry_count: i32,
-    max_retry_count: i32,
     leased_by: String,
     acknowledged: bool,
 }
@@ -133,8 +134,13 @@ impl MySql {
         let mut transaction = pool.begin().await.map_err(sql_error)?;
         validate_trace_ownership(&mut transaction, &stored).await?;
 
+        let mut locks = stored.iter().collect::<Vec<_>>();
+        locks.sort_unstable_by(|left, right| left.snapshot.id.cmp(&right.snapshot.id));
+        for request in locks {
+            replay_or_insert_request(&mut transaction, request).await?;
+        }
         for request in &stored {
-            replay_or_insert(&mut transaction, request).await?;
+            enqueue_initial_request(&mut transaction, request).await?;
         }
         transaction.commit().await.map_err(sql_error)
     }
@@ -167,6 +173,7 @@ impl MySql {
         let (http, browser) = supported_modes(modes);
         let mut requests = Vec::with_capacity(limit);
         let mut traces = HashMap::<String, Arc<trace::Snapshot>>::new();
+        let mut trace_releases = Vec::new();
         // Advance after every inspected priority/FIFO position so an exact
         // Request lock can skip contention without revisiting the same prefix.
         let mut cursor = None;
@@ -284,15 +291,34 @@ impl MySql {
                 };
                 match restore(&claimed, &mut traces) {
                     Ok(request) => requests.push(request),
+                    Err(error) if is_trace_error(&error) => {
+                        trace_releases.push((claimed, error));
+                    }
                     Err(error) => {
-                        recover_claim(&mut transaction, &claimed, error.to_string()).await?;
+                        let retry_limit = snapshot_retry_limit(&claimed);
+                        recover_claim(&mut transaction, &claimed, error.to_string(), retry_limit)
+                            .await?;
                     }
                 }
             }
         }
 
+        for (claimed, _) in &trace_releases {
+            release_claim(&mut transaction, claimed).await?;
+        }
         refresh_claimed_leases(&mut transaction, &mut requests, worker_id).await?;
         transaction.commit().await.map_err(sql_error)?;
+        for (claimed, error) in trace_releases {
+            tracing::warn!(
+                request_id = %claimed.id,
+                task_id = %claimed.task_id,
+                trace_id = %claimed.trace_id,
+                version = claimed.version,
+                worker_id = %claimed.leased_by,
+                error = %error,
+                "MySQL Request Trace restoration failed; Request returned to queue"
+            );
+        }
         Ok(requests)
     }
 
@@ -446,8 +472,8 @@ async fn refresh_claimed_leases(
     if requests.is_empty() {
         return Ok(());
     }
-    let lease_time = database_time(transaction).await?;
     for request in requests {
+        let lease_time = database_time(transaction).await?;
         let result = sqlx::query(
             "UPDATE requests SET lease_time = ?, updated_time = CURRENT_TIMESTAMP(3) \
              WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
@@ -538,7 +564,7 @@ async fn validate_trace_ownership(
     Ok(())
 }
 
-async fn replay_or_insert(
+async fn replay_or_insert_request(
     transaction: &mut Transaction<'_, SqlMySql>,
     stored: &Stored,
 ) -> Result<(), scheduler::Error> {
@@ -580,6 +606,13 @@ async fn replay_or_insert(
         )));
     }
 
+    Ok(())
+}
+
+async fn enqueue_initial_request(
+    transaction: &mut Transaction<'_, SqlMySql>,
+    stored: &Stored,
+) -> Result<(), scheduler::Error> {
     // Only a newly inserted immutable generation still has the initial mutable
     // fields. Replays of processing, retried, or terminal Requests stay no-op.
     sqlx::query(
@@ -591,7 +624,7 @@ async fn replay_or_insert(
            AND leased_by = '' AND lease_time = 0 \
          ON DUPLICATE KEY UPDATE request_id = queues.request_id",
     )
-    .bind(&snapshot.id)
+    .bind(&stored.snapshot.id)
     .execute(&mut **transaction)
     .await
     .map_err(sql_error)?;
@@ -624,8 +657,8 @@ async fn recover_expired(
 ) -> Result<(), scheduler::Error> {
     let expired_before = now.saturating_sub(lease_timeout);
     let rows = sqlx::query(
-        "SELECT id, task_id, trace_id, node, mode, priority, version, retry_count, \
-                max_retry_count, leased_by, ack_version \
+        "SELECT id, task_id, trace_id, node, mode, priority, snapshot, snapshot_hash, \
+                version, retry_count, leased_by, ack_version \
          FROM requests \
          WHERE state = 'processing' AND lease_time <= ? \
          ORDER BY lease_time ASC, id ASC \
@@ -646,9 +679,10 @@ async fn recover_expired(
             node: decode::string(&row, "node")?,
             mode: decode::string(&row, "mode")?,
             priority: row.try_get("priority").map_err(sql_error)?,
+            snapshot: row.try_get("snapshot").map_err(sql_error)?,
+            snapshot_hash: row.try_get("snapshot_hash").map_err(sql_error)?,
             version,
             retry_count: row.try_get("retry_count").map_err(sql_error)?,
-            max_retry_count: row.try_get("max_retry_count").map_err(sql_error)?,
             leased_by: decode::string(&row, "leased_by")?,
             acknowledged: row
                 .try_get::<Option<i64>, _>("ack_version")
@@ -685,6 +719,24 @@ async fn recover_expired_request(
         return Ok(());
     }
 
+    let Some(max_retry_count) = trusted_retry_limit(
+        &request.snapshot,
+        &request.snapshot_hash,
+        &request.id,
+        &request.task_id,
+        &request.trace_id,
+        &request.node,
+        &request.mode,
+        request.priority,
+    ) else {
+        return quarantine_expired(
+            transaction,
+            request,
+            "acknowledged lease expired but its immutable Request Snapshot is invalid",
+        )
+        .await;
+    };
+
     let retry =
         request
             .retry_count
@@ -706,14 +758,16 @@ async fn recover_expired_request(
     )
     .await?;
 
-    if retry < request.max_retry_count {
+    if retry < max_retry_count {
         sqlx::query(
-            "UPDATE requests SET state = 'pending', retry_count = ?, next_time = 0, \
+            "UPDATE requests SET state = 'pending', retry_count = ?, max_retry_count = ?, \
+                    next_time = 0, \
                     leased_by = '', lease_time = 0, ack_version = NULL, \
                     updated_time = CURRENT_TIMESTAMP(3) \
              WHERE id = ? AND state = 'processing' AND version = ?",
         )
         .bind(retry)
+        .bind(max_retry_count)
         .bind(&request.id)
         .bind(request.version)
         .execute(&mut **transaction)
@@ -722,12 +776,14 @@ async fn recover_expired_request(
         enqueue_values(transaction, &request.id, &request.mode, request.priority, 0).await?;
     } else {
         sqlx::query(
-            "UPDATE requests SET state = 'failed', retry_count = ?, next_time = 0, \
+            "UPDATE requests SET state = 'failed', retry_count = ?, max_retry_count = ?, \
+                    next_time = 0, \
                     leased_by = '', lease_time = 0, ack_version = NULL, \
                     updated_time = CURRENT_TIMESTAMP(3) \
              WHERE id = ? AND state = 'processing' AND version = ?",
         )
         .bind(retry)
+        .bind(max_retry_count)
         .bind(&request.id)
         .bind(request.version)
         .execute(&mut **transaction)
@@ -828,6 +884,7 @@ fn restore(
         traces.insert(claimed.trace_id.clone(), trace.clone());
         trace
     };
+    validate_trace_binding(&snapshot, trace.as_ref(), &claimed.trace_id)?;
     let mut request =
         snapshot
             .restore(Some(trace))
@@ -846,11 +903,68 @@ fn restore(
     Ok(request)
 }
 
+fn is_trace_error(error: &scheduler::Error) -> bool {
+    matches!(
+        error,
+        scheduler::Error::TraceNotFound(_) | scheduler::Error::InvalidTrace { .. }
+    )
+}
+
+fn validate_trace_binding(
+    snapshot: &net::request::Snapshot,
+    trace: &trace::Snapshot,
+    trace_id: &str,
+) -> Result<(), scheduler::Error> {
+    if trace.task_id != snapshot.task_id {
+        return Err(scheduler::Error::InvalidTrace {
+            id: trace_id.to_string(),
+            message: "Request Snapshot task_id does not match Trace Snapshot".to_string(),
+        });
+    }
+    if let Some(config) = trace.dsl.as_ref()
+        && !config.graph.nodes.contains_key(&snapshot.node)
+    {
+        return Err(scheduler::Error::InvalidTrace {
+            id: trace_id.to_string(),
+            message: format!(
+                "Request Snapshot node does not exist in Trace Snapshot: {}",
+                snapshot.node
+            ),
+        });
+    }
+    Ok(())
+}
+
+async fn release_claim(
+    transaction: &mut Transaction<'_, SqlMySql>,
+    claimed: &Claimed,
+) -> Result<(), scheduler::Error> {
+    let released = sqlx::query(
+        "UPDATE requests SET state = 'pending', next_time = 0, leased_by = '', lease_time = 0, \
+                ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
+         WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+    )
+    .bind(&claimed.id)
+    .bind(claimed.version)
+    .bind(&claimed.leased_by)
+    .execute(&mut **transaction)
+    .await
+    .map_err(sql_error)?;
+    if released.rows_affected() != 1 {
+        return Err(scheduler::Error::StateMismatch(claimed.id.clone()));
+    }
+    enqueue_values(transaction, &claimed.id, &claimed.mode, claimed.priority, 0).await
+}
+
 async fn recover_claim(
     transaction: &mut Transaction<'_, SqlMySql>,
     claimed: &Claimed,
     reason: String,
+    max_retry_count: Option<i32>,
 ) -> Result<(), scheduler::Error> {
+    let Some(max_retry_count) = max_retry_count else {
+        return quarantine_claim(transaction, claimed, &reason).await;
+    };
     let retry =
         claimed
             .retry_count
@@ -872,14 +986,16 @@ async fn recover_claim(
     )
     .await?;
 
-    if retry < claimed.max_retry_count {
+    if retry < max_retry_count {
         sqlx::query(
-            "UPDATE requests SET state = 'pending', retry_count = ?, next_time = 0, \
+            "UPDATE requests SET state = 'pending', retry_count = ?, max_retry_count = ?, \
+                    next_time = 0, \
                     leased_by = '', lease_time = 0, ack_version = NULL, \
                     updated_time = CURRENT_TIMESTAMP(3) \
              WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
         )
         .bind(retry)
+        .bind(max_retry_count)
         .bind(&claimed.id)
         .bind(claimed.version)
         .bind(&claimed.leased_by)
@@ -889,18 +1005,123 @@ async fn recover_claim(
         enqueue_values(transaction, &claimed.id, &claimed.mode, claimed.priority, 0).await?;
     } else {
         sqlx::query(
-            "UPDATE requests SET state = 'failed', retry_count = ?, next_time = 0, \
+            "UPDATE requests SET state = 'failed', retry_count = ?, max_retry_count = ?, \
+                    next_time = 0, \
                     leased_by = '', lease_time = 0, ack_version = NULL, \
                     updated_time = CURRENT_TIMESTAMP(3) \
              WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
         )
         .bind(retry)
+        .bind(max_retry_count)
         .bind(&claimed.id)
         .bind(claimed.version)
         .bind(&claimed.leased_by)
         .execute(&mut **transaction)
         .await
         .map_err(sql_error)?;
+    }
+    Ok(())
+}
+
+fn snapshot_retry_limit(claimed: &Claimed) -> Option<i32> {
+    trusted_retry_limit(
+        &claimed.snapshot,
+        &claimed.snapshot_hash,
+        &claimed.id,
+        &claimed.task_id,
+        &claimed.trace_id,
+        &claimed.node,
+        &claimed.mode,
+        claimed.priority,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trusted_retry_limit(
+    encoded: &Value,
+    expected_hash: &[u8],
+    id: &str,
+    task_id: &str,
+    trace_id: &str,
+    node: &str,
+    stored_mode: &str,
+    priority: i32,
+) -> Option<i32> {
+    let snapshot = serde_json::from_value::<net::request::Snapshot>(encoded.clone()).ok()?;
+    let actual = snapshot.hash().ok()?;
+    let matches = expected_hash == actual
+        && snapshot.id == id
+        && snapshot.task_id == task_id
+        && snapshot.trace_id == trace_id
+        && snapshot.node == node
+        && mode(&snapshot.mode) == stored_mode
+        && snapshot.priority == priority
+        && (1..=net::request::MAX_RETRY_COUNT).contains(&snapshot.max_retry_count);
+    matches.then_some(snapshot.max_retry_count)
+}
+
+async fn quarantine_claim(
+    transaction: &mut Transaction<'_, SqlMySql>,
+    claimed: &Claimed,
+    reason: &str,
+) -> Result<(), scheduler::Error> {
+    record_failure(
+        transaction,
+        &claimed.id,
+        claimed.version,
+        &claimed.task_id,
+        &claimed.trace_id,
+        &claimed.node,
+        &claimed.leased_by,
+        reason,
+    )
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE requests SET state = 'failed', next_time = 0, leased_by = '', lease_time = 0, \
+                ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
+         WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+    )
+    .bind(&claimed.id)
+    .bind(claimed.version)
+    .bind(&claimed.leased_by)
+    .execute(&mut **transaction)
+    .await
+    .map_err(sql_error)?;
+    if updated.rows_affected() != 1 {
+        return Err(scheduler::Error::StateMismatch(claimed.id.clone()));
+    }
+    Ok(())
+}
+
+async fn quarantine_expired(
+    transaction: &mut Transaction<'_, SqlMySql>,
+    request: &Expired,
+    reason: &str,
+) -> Result<(), scheduler::Error> {
+    record_failure(
+        transaction,
+        &request.id,
+        request.version,
+        &request.task_id,
+        &request.trace_id,
+        &request.node,
+        &request.leased_by,
+        reason,
+    )
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE requests SET state = 'failed', next_time = 0, leased_by = '', lease_time = 0, \
+                ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
+         WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+    )
+    .bind(&request.id)
+    .bind(request.version)
+    .bind(&request.leased_by)
+    .execute(&mut **transaction)
+    .await
+    .map_err(sql_error)?;
+    if updated.rows_affected() != 1 {
+        return Err(scheduler::Error::StateMismatch(request.id.clone()));
     }
     Ok(())
 }

@@ -6,6 +6,7 @@ local prefix = ARGV[1]
 local segment = ARGV[2]
 local payload = cjson.decode(ARGV[3])
 local lease_timeout = tonumber(ARGV[4])
+local scheduler_worker_id = ARGV[5]
 
 local MAX_I64 = '9223372036854775807'
 local MAX_SEQUENCE = '99999999999999999999999999999999'
@@ -21,6 +22,19 @@ local function parse_i32(value, minimum, maximum)
     local parsed = tonumber(value)
     if not parsed or parsed < minimum or parsed > maximum then return nil end
     return parsed
+end
+
+local function snapshot_retry_limit(key)
+    local encoded = redis.call('HGET', key, 'snapshot')
+    if type(encoded) ~= 'string' then return nil end
+    local ok, snapshot = pcall(cjson.decode, encoded)
+    if not ok or type(snapshot) ~= 'table' then return nil end
+    local value = snapshot.max_retry_count
+    if type(value) ~= 'number' or value ~= math.floor(value)
+        or value < 1 or value > MAX_RETRY_COUNT then
+        return nil
+    end
+    return value
 end
 
 local function worker_segment(worker)
@@ -129,6 +143,7 @@ if redis.call('EXISTS', completion) == 1 then
     if redis.call('HGET', completion, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
     if redis.call('HGET', completion, 'node') ~= payload.node then return 'NODE_MISMATCH' end
     if redis.call('HGET', completion, 'state') ~= payload.state then return 'STATE_MISMATCH' end
+    if redis.call('HGET', completion, 'worker_id') ~= scheduler_worker_id then return 'LEASE_MISMATCH' end
     return 'OK'
 end
 
@@ -139,25 +154,29 @@ if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
 if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
+local worker_id = redis.call('HGET', key, 'leased_by')
+if worker_id ~= scheduler_worker_id then return 'LEASE_MISMATCH' end
 
 local time = redis.call('TIME')
 local now = time[1] * 1000 + math.floor(time[2] / 1000)
 if now - tonumber(redis.call('HGET', key, 'lease_time')) >= lease_timeout then return 'LEASE_EXPIRED' end
 if redis.call('HGET', key, 'ack_version') ~= payload.version then return 'NOT_ACKNOWLEDGED' end
-local worker_id = redis.call('HGET', key, 'leased_by')
-if not worker_id or worker_id == '' then return 'CORRUPT_REQUEST' end
 
 local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
 local retry_count = parse_i32(redis.call('HGET', key, 'retry_count'), 0, 2147483647)
-local max_retry_count = parse_i32(redis.call('HGET', key, 'max_retry_count'), 1, MAX_RETRY_COUNT)
-if not retry_count or not max_retry_count
-    or retry_count < 0 or max_retry_count <= 0 or retry_count >= max_retry_count then
+local retry_limit = parse_i32(redis.call('HGET', key, 'retry_limit'), 1, MAX_RETRY_COUNT)
+local snapshot_limit = snapshot_retry_limit(key)
+if not retry_count or not retry_limit
+    or retry_count < 0 or retry_limit <= 0 or retry_count >= retry_limit then
+    return 'CORRUPT_REQUEST_RETRY'
+end
+if not snapshot_limit or snapshot_limit ~= retry_limit then
     return 'CORRUPT_REQUEST_RETRY'
 end
 local retry = retry_count + 1
 local priority = nil
-if retry < max_retry_count then
+if retry < retry_limit then
     priority = parse_i32(redis.call('HGET', key, 'priority'), -2147483648, 2147483647)
     if not priority then return 'CORRUPT_REQUEST_PRIORITY' end
 end
@@ -171,7 +190,7 @@ local exclusions = prefix .. 'pending_exclusions:' .. mode
 local ready_events = prefix .. 'ready_events:' .. mode
 if not has_type(failed_workers, 'list') then return 'CORRUPT_FAILED_WORKERS' end
 if redis.call('LLEN', failed_workers) > retry_count then return 'CORRUPT_FAILED_WORKERS' end
-if retry < max_retry_count then
+if retry < retry_limit then
     if not has_type(meta, 'hash') then return 'CORRUPT_META' end
     if not has_type(prefix .. 'queue:' .. mode .. ':ready', 'zset') then
         return 'CORRUPT_READY_QUEUE'
@@ -184,7 +203,7 @@ local stats, stats_error = merged_stats()
 if not stats then return stats_error end
 
 local sequence = nil
-if retry < max_retry_count then
+if retry < retry_limit then
     sequence = next_sequence()
     if not sequence then return 'SEQUENCE_OVERFLOW' end
 end
@@ -206,7 +225,7 @@ redis.call('HSET', completion,
     'task_id', payload.task_id, 'trace_id', payload.trace_id, 'node', payload.node,
     'worker_id', worker_id, 'state', payload.state, 'error', payload.error)
 
-if retry < max_retry_count then
+if retry < retry_limit then
     local function pad(value, width)
         value = tostring(value)
         return string.rep('0', width - string.len(value)) .. value
@@ -221,13 +240,13 @@ if retry < max_retry_count then
         redis.call('ZADD', exclusions, 0, worker_segment(worker) .. '|' .. segment)
     end
     redis.call('HSET', key,
-        'state', 'pending', 'retry_count', retry, 'next_time', '0',
+        'state', 'pending', 'retry_count', retry, 'max_retry_count', retry_limit, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', 'ready', 'queue_member', member, 'ready_event', event,
         'updated_time', now)
 else
     redis.call('HSET', key,
-        'state', 'failed', 'retry_count', retry, 'next_time', '0',
+        'state', 'failed', 'retry_count', retry, 'max_retry_count', retry_limit, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)
 end

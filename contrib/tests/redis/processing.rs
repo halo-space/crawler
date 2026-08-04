@@ -272,6 +272,57 @@ async fn refresh_restores_the_index_and_updates_its_lease_score() {
 }
 
 #[tokio::test]
+async fn refresh_rejects_a_malformed_lease_time_without_mutation() {
+    let Some(server) = server::Handle::connect().await else {
+        return;
+    };
+    let namespace = server::namespace("processing-invalid-lease-time");
+    let scheduler = server.redis(&namespace);
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
+
+    scheduler
+        .push(payload::Payload::new().requests(vec![request::new(
+            "invalid-lease-time",
+            "https://example.com/invalid-lease-time",
+        )]))
+        .await
+        .unwrap();
+    let request = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    let active = settlement::processing(&request);
+    scheduler.ack(&active).await.unwrap();
+
+    let request_key = key::request(&namespace, &request.id);
+    let index = key::processing(&namespace, "http");
+    let mut connection = server.connection().await;
+    let initial_score = score(&mut connection, &index, &request.id).await;
+    redis::cmd("HSET")
+        .arg(&request_key)
+        .arg("lease_time")
+        .arg("invalid")
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+
+    let error = scheduler.refresh_lease(&active).await.unwrap_err();
+    assert!(error.to_string().contains("CORRUPT_REQUEST_LEASE"));
+    let stored: String = redis::cmd("HGET")
+        .arg(&request_key)
+        .arg("lease_time")
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(stored, "invalid");
+    assert_eq!(
+        score(&mut connection, &index, &request.id).await,
+        initial_score
+    );
+
+    scheduler.close().await.unwrap();
+    server.clear(&namespace).await;
+}
+
+#[tokio::test]
 async fn expired_processing_score_recovers_the_request() {
     let Some(server) = server::Handle::connect().await else {
         return;

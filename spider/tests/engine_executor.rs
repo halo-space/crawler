@@ -3674,6 +3674,7 @@ async fn engine_retries_transient_success_error_without_reexecution() {
         })
         .with_spider(EmptySpider::new())
         .build()
+        .with_idle_interval(std::time::Duration::from_millis(1))
         .with_concurrency(2);
 
     let completion =

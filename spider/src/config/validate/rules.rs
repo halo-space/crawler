@@ -58,9 +58,14 @@ fn check_node(name: &str, node: &graph::node::Config) -> Result<(), Error> {
             }
             match extractor {
                 graph::rules::Extractor::Css { expr, .. } => {
-                    graph::rules::parse_css_output(expr).map_err(|error| {
+                    let (selector, _) = graph::rules::parse_css_output(expr).map_err(|error| {
                         Error::Message(format!(
                             "node {name} field {field_name} invalid css output: {error}"
+                        ))
+                    })?;
+                    scrape_core::CompiledSelector::compile(selector).map_err(|error| {
+                        Error::Message(format!(
+                            "node {name} field {field_name} invalid css selector: {error}"
                         ))
                     })?;
                 }

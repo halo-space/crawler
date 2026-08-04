@@ -19,6 +19,7 @@ where
     E: Execute + 'static,
 {
     require_snapshot(claimed)?;
+    executor.validate(claimed)?;
 
     let before_download = async {
         registry
@@ -48,8 +49,6 @@ where
         stats.filter(claimed.node_key(), 1);
         return Ok(());
     }
-
-    executor.validate(&request)?;
 
     let download_retry = registry
         .retry_policy(&request.middlewares, "error_download")
@@ -279,6 +278,10 @@ mod tests {
         parses: AtomicUsize,
     }
 
+    struct UnknownNodeExecutor {
+        allowed_domain_calls: AtomicUsize,
+    }
+
     struct ReplaceRequest;
 
     impl middleware::Middleware for ReplaceRequest {
@@ -345,6 +348,31 @@ mod tests {
         ) -> Result<(), crate::Error> {
             self.parses.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    impl super::Execute for UnknownNodeExecutor {
+        async fn allowed_domains(
+            &self,
+            _request: &net::Request,
+        ) -> Result<Vec<String>, crate::Error> {
+            self.allowed_domain_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec!["example.com".to_string()])
+        }
+
+        fn validate(&self, request: &net::Request) -> Result<(), crate::Error> {
+            Err(crate::Error::message(format!(
+                "rules node does not exist: {}",
+                request.node_key()
+            )))
+        }
+
+        async fn parse(
+            &self,
+            _request: net::Request,
+            _response: net::Response,
+        ) -> Result<(), crate::Error> {
+            unreachable!()
         }
     }
 
@@ -439,6 +467,34 @@ mod tests {
         assert!(error.to_string().contains("missing Trace Snapshot"));
         assert_eq!(download.calls.load(Ordering::SeqCst), 0);
         assert_eq!(executor.parses.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_node_is_rejected_before_domain_resolution_and_download() {
+        let request = claimed("https://outside.example/article").node("missing");
+        let download = Arc::new(ResponseDownload {
+            calls: AtomicUsize::new(0),
+        });
+        let executor = Arc::new(UnknownNodeExecutor {
+            allowed_domain_calls: AtomicUsize::new(0),
+        });
+
+        let error = execute(
+            &request,
+            download.clone(),
+            executor.clone(),
+            Arc::new(middleware::Registry::new()),
+            Arc::new(stats::Delta::default()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::Error::Message(message) if message == "rules node does not exist: missing"
+        ));
+        assert_eq!(executor.allowed_domain_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(download.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

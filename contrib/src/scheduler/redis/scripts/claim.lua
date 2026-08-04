@@ -290,6 +290,19 @@ local function parse_retry(value)
     return parsed
 end
 
+local function snapshot_retry_limit(key)
+    local encoded = redis.call('HGET', key, 'snapshot')
+    if type(encoded) ~= 'string' then return nil end
+    local ok, snapshot = pcall(cjson.decode, encoded)
+    if not ok or type(snapshot) ~= 'table' then return nil end
+    local value = snapshot.max_retry_count
+    if type(value) ~= 'number' or value ~= math.floor(value)
+        or value < 1 or value > MAX_RETRY_COUNT then
+        return nil
+    end
+    return value
+end
+
 local function remove_active(segment, mode)
     if parse_mode(mode) then
         redis.call('ZREM', prefix .. 'processing:' .. mode, segment)
@@ -468,7 +481,8 @@ local function collect_expired(mode)
                     action.mode = parse_mode(action.mode)
                     action.priority = parse_priority(redis.call('HGET', key, 'priority'))
                     action.retry_count = parse_retry(redis.call('HGET', key, 'retry_count'))
-                    action.max_retry_count = parse_retry(redis.call('HGET', key, 'max_retry_count'))
+                    action.retry_limit = parse_retry(redis.call('HGET', key, 'retry_limit'))
+                    action.snapshot_retry_limit = snapshot_retry_limit(key)
                     local failed_workers = request_key(segment) .. ':failed_workers'
                     action.failed_workers_type = storage_type(failed_workers)
                     action.failed_workers_count = action.failed_workers_type == 'list'
@@ -481,10 +495,12 @@ local function collect_expired(mode)
                         or not action.mode
                         or not action.priority
                         or not action.retry_count
-                        or not action.max_retry_count
-                        or action.max_retry_count <= 0
-                        or action.max_retry_count > MAX_RETRY_COUNT
-                        or action.retry_count >= action.max_retry_count
+                        or not action.retry_limit
+                        or action.retry_limit <= 0
+                        or action.retry_limit > MAX_RETRY_COUNT
+                        or not action.snapshot_retry_limit
+                        or action.snapshot_retry_limit ~= action.retry_limit
+                        or action.retry_count >= action.retry_limit
                         or (action.failed_workers_type ~= 'none'
                             and action.failed_workers_type ~= 'list')
                         or action.failed_workers_count > action.retry_count
@@ -497,7 +513,7 @@ local function collect_expired(mode)
                         action.kind = 'repair'
                     elseif action.acknowledged then
                         action.retry = action.retry_count + 1
-                        action.kind = action.retry < action.max_retry_count and 'requeue' or 'terminal'
+                        action.kind = action.retry < action.retry_limit and 'requeue' or 'terminal'
                     else
                         action.retry = action.retry_count
                         action.kind = 'requeue'
@@ -567,13 +583,15 @@ for _, action in ipairs(actions) do
         end
         if action.kind == 'requeue' then
             redis.call('HSET', action.key,
-                'state', 'pending', 'retry_count', action.retry, 'next_time', '0',
+                'state', 'pending', 'retry_count', action.retry,
+                'max_retry_count', action.retry_limit, 'next_time', '0',
                 'leased_by', '', 'lease_time', '0', 'ack_version', '', 'updated_time', now_text)
             enqueue(action.key, action.mode, action.priority, 0, action.segment)
             add_pending_exclusions(action.mode, action.segment)
         else
             redis.call('HSET', action.key,
-                'state', 'failed', 'retry_count', action.retry, 'next_time', '0',
+                'state', 'failed', 'retry_count', action.retry,
+                'max_retry_count', action.retry_limit, 'next_time', '0',
                 'leased_by', '', 'lease_time', '0', 'ack_version', '',
                 'queue_kind', '', 'queue_member', '', 'ready_event', '',
                 'updated_time', now_text)
@@ -910,7 +928,7 @@ while scan_complete and #claimed < limit do
                 local priority = parse_priority(redis.call('HGET', key, 'priority'))
                 local version = redis.call('HGET', key, 'version')
                 local retry_count = parse_retry(redis.call('HGET', key, 'retry_count'))
-                local max_retry_count = parse_retry(redis.call('HGET', key, 'max_retry_count'))
+                local retry_limit = parse_retry(redis.call('HGET', key, 'retry_limit'))
                 local failed_workers_key = request_key(segment) .. ':failed_workers'
                 local failed_workers_type = storage_type(failed_workers_key)
                 local failed_workers_count = failed_workers_type == 'list'
@@ -922,9 +940,10 @@ while scan_complete and #claimed < limit do
                 if stored_mode ~= selected_mode
                     or not priority
                     or not retry_count
-                    or not max_retry_count
-                    or max_retry_count <= 0
-                    or retry_count >= max_retry_count
+                    or not retry_limit
+                    or retry_limit <= 0
+                    or retry_limit > MAX_RETRY_COUNT
+                    or retry_count >= retry_limit
                     or (failed_workers_type ~= 'none' and failed_workers_type ~= 'list')
                     or failed_workers_count > retry_count
                     or not next_time
@@ -948,7 +967,8 @@ while scan_complete and #claimed < limit do
                     redis.call('HSET', key,
                         'state', 'processing', 'version', next, 'leased_by', worker_id,
                         'lease_time', now_text, 'ack_version', '', 'queue_kind', '',
-                        'queue_member', '', 'ready_event', '', 'updated_time', now_text)
+                        'queue_member', '', 'ready_event', '',
+                        'max_retry_count', retry_limit, 'updated_time', now_text)
                     -- A Request must have one active mode projection even if an
                     -- earlier damaged index placed the segment in the other mode.
                     remove_active(segment, nil)
@@ -975,7 +995,7 @@ while scan_complete and #claimed < limit do
                         next_time = redis.call('HGET', key, 'next_time') or '0',
                         version = next,
                         retry_count = retry_count,
-                        max_retry_count = max_retry_count,
+                        max_retry_count = retry_limit,
                         leased_by = worker_id,
                         lease_time = now_text,
                         snapshot = redis.call('HGET', key, 'snapshot') or '',

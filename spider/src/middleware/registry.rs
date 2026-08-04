@@ -78,6 +78,7 @@ impl Registry {
         let task_id = request.task_id.clone();
         let trace_id = request.trace_id.clone();
         let node = request.node_key().to_string();
+        let mode = request.mode.clone();
         for bind in self.resolve(&request.middlewares, "before_download", true)? {
             request = match bind.middleware.before_download(request, &bind.spec).await? {
                 Next::Continue(request) => request,
@@ -94,6 +95,7 @@ impl Registry {
                     ("task_id", request.task_id == task_id),
                     ("trace_id", request.trace_id == trace_id),
                     ("node", request.node_key() == node),
+                    ("mode", request.mode == mode),
                 ],
             )?;
         }
@@ -348,6 +350,7 @@ mod tests {
         TaskId,
         TraceId,
         Node,
+        Mode,
     }
 
     struct ChangeRequest(RequestField);
@@ -430,6 +433,7 @@ mod tests {
                     RequestField::TaskId => request.task_id = "other-task".to_string(),
                     RequestField::TraceId => request.trace_id = "other-trace".to_string(),
                     RequestField::Node => request = request.node("other-node"),
+                    RequestField::Mode => request.mode = crate::net::Mode::Browser,
                 }
                 Ok(Next::Continue(request))
             })
@@ -531,6 +535,7 @@ mod tests {
             (RequestField::TaskId, "task_id"),
             (RequestField::TraceId, "trace_id"),
             (RequestField::Node, "node"),
+            (RequestField::Mode, "mode"),
         ] {
             let registry = Registry::new();
             registry.register("change", ChangeRequest(change));

@@ -1,6 +1,9 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, oneshot};
+use tracing::instrument::WithSubscriber;
 
 use super::*;
 
@@ -68,6 +71,242 @@ impl crate::item::Store for TestStore {
 
     async fn submit(&self, _payload: &crate::payload::Payload) -> Result<(), crate::item::Error> {
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct RecordedEvents {
+    values: Arc<Mutex<Vec<String>>>,
+    next_span: Arc<AtomicU64>,
+}
+
+impl RecordedEvents {
+    fn new(values: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            values,
+            next_span: Arc::new(AtomicU64::new(1)),
+        }
+    }
+}
+
+impl tracing::Subscriber for RecordedEvents {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Visitor(String);
+
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                let _ = write!(&mut self.0, " {}={value:?}", field.name());
+            }
+        }
+
+        let mut visitor = Visitor(String::new());
+        event.record(&mut visitor);
+        self.values.lock().unwrap().push(visitor.0);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+struct IdleScheduler {
+    claims: Mutex<Vec<Instant>>,
+    pending_checks: AtomicUsize,
+}
+
+impl IdleScheduler {
+    fn new() -> Self {
+        Self {
+            claims: Mutex::new(Vec::new()),
+            pending_checks: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl scheduler::Scheduler for IdleScheduler {
+    async fn open(&self, _concurrency: usize) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn push(&self, _payload: crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn trace(
+        &self,
+        _trace_id: &str,
+    ) -> Result<Option<crate::trace::Snapshot>, scheduler::Error> {
+        Ok(None)
+    }
+
+    async fn next_requests(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<crate::net::Request>, scheduler::Error> {
+        self.claims.lock().unwrap().push(Instant::now());
+        Ok(Vec::new())
+    }
+
+    async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
+        Ok(self.pending_checks.fetch_add(1, Ordering::SeqCst) == 0)
+    }
+
+    async fn ack(&self, _payload: &crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn release(&self, _payload: &crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn refresh_lease(
+        &self,
+        _payload: &crate::payload::Payload,
+    ) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn success(&self, _payload: &crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn failure(&self, _payload: &crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+}
+
+struct FailingDownload;
+
+impl downloader::Download for FailingDownload {
+    async fn open(&self) -> Result<(), downloader::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), downloader::Error> {
+        Err(downloader::Error::InvalidConfig(
+            "downloader close failed".to_string(),
+        ))
+    }
+
+    async fn fetch(
+        &self,
+        _request: crate::net::Request,
+    ) -> Result<crate::net::Response, downloader::Error> {
+        unreachable!()
+    }
+}
+
+struct FailingStore;
+
+impl crate::item::Store for FailingStore {
+    async fn open(&self) -> Result<(), crate::item::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), crate::item::Error> {
+        Err(crate::item::Error::Message(
+            "store close failed".to_string(),
+        ))
+    }
+
+    async fn submit(&self, _payload: &crate::payload::Payload) -> Result<(), crate::item::Error> {
+        Ok(())
+    }
+}
+
+struct FailingScheduler;
+
+impl scheduler::Scheduler for FailingScheduler {
+    async fn open(&self, _concurrency: usize) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), scheduler::Error> {
+        Err(scheduler::Error::Message(
+            "scheduler close failed".to_string(),
+        ))
+    }
+
+    async fn push(&self, _payload: crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn trace(
+        &self,
+        _trace_id: &str,
+    ) -> Result<Option<crate::trace::Snapshot>, scheduler::Error> {
+        Ok(None)
+    }
+
+    async fn next_requests(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<crate::net::Request>, scheduler::Error> {
+        Ok(Vec::new())
+    }
+
+    async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
+        Ok(false)
+    }
+
+    async fn ack(&self, _payload: &crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn release(&self, _payload: &crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn refresh_lease(
+        &self,
+        _payload: &crate::payload::Payload,
+    ) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn success(&self, _payload: &crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+
+    async fn failure(&self, _payload: &crate::payload::Payload) -> Result<(), scheduler::Error> {
+        Ok(())
+    }
+}
+
+struct FailingLifecycle;
+
+impl middleware::Middleware for FailingLifecycle {
+    fn before_spider<'a>(&'a self, _spec: &'a middleware::Spec) -> middleware::BoxFuture<'a, ()> {
+        Box::pin(async {
+            Err(middleware::Error::Message(
+                "before_spider failed".to_string(),
+            ))
+        })
+    }
+
+    fn after_spider<'a>(&'a self, _spec: &'a middleware::Spec) -> middleware::BoxFuture<'a, ()> {
+        Box::pin(async {
+            Err(middleware::Error::Message(
+                "after_spider failed".to_string(),
+            ))
+        })
     }
 }
 
@@ -319,6 +558,55 @@ async fn startup_signal_waits_for_an_active_stage_then_stops_the_next_stage() {
 }
 
 #[tokio::test]
+async fn shutdown_error_waits_for_an_active_stage_before_returning() {
+    let (send_signal, received) = oneshot::channel::<()>();
+    let mut shutdown: ShutdownSignal = Box::pin(async move {
+        received
+            .await
+            .map_err(|error| crate::Error::message(format!("shutdown signal failed: {error}")))?;
+        Err(crate::Error::message("shutdown listener failed"))
+    });
+    let started = Arc::new(Notify::new());
+    let completed = Arc::new(Notify::new());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let stage_started = Arc::clone(&started);
+    let stage_completed = Arc::clone(&completed);
+    let stage_events = Arc::clone(&recorded);
+
+    let task = tokio::spawn(async move {
+        complete_while_listening(
+            async move {
+                stage_started.notify_one();
+                stage_completed.notified().await;
+                Err::<(), _>(crate::Error::message("lifecycle stage failed"))
+            },
+            &mut shutdown,
+        )
+        .with_subscriber(RecordedEvents::new(stage_events))
+        .await
+    });
+
+    started.notified().await;
+    send_signal.send(()).unwrap();
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished());
+
+    completed.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("shutdown error did not wait for the active stage")
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(crate::Error::Message(message)) if message == "shutdown listener failed"
+    ));
+    assert!(recorded.lock().unwrap().iter().any(|event| {
+        event.contains("Engine lifecycle stage failed while handling a shutdown listener error")
+            && event.contains("lifecycle stage failed")
+    }));
+}
+
+#[tokio::test]
 async fn signal_during_init_preserves_the_seed_without_starting_the_actor() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -439,4 +727,111 @@ async fn signal_drains_every_request_from_an_active_claim_without_claiming_again
     assert_eq!(successes.load(Ordering::SeqCst), 2);
     assert_eq!(downloader_closes.load(Ordering::SeqCst), 1);
     assert_eq!(scheduler_closes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn start_until_idle_uses_the_configured_idle_interval() {
+    let interval = Duration::from_millis(80);
+    let (tx, events) = crate::spider::tx::channel(MAX_EVENTS);
+    drop(tx);
+    let mut runtime = Runtime::new(Setup {
+        scheduler: IdleScheduler::new(),
+        downloader: TestDownload {
+            fetches: Arc::new(AtomicUsize::new(0)),
+            closes: Arc::new(AtomicUsize::new(0)),
+        },
+        executor: TestExecutor,
+        store: TestStore,
+        events,
+        registry: middleware::Registry::new(),
+        middlewares: Vec::new(),
+    })
+    .with_idle_interval(interval);
+
+    tokio::time::timeout(Duration::from_secs(2), runtime.start_until_idle())
+        .await
+        .expect("Engine did not stop after Scheduler became idle")
+        .unwrap();
+
+    let claims = runtime.scheduler().claims.lock().unwrap();
+    assert_eq!(claims.len(), 2);
+    assert!(
+        claims[1].duration_since(claims[0]) >= interval,
+        "claims were separated by {:?}, expected at least {interval:?}",
+        claims[1].duration_since(claims[0])
+    );
+}
+
+#[tokio::test]
+async fn close_returns_the_first_error_and_logs_later_failures() {
+    let (_tx, events) = crate::spider::tx::channel(MAX_EVENTS);
+    let runtime = Runtime::new(Setup {
+        scheduler: FailingScheduler,
+        downloader: FailingDownload,
+        executor: TestExecutor,
+        store: FailingStore,
+        events,
+        registry: middleware::Registry::new(),
+        middlewares: Vec::new(),
+    });
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+
+    let result = runtime
+        .close()
+        .with_subscriber(RecordedEvents::new(Arc::clone(&recorded)))
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Download(downloader::Error::InvalidConfig(message)))
+            if message == "downloader close failed"
+    ));
+    let recorded = recorded.lock().unwrap();
+    assert!(recorded.iter().any(|event| {
+        event.contains("additional Item Store close failure")
+            && event.contains("store close failed")
+    }));
+    assert!(recorded.iter().any(|event| {
+        event.contains("additional Scheduler close failure")
+            && event.contains("scheduler close failed")
+    }));
+}
+
+#[tokio::test]
+async fn lifecycle_returns_the_first_error_and_logs_cleanup_failures() {
+    let (tx, events) = crate::spider::tx::channel(MAX_EVENTS);
+    drop(tx);
+    let registry = middleware::Registry::new();
+    registry.register("failing-lifecycle", FailingLifecycle);
+    let mut runtime = Runtime::new(Setup {
+        scheduler: IdleScheduler::new(),
+        downloader: FailingDownload,
+        executor: TestExecutor,
+        store: TestStore,
+        events,
+        registry,
+        middlewares: vec![middleware::Spec::new("failing-lifecycle")],
+    });
+    let mut shutdown: ShutdownSignal = Box::pin(std::future::pending());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+
+    let result = runtime
+        .start_with_shutdown(true, &mut shutdown)
+        .with_subscriber(RecordedEvents::new(Arc::clone(&recorded)))
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Middleware(middleware::Error::Message(message)))
+            if message == "before_spider failed"
+    ));
+    let recorded = recorded.lock().unwrap();
+    assert!(recorded.iter().any(|event| {
+        event.contains("after_spider failed after Engine execution failed")
+            && event.contains("after_spider failed")
+    }));
+    assert!(recorded.iter().any(|event| {
+        event.contains("Engine close failed after execution failed")
+            && event.contains("downloader close failed")
+    }));
 }

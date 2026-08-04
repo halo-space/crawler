@@ -63,19 +63,15 @@ local now = time[1] * 1000 + math.floor(time[2] / 1000)
 local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end
 local retry_count = parse_i32(redis.call('HGET', key, 'retry_count'), 0, 2147483647)
-local stored_max_retry = parse_i32(redis.call('HGET', key, 'max_retry_count'), 1, MAX_RETRY_COUNT)
 local trusted_max_retry = nil
 if snapshot_max_retry ~= '' then
     trusted_max_retry = parse_i32(snapshot_max_retry, 1, MAX_RETRY_COUNT)
     if not trusted_max_retry then return 'CORRUPT_REQUEST_RETRY' end
 end
-local max_retry = trusted_max_retry or stored_max_retry
-if not retry_count or not max_retry or retry_count >= max_retry then
-    return 'CORRUPT_REQUEST_RETRY'
-end
-local retry = retry_count + 1
+local quarantine = not retry_count or not trusted_max_retry or retry_count >= trusted_max_retry
+local retry = not quarantine and retry_count + 1 or nil
 local priority = nil
-if retry < max_retry then
+if not quarantine and retry < trusted_max_retry then
     priority = parse_i32(redis.call('HGET', key, 'priority'), -2147483648, 2147483647)
     if not priority then return 'CORRUPT_REQUEST_PRIORITY' end
 end
@@ -88,11 +84,12 @@ local ready_events = prefix .. 'ready_events:' .. mode
 if not has_type(processing, 'zset') then return 'CORRUPT_PROCESSING' end
 if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
 local reset_failed_workers = not has_type(failed_workers, 'list')
-if not reset_failed_workers and redis.call('LLEN', failed_workers) > retry_count then
+if not reset_failed_workers
+    and (not retry_count or redis.call('LLEN', failed_workers) > retry_count) then
     reset_failed_workers = true
 end
 local reset_completion = not has_type(completion, 'hash')
-if retry < max_retry then
+if not quarantine and retry < trusted_max_retry then
     if not has_type(KEYS[2], 'hash') then return 'CORRUPT_META' end
     if not has_type(prefix .. 'queue:' .. mode .. ':ready', 'zset') then
         return 'CORRUPT_READY_QUEUE'
@@ -102,14 +99,14 @@ if retry < max_retry then
 end
 
 local sequence = nil
-if retry < max_retry then
+if not quarantine and retry < trusted_max_retry then
     sequence = next_sequence()
     if not sequence then return 'SEQUENCE_OVERFLOW' end
 end
 
 if reset_failed_workers then redis.call('DEL', failed_workers) end
 if reset_completion then redis.call('DEL', completion) end
-if redis.call('LPOS', failed_workers, worker_id) == false then
+if not quarantine and redis.call('LPOS', failed_workers, worker_id) == false then
     redis.call('RPUSH', failed_workers, worker_id)
 end
 redis.call('HSET', completion,
@@ -122,7 +119,15 @@ redis.call('HSET', completion,
 redis.call('ZREM', processing, segment)
 redis.call('ZREM', other_processing, segment)
 
-if retry < max_retry then
+if quarantine then
+    redis.call('HSET', key,
+        'state', 'failed', 'next_time', '0',
+        'leased_by', '', 'lease_time', '0', 'ack_version', '',
+        'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)
+    return 'OK'
+end
+
+if retry < trusted_max_retry then
     local function pad(value, width)
         value = tostring(value)
         return string.rep('0', width - string.len(value)) .. value
@@ -137,13 +142,15 @@ if retry < max_retry then
         redis.call('ZADD', exclusions, 0, worker_segment(worker) .. '|' .. segment)
     end
     redis.call('HSET', key,
-        'state', 'pending', 'retry_count', retry, 'max_retry_count', max_retry, 'next_time', '0',
+        'state', 'pending', 'retry_count', retry, 'retry_limit', trusted_max_retry,
+        'max_retry_count', trusted_max_retry, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', 'ready', 'queue_member', member, 'ready_event', event,
         'updated_time', now)
 else
     redis.call('HSET', key,
-        'state', 'failed', 'retry_count', retry, 'max_retry_count', max_retry, 'next_time', '0',
+        'state', 'failed', 'retry_count', retry, 'retry_limit', trusted_max_retry,
+        'max_retry_count', trusted_max_retry, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)
 end

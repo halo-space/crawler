@@ -3,6 +3,8 @@ local prefix = ARGV[1]
 local payload = cjson.decode(ARGV[2])
 local lease_timeout = tonumber(ARGV[3])
 local segment = ARGV[4]
+local worker_id = ARGV[5]
+local require_ack = ARGV[6] ~= '0'
 
 local function has_type(key, expected)
     local actual = redis.call('TYPE', key).ok
@@ -16,13 +18,23 @@ if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
 if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
+if redis.call('HGET', key, 'leased_by') ~= worker_id then return 'LEASE_MISMATCH' end
 
 local time = redis.call('TIME')
 local now = time[1] * 1000 + math.floor(time[2] / 1000)
-if now - tonumber(redis.call('HGET', key, 'lease_time')) >= lease_timeout then
+local stored_lease_time = redis.call('HGET', key, 'lease_time')
+if type(stored_lease_time) ~= 'string'
+    or not string.match(stored_lease_time, '^%d+$')
+    or #stored_lease_time > 16
+    or (#stored_lease_time == 16 and stored_lease_time > '9007199254740991') then
+    return 'CORRUPT_REQUEST_LEASE'
+end
+local lease_time = tonumber(stored_lease_time)
+if not lease_time then return 'CORRUPT_REQUEST_LEASE' end
+if now - lease_time >= lease_timeout then
     return 'LEASE_EXPIRED'
 end
-if redis.call('HGET', key, 'ack_version') ~= payload.version then
+if require_ack and redis.call('HGET', key, 'ack_version') ~= payload.version then
     return 'NOT_ACKNOWLEDGED'
 end
 local mode = redis.call('HGET', key, 'mode')
@@ -35,4 +47,7 @@ if not has_type(other_processing, 'zset') then return 'CORRUPT_PROCESSING' end
 redis.call('ZREM', other_processing, segment)
 redis.call('HSET', key, 'lease_time', now, 'updated_time', now)
 redis.call('ZADD', processing, now, segment)
-return 'OK'
+if require_ack then
+    return 'OK'
+end
+return 'OK:' .. tostring(now)

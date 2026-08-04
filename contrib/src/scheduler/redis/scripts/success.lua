@@ -5,6 +5,7 @@ local prefix = ARGV[1]
 local segment = ARGV[2]
 local payload = cjson.decode(ARGV[3])
 local lease_timeout = tonumber(ARGV[4])
+local scheduler_worker_id = ARGV[5]
 
 local MAX_I64 = '9223372036854775807'
 
@@ -88,6 +89,7 @@ if redis.call('EXISTS', completion) == 1 then
     if redis.call('HGET', completion, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
     if redis.call('HGET', completion, 'node') ~= payload.node then return 'NODE_MISMATCH' end
     if redis.call('HGET', completion, 'state') ~= payload.state then return 'STATE_MISMATCH' end
+    if redis.call('HGET', completion, 'worker_id') ~= scheduler_worker_id then return 'LEASE_MISMATCH' end
     return 'OK'
 end
 
@@ -98,13 +100,13 @@ if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
 if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
+local worker_id = redis.call('HGET', key, 'leased_by')
+if worker_id ~= scheduler_worker_id then return 'LEASE_MISMATCH' end
 
 local time = redis.call('TIME')
 local now = time[1] * 1000 + math.floor(time[2] / 1000)
 if now - tonumber(redis.call('HGET', key, 'lease_time')) >= lease_timeout then return 'LEASE_EXPIRED' end
 if redis.call('HGET', key, 'ack_version') ~= payload.version then return 'NOT_ACKNOWLEDGED' end
-local worker_id = redis.call('HGET', key, 'leased_by')
-if not worker_id or worker_id == '' then return 'CORRUPT_REQUEST' end
 
 local mode = redis.call('HGET', key, 'mode')
 if mode ~= 'http' and mode ~= 'browser' then return 'CORRUPT_REQUEST_MODE' end

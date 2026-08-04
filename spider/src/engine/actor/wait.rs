@@ -23,11 +23,7 @@ pub(super) fn poll<S, D, E, O>(
     E: engine::contract::Execute + 'static,
     O: crate::item::Store + 'static,
 {
-    let interval = if engine.finishes_when_idle() {
-        std::time::Duration::from_millis(1)
-    } else {
-        engine.config.idle_interval
-    };
+    let interval = engine.config.idle_interval;
     let id = task::Id::new();
     let done_id = id.clone();
     let handle = tokio::spawn(async move {

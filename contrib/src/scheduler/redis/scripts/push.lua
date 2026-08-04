@@ -144,6 +144,7 @@ for _, request in ipairs(requests) do
             'leased_by', '',
             'lease_time', '0',
             'retry_count', request.retry_count,
+            'retry_limit', request.max_retry_count,
             'max_retry_count', request.max_retry_count,
             'ack_version', '',
             'created_time', now,

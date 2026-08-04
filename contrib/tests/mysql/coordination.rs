@@ -79,6 +79,72 @@ async fn different_workers_claim_disjoint_requests() {
 }
 
 #[tokio::test]
+async fn reversed_push_batches_use_one_request_lock_order() {
+    let Some(server) = server::Server::connect().await else {
+        return;
+    };
+    let database = server.database("reversed-push-lock-order").await;
+    let first = Arc::new(fixture::scheduler(database.url(), "worker-a"));
+    let second = Arc::new(fixture::scheduler(database.url(), "worker-b"));
+    fixture::open(&first).await;
+    fixture::open(&second).await;
+    fixture::init(&first).await;
+
+    let left = fixture::request("lock-a");
+    let right = fixture::request("lock-b");
+    let ready = Arc::new(tokio::sync::Barrier::new(3));
+    let forward = tokio::spawn({
+        let scheduler = first.clone();
+        let ready = ready.clone();
+        let left = left.clone();
+        let right = right.clone();
+        async move {
+            ready.wait().await;
+            scheduler
+                .push(payload::Payload::new().requests(vec![left, right]))
+                .await
+        }
+    });
+    let reverse = tokio::spawn({
+        let scheduler = second.clone();
+        let ready = ready.clone();
+        async move {
+            ready.wait().await;
+            scheduler
+                .push(payload::Payload::new().requests(vec![right, left]))
+                .await
+        }
+    });
+    ready.wait().await;
+
+    let (forward, reverse) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(forward, reverse)
+    })
+    .await
+    .expect("reversed MySQL push batches deadlocked");
+    forward.unwrap().unwrap();
+    reverse.unwrap().unwrap();
+
+    let claimed = first.next_requests(2).await.unwrap();
+    assert_eq!(claimed.len(), 2);
+    assert_eq!(
+        claimed
+            .iter()
+            .map(|request| request.id.as_str())
+            .collect::<HashSet<_>>(),
+        ["lock-a", "lock-b"].into_iter().collect()
+    );
+    for request in claimed {
+        first.ack(&fixture::processing(&request)).await.unwrap();
+        first.success(&fixture::success(&request)).await.unwrap();
+    }
+
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    database.remove().await;
+}
+
+#[tokio::test]
 async fn claim_skips_a_request_locked_by_replay_and_fills_the_limit() {
     let Some(server) = server::Server::connect().await else {
         return;

@@ -85,12 +85,18 @@ struct Claimed {
     failed_workers: Vec<String>,
 }
 
-struct Recovery {
-    segment: String,
-    version: String,
-    id: String,
-    message: String,
-    max_retry_count: Option<i32>,
+enum RestoreFailure {
+    Trace {
+        claimed: Box<Claimed>,
+        error: scheduler::Error,
+    },
+    Request {
+        segment: String,
+        version: String,
+        id: String,
+        message: String,
+        max_retry_count: Option<i32>,
+    },
 }
 
 impl Redis {
@@ -149,6 +155,8 @@ impl Redis {
         modes: &[net::Mode],
     ) -> Result<Vec<net::Request>, scheduler::Error> {
         validate::worker(worker_id, modes)?;
+        let claim_started = tokio::time::Instant::now();
+        let restore_deadline = handoff_deadline(claim_started, self.lease)?;
         let modes = modes.iter().map(mode).collect::<Vec<_>>();
         let modes = Self::encode(&modes)?;
         let mut connection = self.connection().await?;
@@ -213,8 +221,8 @@ impl Redis {
         drop(connection);
 
         let mut requests = Vec::with_capacity(encoded.len());
-        let mut recoveries = Vec::new();
-        let mut recovery_error = None;
+        let mut restore_failures = Vec::new();
+        let mut restore_error = None;
         for encoded in encoded {
             let value = match serde_json::from_str::<Value>(&encoded) {
                 Ok(value) => value,
@@ -223,8 +231,8 @@ impl Redis {
                         id: "unknown".to_string(),
                         message: format!("claimed Redis Request cannot be decoded: {error}"),
                     };
-                    warn_recovery(worker_id, "unknown", "unknown", "unknown", &error);
-                    recovery_error.get_or_insert(error);
+                    warn_restore(worker_id, "unknown", "unknown", "unknown", &error);
+                    restore_error.get_or_insert(error);
                     continue;
                 }
             };
@@ -241,16 +249,16 @@ impl Redis {
                         .get("version")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown");
-                    warn_recovery(worker_id, &id, "unknown", version, &error);
-                    recovery_error.get_or_insert(error);
+                    warn_restore(worker_id, &id, "unknown", version, &error);
+                    restore_error.get_or_insert(error);
                     continue;
                 }
             };
             let version = match claim_field(&value, "version") {
                 Ok(version) => version,
                 Err(error) => {
-                    warn_recovery(worker_id, &id, &segment, "unknown", &error);
-                    recovery_error.get_or_insert(error);
+                    warn_restore(worker_id, &id, &segment, "unknown", &error);
+                    restore_error.get_or_insert(error);
                     continue;
                 }
             };
@@ -258,7 +266,13 @@ impl Redis {
                 Ok(claimed) if key::segment(&claimed.id) == segment => {
                     match Self::restore(&claimed) {
                         Ok(request) => requests.push(request),
-                        Err(error) => recoveries.push(Recovery {
+                        Err(error) if is_trace_error(&error) => {
+                            restore_failures.push(RestoreFailure::Trace {
+                                claimed: Box::new(claimed),
+                                error,
+                            })
+                        }
+                        Err(error) => restore_failures.push(RestoreFailure::Request {
                             segment,
                             version,
                             id,
@@ -267,7 +281,7 @@ impl Redis {
                         }),
                     }
                 }
-                Ok(_) => recoveries.push(Recovery {
+                Ok(_) => restore_failures.push(RestoreFailure::Request {
                     segment,
                     version,
                     id: id.clone(),
@@ -279,7 +293,7 @@ impl Redis {
                     .to_string(),
                     max_retry_count: None,
                 }),
-                Err(error) => recoveries.push(Recovery {
+                Err(error) => restore_failures.push(RestoreFailure::Request {
                     segment,
                     version,
                     id: id.clone(),
@@ -293,34 +307,73 @@ impl Redis {
             }
         }
 
-        for recovery in recoveries {
-            if let Err(error) = self
-                .recover(
-                    &recovery.segment,
-                    worker_id,
-                    &recovery.version,
-                    &recovery.id,
-                    &recovery.message,
-                    recovery.max_retry_count,
+        // Damaged-Request settlement and valid-Request lease handoff are
+        // independent. Run both groups against the same deadline so a slow
+        // recovery cannot consume a valid peer's handoff budget.
+        let settlements = futures_util::future::join_all(restore_failures.into_iter().map(
+            |failure| async move {
+                let (id, segment, version) = failure.details();
+                let settled = tokio::time::timeout_at(
+                    restore_deadline,
+                    self.settle_restore_failure(failure, worker_id),
                 )
                 .await
-            {
-                warn_recovery(
-                    worker_id,
-                    &recovery.id,
-                    &recovery.segment,
-                    &recovery.version,
-                    &error,
-                );
-                recovery_error.get_or_insert(error);
+                .unwrap_or_else(|_| {
+                    Err(scheduler::Error::Unavailable(format!(
+                        "Redis Request restoration settlement exceeded its lease handoff deadline: {id}"
+                    )))
+                });
+                if let Err(error) = &settled {
+                    warn_restore(worker_id, &id, &segment, &version, error);
+                }
+                settled
+            },
+        ));
+        let refreshed =
+            futures_util::future::join_all(requests.into_iter().map(|mut request| async move {
+                let result = tokio::time::timeout_at(
+                    restore_deadline,
+                    self.refresh_claimed_lease(&request, worker_id),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(scheduler::Error::Unavailable(format!(
+                        "Redis Request lease refresh exceeded its Engine handoff deadline: {}",
+                        request.id
+                    )))
+                });
+                match result {
+                    Ok(lease_time) => {
+                        request.lease_time = lease_time;
+                        Ok(request)
+                    }
+                    Err(error) => Err((request, error)),
+                }
+            }));
+        let (settlements, refreshed) = tokio::join!(settlements, refreshed);
+        for error in settlements.into_iter().filter_map(Result::err) {
+            restore_error.get_or_insert(error);
+        }
+
+        let mut requests = Vec::with_capacity(refreshed.len());
+        for result in refreshed {
+            match result {
+                Ok(request) => requests.push(request),
+                Err((request, error)) => {
+                    tracing::warn!(
+                        request_id = %request.id,
+                        version = request.version,
+                        worker_id = %worker_id,
+                        error = %error,
+                        "Redis claimed Request lease could not be refreshed before Engine handoff"
+                    );
+                    restore_error.get_or_insert(error);
+                }
             }
         }
 
-        // Valid Requests from the same atomic claim remain executable even when
-        // a damaged peer cannot be recovered. Its lease remains visible for the
-        // normal timeout path.
         if requests.is_empty()
-            && let Some(error) = recovery_error
+            && let Some(error) = restore_error
         {
             return Err(error);
         }
@@ -467,9 +520,12 @@ impl Redis {
                     })
             })
             .transpose()?;
+        let trace =
+            trace.ok_or_else(|| scheduler::Error::TraceNotFound(claimed.trace_id.clone()))?;
+        validate_trace_binding(&snapshot, trace.as_ref(), &claimed.trace_id)?;
         let mut request =
             snapshot
-                .restore(trace)
+                .restore(Some(trace))
                 .map_err(|message| scheduler::Error::InvalidRequest {
                     id: claimed.id.clone(),
                     message,
@@ -516,6 +572,121 @@ impl Redis {
             .map_err(redis_error)?;
         Self::result(result, id)
     }
+
+    async fn settle_restore_failure(
+        &self,
+        failure: RestoreFailure,
+        worker_id: &str,
+    ) -> Result<(), scheduler::Error> {
+        match failure {
+            RestoreFailure::Trace { claimed, error } => {
+                let payload = release_payload(&claimed)?;
+                self.return_to_queue(&payload, worker_id).await?;
+                tracing::warn!(
+                    request_id = %claimed.id,
+                    task_id = %claimed.task_id,
+                    trace_id = %claimed.trace_id,
+                    version = %claimed.version,
+                    worker_id = %worker_id,
+                    error = %error,
+                    "Redis Request Trace restoration failed; Request returned to queue"
+                );
+                Ok(())
+            }
+            RestoreFailure::Request {
+                segment,
+                version,
+                id,
+                message,
+                max_retry_count,
+            } => {
+                self.recover(
+                    &segment,
+                    worker_id,
+                    &version,
+                    &id,
+                    &message,
+                    max_retry_count,
+                )
+                .await
+            }
+        }
+    }
+}
+
+impl RestoreFailure {
+    fn details(&self) -> (String, String, String) {
+        match self {
+            Self::Trace { claimed, .. } => (
+                claimed.id.clone(),
+                key::segment(&claimed.id),
+                claimed.version.clone(),
+            ),
+            Self::Request {
+                id,
+                segment,
+                version,
+                ..
+            } => (id.clone(), segment.clone(), version.clone()),
+        }
+    }
+}
+
+fn handoff_deadline(
+    start: tokio::time::Instant,
+    lease: scheduler::Lease,
+) -> Result<tokio::time::Instant, scheduler::Error> {
+    let budget = lease
+        .timeout()
+        .checked_sub(lease.interval())
+        .expect("Scheduler Lease interval is shorter than its timeout");
+    start.checked_add(budget).ok_or_else(|| {
+        scheduler::Error::Message("Redis lease handoff deadline exceeds runtime range".to_string())
+    })
+}
+
+fn is_trace_error(error: &scheduler::Error) -> bool {
+    matches!(
+        error,
+        scheduler::Error::TraceNotFound(_) | scheduler::Error::InvalidTrace { .. }
+    )
+}
+
+fn validate_trace_binding(
+    snapshot: &net::request::Snapshot,
+    trace: &trace::Snapshot,
+    trace_id: &str,
+) -> Result<(), scheduler::Error> {
+    if trace.task_id != snapshot.task_id {
+        return Err(scheduler::Error::InvalidTrace {
+            id: trace_id.to_string(),
+            message: "Request Snapshot task_id does not match Trace Snapshot".to_string(),
+        });
+    }
+    if let Some(config) = trace.dsl.as_ref()
+        && !config.graph.nodes.contains_key(&snapshot.node)
+    {
+        return Err(scheduler::Error::InvalidTrace {
+            id: trace_id.to_string(),
+            message: format!(
+                "Request Snapshot node does not exist in Trace Snapshot: {}",
+                snapshot.node
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn release_payload(claimed: &Claimed) -> Result<payload::Payload, scheduler::Error> {
+    let mut payload = payload::Payload::new();
+    payload.id.clone_from(&claimed.id);
+    payload.task_id.clone_from(&claimed.task_id);
+    payload.trace_id.clone_from(&claimed.trace_id);
+    payload.version = validate::integer(&claimed.version, &claimed.id, "version")?;
+    payload.worker_id.clone_from(&claimed.leased_by);
+    payload.node.clone_from(&claimed.node);
+    payload.state = net::State::Processing;
+    Ok(payload)
 }
 
 fn snapshot_retry_limit(claimed: &Claimed) -> Option<i32> {
@@ -544,7 +715,7 @@ fn claim_field(value: &Value, field: &str) -> Result<String, scheduler::Error> {
         })
 }
 
-fn warn_recovery(
+fn warn_restore(
     worker_id: &str,
     id: &str,
     segment: &str,
@@ -557,6 +728,6 @@ fn warn_recovery(
         version = %version,
         worker_id = %worker_id,
         error = %error,
-        "failed to recover damaged Redis Request"
+        "Redis Request restoration settlement failed"
     );
 }

@@ -206,6 +206,28 @@ graph:
     }
 
     #[test]
+    fn invalid_css_selectors_are_rejected_during_loading() {
+        let rules = r#"
+spider:
+  name: invalid-css
+  start: [{node: index, url: https://example.com}]
+graph:
+  nodes:
+    index:
+      parse:
+        fields:
+          title:
+            extractors:
+              - kind: css
+                expr: "h1["
+  edges: []
+"#;
+
+        let error = Config::from_yaml(rules).unwrap_err();
+        assert!(error.to_string().contains("invalid css selector"));
+    }
+
+    #[test]
     fn ai_extractor_only_accepts_a_prompt() {
         let rules = r#"
 spider:

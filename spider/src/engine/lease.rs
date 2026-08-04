@@ -5,12 +5,18 @@ use crate::{net, payload, scheduler};
 
 const RETRY_DELAY: Duration = Duration::from_millis(25);
 
+struct LeaseRefreshFailure {
+    error: scheduler::Error,
+    deadline: tokio::time::Instant,
+}
+
 /// Runs one Request execution and submits its final settlement while the
 /// acknowledged lease remains valid.
 ///
 /// Ownership loss before execution completes prevents settlement. Once the
-/// final Payload exists, the settlement response is authoritative and a
-/// concurrent refresh error only stops further refreshes.
+/// final Payload exists, the settlement response is authoritative while the
+/// current lease remains valid; a refresh error bounds how long settlement can
+/// wait before the Scheduler's recovery path takes over.
 pub(super) async fn execute_with_lease<S, F>(
     scheduler: &S,
     request: &net::Request,
@@ -35,7 +41,9 @@ where
     tokio::pin!(refresh);
     let payload = tokio::select! {
         biased;
-        error = &mut refresh => return Err(crate::Error::Scheduler(error)),
+        LeaseRefreshFailure { error, .. } = &mut refresh => {
+            return Err(crate::Error::Scheduler(error));
+        },
         payload = &mut execution => payload,
     };
 
@@ -44,7 +52,12 @@ where
     tokio::select! {
         biased;
         result = &mut settlement => result,
-        _ = &mut refresh => settlement.await,
+        LeaseRefreshFailure { error, deadline } = &mut refresh => {
+            match tokio::time::timeout_at(deadline, &mut settlement).await {
+                Ok(result) => result,
+                Err(_) => Err(crate::Error::Scheduler(error)),
+            }
+        },
     }
 }
 
@@ -54,7 +67,7 @@ async fn refresh<S>(
     payload: payload::Payload,
     policy: scheduler::Lease,
     mut deadline: tokio::time::Instant,
-) -> scheduler::Error
+) -> LeaseRefreshFailure
 where
     S: scheduler::Scheduler,
 {
@@ -63,7 +76,7 @@ where
             Ok(refresh_started) => {
                 deadline = match checked_deadline(refresh_started, policy.timeout(), &payload.id) {
                     Ok(deadline) => deadline,
-                    Err(error) => return error,
+                    Err(error) => return LeaseRefreshFailure { error, deadline },
                 };
                 let next_refresh = refresh_started
                     .checked_add(policy.interval())
@@ -71,7 +84,7 @@ where
                     .min(deadline);
                 tokio::time::sleep_until(next_refresh).await;
             }
-            Err(error) => return error,
+            Err(error) => return LeaseRefreshFailure { error, deadline },
         }
     }
 }
@@ -467,6 +480,32 @@ mod tests {
                 if id == "settlement"
         ));
         assert!(scheduler.refreshes.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn stalled_settlement_is_bounded_by_the_expiring_lease() {
+        let policy =
+            scheduler::Lease::new(Duration::from_millis(60), Duration::from_millis(5)).unwrap();
+        let scheduler = TestScheduler::ownership_loss_after(policy, 1);
+        let request = claimed_request();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(150),
+            execute_with_lease(
+                &scheduler,
+                &request,
+                tokio::time::Instant::now(),
+                async { payload::Payload::new() },
+                |_| std::future::pending::<Result<(), crate::Error>>(),
+            ),
+        )
+        .await
+        .expect("a stalled settlement must not block Request completion forever");
+
+        assert!(matches!(
+            result,
+            Err(crate::Error::Scheduler(scheduler::Error::LeaseMismatch(id))) if id == request.id
+        ));
     }
 
     #[test]

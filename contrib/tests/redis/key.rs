@@ -16,6 +16,10 @@ pub(super) fn completion(namespace: &str, id: &str, version: i64) -> String {
     format!("{}:completion:{version}", request(namespace, id))
 }
 
+pub(super) fn failed_workers(namespace: &str, id: &str) -> String {
+    format!("{}:failed_workers", request(namespace, id))
+}
+
 pub(super) fn stats(namespace: &str, trace_id: &str) -> String {
     format!("{namespace}:trace:{}:stats", segment(trace_id))
 }

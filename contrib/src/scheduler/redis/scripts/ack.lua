@@ -1,6 +1,7 @@
 local key = KEYS[1]
 local payload = cjson.decode(ARGV[1])
 local lease_timeout = tonumber(ARGV[2])
+local worker_id = ARGV[3]
 
 local function has_type(key, expected)
     local actual = redis.call('TYPE', key).ok
@@ -14,6 +15,7 @@ if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
 if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
+if redis.call('HGET', key, 'leased_by') ~= worker_id then return 'LEASE_MISMATCH' end
 
 local time = redis.call('TIME')
 local now = time[1] * 1000 + math.floor(time[2] / 1000)

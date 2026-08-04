@@ -46,7 +46,7 @@ async fn replace_snapshot_url(
 }
 
 #[tokio::test]
-async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
+async fn tampered_snapshot_is_quarantined_without_discarding_a_valid_claim() {
     let Some(server) = server::Handle::connect().await else {
         return;
     };
@@ -93,7 +93,13 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(retry_count, "1");
+    assert_eq!(retry_count, "0");
+    let failed_workers: i64 = redis::cmd("LLEN")
+        .arg(key::failed_workers(&namespace, "tampered-terminal"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(failed_workers, 0);
     let error: String = redis::cmd("HGET")
         .arg(key::completion(&namespace, "tampered-terminal", 1))
         .arg("error")
@@ -108,15 +114,13 @@ async fn tampered_snapshot_is_recovered_without_discarding_a_valid_claim() {
 }
 
 #[tokio::test]
-async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
+async fn tampered_snapshot_cannot_fall_back_to_the_stored_retry_limit() {
     let Some(server) = server::Handle::connect().await else {
         return;
     };
     let namespace = server::namespace("snapshot-integrity-retry");
     let scheduler = server.redis(&namespace);
-    let worker_b = server.redis_as(&namespace, worker::B);
     server::open(&scheduler).await;
-    server::open(&worker_b).await;
     super::run::init(&scheduler).await;
 
     let mut tampered = request::new("tampered-retry", "https://example.com/original");
@@ -134,6 +138,13 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
         "https://example.com/changed-but-valid",
     )
     .await;
+    redis::cmd("HSET")
+        .arg(key::request(&namespace, "tampered-retry"))
+        .arg("retry_limit")
+        .arg(128)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
 
     assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     let key = key::request(&namespace, "tampered-retry");
@@ -143,35 +154,23 @@ async fn tampered_snapshot_retries_then_reaches_the_retry_terminal_state() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "pending");
+    assert_eq!(state, "failed");
     let retry_count: String = redis::cmd("HGET")
         .arg(&key)
         .arg("retry_count")
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(retry_count, "1");
-    assert!(worker_b.has_pending_requests().await.unwrap());
-
-    assert!(worker_b.next_requests(1).await.unwrap().is_empty());
-    let terminal_state: String = redis::cmd("HGET")
-        .arg(&key)
-        .arg("state")
+    assert_eq!(retry_count, "0");
+    let failed_workers: i64 = redis::cmd("LLEN")
+        .arg(key::failed_workers(&namespace, "tampered-retry"))
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(terminal_state, "failed");
-    let terminal_retry: String = redis::cmd("HGET")
-        .arg(&key)
-        .arg("retry_count")
-        .query_async(&mut connection)
-        .await
-        .unwrap();
-    assert_eq!(terminal_retry, "2");
+    assert_eq!(failed_workers, 0);
     assert!(!scheduler.has_pending_requests().await.unwrap());
 
     scheduler.close().await.unwrap();
-    worker_b.close().await.unwrap();
     server.clear(&namespace).await;
 }
 
@@ -196,36 +195,183 @@ async fn mutable_hash_cannot_override_the_snapshot_retry_limit() {
     redis::cmd("HSET")
         .arg(key::request(&namespace, "retry-limit"))
         .arg("max_retry_count")
-        .arg(i32::MAX)
+        .arg(2)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    scheduler
+        .ack(&settlement::processing(&claimed))
+        .await
+        .unwrap();
+    let mut failed =
+        payload::Payload::for_request(&claimed, claimed.leased_by.clone()).failed("boom");
+    failed.start_time = Some(1);
+    failed.end_time = Some(2);
+    scheduler.failure(&failed).await.unwrap();
+
+    let key = key::request(&namespace, "retry-limit");
+    let (state, retry_count, retry_limit, max_retry_count): (String, i32, i32, i32) =
+        redis::cmd("HMGET")
+            .arg(&key)
+            .arg("state")
+            .arg("retry_count")
+            .arg("retry_limit")
+            .arg("max_retry_count")
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(state, "failed");
+    assert_eq!(retry_count, 1);
+    assert_eq!(retry_limit, 1);
+    assert_eq!(max_retry_count, 1);
+    assert!(!scheduler.has_pending_requests().await.unwrap());
+
+    scheduler.close().await.unwrap();
+    server.clear(&namespace).await;
+}
+
+#[tokio::test]
+async fn retry_limit_tampering_cannot_change_an_active_request_budget() {
+    let Some(server) = server::Handle::connect().await else {
+        return;
+    };
+    let namespace = server::namespace("retry-limit-integrity");
+    let scheduler = server.redis(&namespace);
+    server::open(&scheduler).await;
+    super::run::init(&scheduler).await;
+
+    let mut request = request::new(
+        "retry-limit-tamper",
+        "https://example.com/retry-limit-tamper",
+    );
+    request.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    scheduler
+        .ack(&settlement::processing(&claimed))
+        .await
+        .unwrap();
+
+    let request_key = key::request(&namespace, &claimed.id);
+    let mut connection = server.connection().await;
+    redis::cmd("HSET")
+        .arg(&request_key)
+        .arg("retry_limit")
+        .arg(128)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+
+    let mut failed =
+        payload::Payload::for_request(&claimed, claimed.leased_by.clone()).failed("boom");
+    failed.start_time = Some(1);
+    failed.end_time = Some(2);
+    let error = scheduler.failure(&failed).await.unwrap_err();
+    assert!(error.to_string().contains("CORRUPT_REQUEST_RETRY"));
+
+    redis::cmd("HSET")
+        .arg(&request_key)
+        .arg("lease_time")
+        .arg(0)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    redis::cmd("ZADD")
+        .arg(key::processing(&namespace, "http"))
+        .arg(0)
+        .arg(key::segment(&claimed.id))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
 
     assert!(scheduler.next_requests(1).await.unwrap().is_empty());
-    let key = key::request(&namespace, "retry-limit");
-    let state: String = redis::cmd("HGET")
-        .arg(&key)
+    let (state, retry_count): (String, i32) = redis::cmd("HMGET")
+        .arg(&request_key)
         .arg("state")
+        .arg("retry_count")
         .query_async(&mut connection)
         .await
         .unwrap();
     assert_eq!(state, "failed");
-    let max_retry_count: i32 = redis::cmd("HGET")
-        .arg(&key)
-        .arg("max_retry_count")
-        .query_async(&mut connection)
-        .await
-        .unwrap();
-    assert_eq!(max_retry_count, 1);
-    let error: String = redis::cmd("HGET")
-        .arg(key::completion(&namespace, "retry-limit", 1))
-        .arg("error")
-        .query_async(&mut connection)
-        .await
-        .unwrap();
-    assert!(error.contains("max_retry_count"));
+    assert_eq!(retry_count, 0);
 
     scheduler.close().await.unwrap();
+    server.clear(&namespace).await;
+}
+
+#[tokio::test]
+async fn expired_lease_cannot_recover_without_a_snapshot_retry_limit() {
+    let Some(server) = server::Handle::connect().await else {
+        return;
+    };
+    let namespace = server::namespace("expired-snapshot-retry-limit");
+    let scheduler = server.redis(&namespace);
+    let worker_b = server.redis_as(&namespace, worker::B);
+    server::open(&scheduler).await;
+    server::open(&worker_b).await;
+    super::run::init(&scheduler).await;
+
+    let mut request = request::new(
+        "expired-snapshot-retry-limit",
+        "https://example.com/expired-snapshot-retry-limit",
+    );
+    request.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+    let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    scheduler
+        .ack(&settlement::processing(&claimed))
+        .await
+        .unwrap();
+
+    let request_key = key::request(&namespace, &claimed.id);
+    let mut connection = server.connection().await;
+    redis::cmd("HSET")
+        .arg(&request_key)
+        .arg("snapshot")
+        .arg("{}")
+        .arg("retry_limit")
+        .arg(128)
+        .arg("lease_time")
+        .arg(0)
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+    redis::cmd("ZADD")
+        .arg(key::processing(&namespace, "http"))
+        .arg(0)
+        .arg(key::segment(&claimed.id))
+        .query_async::<usize>(&mut connection)
+        .await
+        .unwrap();
+
+    assert!(worker_b.next_requests(1).await.unwrap().is_empty());
+    let (state, retry_count): (String, i32) = redis::cmd("HMGET")
+        .arg(&request_key)
+        .arg("state")
+        .arg("retry_count")
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(state, "failed");
+    assert_eq!(retry_count, 0);
+    let failed_workers: i64 = redis::cmd("LLEN")
+        .arg(key::failed_workers(&namespace, &claimed.id))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(failed_workers, 0);
+    assert!(!worker_b.has_pending_requests().await.unwrap());
+
+    scheduler.close().await.unwrap();
+    worker_b.close().await.unwrap();
     server.clear(&namespace).await;
 }
 
@@ -271,14 +417,16 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
         .unwrap();
 
     assert!(scheduler.next_requests(1).await.unwrap().is_empty());
-    let (state, max_retry_count): (String, i32) = redis::cmd("HMGET")
+    let (state, retry_limit, max_retry_count): (String, i32, i32) = redis::cmd("HMGET")
         .arg(&target_key)
         .arg("state")
+        .arg("retry_limit")
         .arg("max_retry_count")
         .query_async(&mut connection)
         .await
         .unwrap();
     assert_eq!(state, "failed");
+    assert_eq!(retry_limit, 1);
     assert_eq!(max_retry_count, 1);
 
     scheduler.close().await.unwrap();
