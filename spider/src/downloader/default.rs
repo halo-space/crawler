@@ -26,7 +26,7 @@ impl Default for Downloader {
     fn default() -> Self {
         Self {
             http: Http::new(),
-            browser: Browser,
+            browser: Browser::default(),
         }
     }
 }
@@ -65,16 +65,18 @@ mod tests {
     use crate::downloader::Download;
 
     #[tokio::test]
-    async fn routes_browser_requests_to_browser_downloader() {
+    async fn rejects_non_get_browser_requests_before_starting_a_session() {
         let request = net::Request::follow("https://example.com")
             .unwrap()
-            .mode(Mode::Browser);
+            .mode(Mode::Browser)
+            .method(net::Method::Post);
 
-        let error = match Downloader::new().fetch(request).await {
-            Ok(_) => panic!("browser request should fail until Browser is implemented"),
-            Err(error) => error,
-        };
+        let downloader = Downloader::new();
+        downloader.open().await.unwrap();
+        let error = downloader.fetch(request).await.unwrap_err();
 
-        assert!(matches!(error, downloader::Error::UnsupportedMode(mode) if mode == "browser"));
+        assert!(
+            matches!(error, downloader::Error::InvalidConfig(message) if message.contains("only supports GET"))
+        );
     }
 }

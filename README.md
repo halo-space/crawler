@@ -12,6 +12,8 @@ contract supports local execution and durable Redis or MySQL 9 scheduling.
   scheduling contract.
 - HTTP downloading includes retries, bounded bodies, redirects, cookies, proxy/TLS settings, and
   deterministic response decoding.
+- Browser downloading uses `thirtyfour` with Chrome/Chromium, rendered DOM responses, Session cookie
+  reuse, and optional CSS waits.
 - CSS selection, deterministic CSS healing, RFC 9535 JSONPath, and explicit OpenAI-compatible JSON-object extraction are built in.
 - Items use an independent Store contract; JSONL is the default local implementation.
 - Optional `fastrace` instrumentation traces each Request independently without changing business

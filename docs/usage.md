@@ -717,8 +717,8 @@ The Worker-side `contrib::scheduler::api::Api` adapter is also implemented. Its 
 service is not part of this workspace. This repository maintains only the Worker-side adapter and its
 client-side HTTP contract; a separate project owns the Master service, server-side protocol, database,
 Cron, Control API, frontend, and their design.
-Optional `fastrace` runtime tracing is implemented; a real Browser Downloader and mixed HTTP/browser
-end-to-end execution remain v5 work. AI provider configuration is already Worker-local: one reusable
+Optional `fastrace` runtime tracing is implemented; the Browser Downloader now uses `thirtyfour` for
+Chrome/Chromium navigation and rendered DOM, while mixed HTTP/browser end-to-end acceptance remains v5 work. AI provider configuration is already Worker-local: one reusable
 `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.
 Memory uses the internal identity `local`, defaults to HTTP mode, and can replace its capability set
 with `Memory::with_modes(...)`; it does not register or heartbeat. Redis, MySQL, and API require stable Worker

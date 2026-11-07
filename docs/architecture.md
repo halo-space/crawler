@@ -24,7 +24,7 @@ The workspace contains four crates:
 | Memory Scheduler | Implemented | Priority/FIFO queue, delayed Requests, leases, lease refresh, retry, terminal states, Traces, and statistics |
 | HTTP Downloader | Implemented | Bounded decoded body, whole-fetch timeout, structured headers/cookies, redirects, proxy/TLS isolation, and bounded idle clients |
 | Response charset decoding | Implemented | Deterministic BOM/header/HTML-meta/UTF-8 selection in `Response::text()` while preserving post-content-decoding bytes |
-| Browser Downloader | Not implemented | The current stub returns `UnsupportedMode("browser")`; implementation is planned for v5 |
+| Browser Downloader | Implemented | `thirtyfour`-based Chrome/Chromium navigation, rendered DOM, Session reuse, cookies, CDP response metadata, and CSS waits |
 | CSS Selector | Implemented | `Response::css()` returns the native `scrape_core::Soup` |
 | CSS Healing | Implemented | CSS-only deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
 | Regex and JSON | Implemented | Regex selection, full-body `Response::json<T>()`, and exact RFC 9535 JSONPath selection without Healing |
@@ -641,6 +641,15 @@ Middleware or Scheduler download retry invokes a new fetch and receives a fresh 
 retry reuses the existing Response and performs no download. The completed body remains the existing
 bounded `Response.body: Bytes`; no public streaming Response, file sink, or attachment API is added.
 
+The Browser Downloader uses `thirtyfour` to drive Chrome/Chromium and is limited to GET page navigation; it is
+not a generic HTTP API client. Each Request selects a Worker-local Session by `task_id + trace_id + starting
+origin + proxy/TLS + browser configuration`. A Session owns one main page and navigates Requests serially.
+Session cookies, LocalStorage, and SessionStorage are Worker-local temporary state: they do not enter the Request
+Snapshot and are not a cross-Worker recovery source. Browser `Response.body` is the DOM rendered after JavaScript
+execution. Main-document status and headers come from CDP Network events, and optional `Request.wait_selector`
+waits for a CSS selector. Browser disconnects, navigation failures, wait timeouts, and page-read failures destroy
+the Session; `error_download.retry` supplies the backoff and retry policy.
+
 The Downloader follows only `301`, `302`, `303`, `307`, and `308`. A redirect that changes a
 body-bearing Request to GET discards the body and removes `Content-Length`, `Content-Type`,
 `Content-Encoding`, `Content-Language`, `Content-Location`, and `Transfer-Encoding` on subsequent hops.
@@ -1052,7 +1061,7 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
 - v4: the shared backend-neutral Scheduler conformance suite, Redis 7 standalone and MySQL 9 Schedulers, RedisBloom Dedup, shared Redis RateLimit, Engine-level Worker-local `ai::OpenAI` provider injection, and optional per-Request `fastrace` runtime tracing are implemented.
-- v5: a real Browser Downloader plus mixed HTTP/browser end-to-end Engine acceptance, and a separate Item attachment downloader. Attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
+- v5: mixed HTTP/browser end-to-end Engine acceptance and a separate Item attachment downloader. The Browser Downloader is implemented; attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:
 
@@ -1071,6 +1080,7 @@ These capabilities must preserve the existing core contracts:
 - batching an entire Trace's Items at Engine shutdown;
 - using Item ID for business deduplication;
 - supporting Redis Cluster through the standalone Redis Scheduler; Cluster needs a separate Scheduler design;
+- Browser mode is GET-only page navigation in the first implementation and does not serve as a generic HTTP API client;
 - downloading Item attachments; that capability is unimplemented and assigned to an independent v5 change;
 - making the core `spider` crate depend on `contrib`.
 

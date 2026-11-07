@@ -10,6 +10,7 @@
 - 代码模式与 Rules 模式共用 Spider、Request、Response、Item、Middleware 和 Engine。
 - Memory、Redis、MySQL Scheduler 与 Worker 侧 API Scheduler 适配器使用同一套调度合同。
 - HTTP 下载支持重试、响应体上限、重定向、Cookie、Proxy/TLS 和确定性字符集解码。
+- Browser Downloader 使用 `thirtyfour` 驱动 Chrome/Chromium，支持渲染 DOM、Session Cookie 复用和 CSS 等待。
 - 内置 CSS Selector、确定性 CSS Healing、RFC 9535 JSONPath，以及显式的 OpenAI-compatible JSON 对象提取。
 - Item 使用独立 Store 合同，默认实现为本地 JSONL。
 - 可选 `fastrace` 运行期追踪为每条 Request 建立独立链路，不改变业务 `trace_id` 或爬虫控制流。

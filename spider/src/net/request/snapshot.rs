@@ -28,6 +28,7 @@ pub struct Snapshot {
     pub mode: net::Mode,
     pub timeout: Option<u64>,
     pub max_body_bytes: Option<u64>,
+    pub wait_selector: String,
     pub proxy: Option<net::ProxyConfig>,
     pub tls: Option<net::TlsConfig>,
     pub middlewares: Vec<middleware::Spec>,
@@ -62,6 +63,7 @@ impl fmt::Debug for Snapshot {
             .field("mode", &self.mode)
             .field("timeout", &self.timeout)
             .field("max_body_bytes", &self.max_body_bytes)
+            .field("wait_selector", &self.wait_selector)
             .field("proxy", &self.proxy)
             .field("tls", &self.tls)
             .field("middlewares_len", &self.middlewares.len())
@@ -100,6 +102,7 @@ impl TryFrom<net::Request> for Snapshot {
             mode: request.mode,
             timeout: request.timeout,
             max_body_bytes: request.max_body_bytes,
+            wait_selector: request.wait_selector,
             proxy: request.proxy,
             tls: request.tls,
             middlewares: request.middlewares,
@@ -167,6 +170,10 @@ impl Snapshot {
         }
         if self.max_body_bytes == Some(0) {
             return Err("Request Snapshot max_body_bytes must be positive".to_string());
+        }
+        if !self.wait_selector.is_empty() {
+            scrape_core::CompiledSelector::compile(&self.wait_selector)
+                .map_err(|error| format!("Request Snapshot wait_selector is invalid: {error}"))?;
         }
         if self.state != net::State::Pending {
             return Err("queued Request Snapshot state must be pending".to_string());
@@ -253,6 +260,7 @@ impl Snapshot {
         request.mode = self.mode;
         request.timeout = self.timeout;
         request.max_body_bytes = self.max_body_bytes;
+        request.wait_selector = self.wait_selector;
         request.proxy = self.proxy;
         request.tls = self.tls;
         request.middlewares = self.middlewares;

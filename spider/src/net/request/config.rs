@@ -23,6 +23,8 @@ pub struct Config {
     #[serde(default)]
     pub max_body_bytes: Option<u64>,
     #[serde(default)]
+    pub wait_selector: String,
+    #[serde(default)]
     pub dont_filter: Option<bool>,
     #[serde(default)]
     pub headers: HashMap<String, Value>,
@@ -47,6 +49,7 @@ impl fmt::Debug for Config {
             .field("method", &self.method)
             .field("timeout", &self.timeout)
             .field("max_body_bytes", &self.max_body_bytes)
+            .field("wait_selector", &self.wait_selector)
             .field("dont_filter", &self.dont_filter)
             .field("headers_len", &self.headers.len())
             .field("cookies_len", &self.cookies.len())
@@ -86,6 +89,11 @@ impl Config {
             return Err(Error::Message(format!(
                 "node {node} max_body_bytes must be positive"
             )));
+        }
+        if !self.wait_selector.is_empty() {
+            scrape_core::CompiledSelector::compile(&self.wait_selector).map_err(|error| {
+                Error::Message(format!("node {node} has invalid wait_selector: {error}"))
+            })?;
         }
         let mut header_names = HashSet::with_capacity(self.headers.len());
         for (name, value) in &self.headers {
@@ -166,6 +174,7 @@ impl Config {
             .unwrap_or_default();
         request.timeout = self.timeout;
         request.max_body_bytes = self.max_body_bytes;
+        request.wait_selector.clone_from(&self.wait_selector);
         request.dont_filter = self.dont_filter.unwrap_or(false);
         if let Some(mode) = self.download_mode.as_deref() {
             request.mode = match mode.to_ascii_lowercase().as_str() {

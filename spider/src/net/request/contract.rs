@@ -61,6 +61,7 @@ pub struct Request {
     pub mode: Mode,
     pub timeout: Option<u64>,
     pub max_body_bytes: Option<u64>,
+    pub wait_selector: String,
     pub proxy: Option<ProxyConfig>,
     pub tls: Option<TlsConfig>,
 
@@ -113,6 +114,7 @@ impl Request {
             mode: Mode::Http,
             timeout: None,
             max_body_bytes: None,
+            wait_selector: String::new(),
             proxy: None,
             tls: None,
             middlewares: Vec::new(),
@@ -221,6 +223,11 @@ impl Request {
 
     pub fn max_body_bytes(mut self, max_body_bytes: u64) -> Self {
         self.max_body_bytes = Some(max_body_bytes);
+        self
+    }
+
+    pub fn wait_selector(mut self, selector: impl Into<String>) -> Self {
+        self.wait_selector = selector.into();
         self
     }
 
@@ -384,6 +391,7 @@ impl fmt::Debug for Request {
             .field("mode", &self.mode)
             .field("timeout", &self.timeout)
             .field("max_body_bytes", &self.max_body_bytes)
+            .field("wait_selector", &self.wait_selector)
             .field("proxy", &self.proxy)
             .field("tls", &self.tls)
             .field("middlewares_len", &self.middlewares.len())

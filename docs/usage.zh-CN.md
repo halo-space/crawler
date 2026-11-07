@@ -675,8 +675,8 @@ Reporter 未安装、当前 Request 未被采样或编译期 feature 未开启�
 Worker 侧 `contrib::scheduler::api::Api` 适配器也已经实现；对应 Master 服务不属于这个 workspace。
 本仓库只维护 Worker 侧适配器及其客户端 HTTP 合同；Master 服务、服务端协议、数据库、Cron、Control
 API、前端及其设计由独立项目负责。
-可选 `fastrace` 运行期链路追踪已经实现；真实 Browser Downloader 与 HTTP/browser 混合端到端执行
-属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
+可选 `fastrace` 运行期链路追踪已经实现；Browser Downloader 已使用 `thirtyfour` 支持 Chrome/Chromium
+页面导航和渲染 DOM，HTTP/browser 混合端到端验收属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
 `ai::OpenAI` provider，Rules 只保留提示词。
 Memory 使用内部身份 `local`，默认支持 HTTP，可通过 `Memory::with_modes(...)` 替换能力集合；它不注册、
 也不发送心跳。Redis、MySQL 和 API 要求在 Scheduler 上配置稳定的 Worker ID、host 和 version，

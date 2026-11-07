@@ -24,7 +24,7 @@
 | Memory Scheduler | 已实现 | 优先级/FIFO 队列、延迟请求、租约、续租、重试、终态、Trace 与统计 |
 | HTTP Downloader | 已实现 | 有界解码 body、完整 fetch 超时、结构化 headers/cookies、redirect、proxy/TLS 隔离和有界空闲 Client |
 | Response 字符集解码 | 已实现 | `Response::text()` 按 BOM/header/HTML meta/UTF-8 确定性选择，并保留 HTTP 内容解码后 bytes |
-| Browser Downloader | 未实现 | 当前为明确返回 `UnsupportedMode("browser")` 的占位实现，计划在 v5 完成 |
+| Browser Downloader | 已实现 | 基于 `thirtyfour` 的 Chrome/Chromium 页面导航、渲染 DOM、Session 复用、Cookie、CDP 状态读取和 CSS 等待 |
 | CSS Selector | 已实现 | `Response::css()` 返回原生 `scrape_core::Soup` |
 | CSS Healing | 已实现 | CSS 专属；普通 CSS 未命中后执行确定性全文档候选评分，需要显式开启 |
 | Regex 与 JSON | 已实现 | Regex 选择、完整正文 `Response::json<T>()`，以及不带 Healing 的精确 RFC 9535 JSONPath 选择 |
@@ -566,6 +566,14 @@ body stream 共享一个 deadline。redirect 不重置该预算。Middleware 或
 一份新的完整预算；parse 重试复用已有 Response，不重新下载。最终 body 仍是已有的有界
 `Response.body: Bytes`，不新增公开 streaming Response、文件 sink 或附件 API。
 
+Browser Downloader 使用 `thirtyfour` 驱动 Chrome/Chromium。它只承担 GET 页面导航，不作为通用 HTTP API
+客户端。每条 Request 按 `task_id + trace_id + 起始 origin + proxy/TLS + 浏览器配置` 选择 Worker 本地
+Session；同一 Session 使用一个主页面并串行导航。Session Cookie、LocalStorage 和 SessionStorage 只属于
+Worker 本地临时状态，不进入 Request Snapshot，也不作为跨 Worker 恢复依据。Browser Response.body 是
+JavaScript 执行后的渲染 DOM；主文档状态码和 headers 通过 CDP Network 事件读取，可选的
+`Request.wait_selector` 使用 CSS selector 等待页面节点。浏览器断连、导航失败、等待超时或读取页面失败
+会销毁当前 Session，随后由 `error_download.retry` 负责退避重试。
+
 Downloader 只跟随 `301`、`302`、`303`、`307` 和 `308`。redirect 将带 body 的 Request 改为 GET
 时，会丢弃 body，并在后续跳转删除 `Content-Length`、`Content-Type`、`Content-Encoding` 和
 `Content-Language`、`Content-Location`、`Transfer-Encoding`；即使之前的 body 值为空，只要携带了
@@ -951,7 +959,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 
 - v3：按 Worker 能力范围原子领取 Request；确定性响应字符集解码，以及基于 fixture 的更完整页面回归。这些合同均已实现。
 - v4：后端无关的 Scheduler 共享一致性套件、Redis 7 单实例与 MySQL 9 Scheduler、RedisBloom Dedup、共享 Redis RateLimit、Engine 级 Worker 本地 `ai::OpenAI` provider 注入，以及可选的逐 Request `fastrace` 运行期追踪均已实现。
-- v5：真实 Browser Downloader、HTTP/browser 混合端到端 Engine 验收，以及独立的 Item 附件下载。附件下载和 Browser 下载是互不依赖的两个交付项；按能力领取的语义仍属于 v3 合同。
+- v5：HTTP/browser 混合端到端 Engine 验收，以及独立的 Item 附件下载。Browser Downloader 已实现；附件下载和 Browser 下载是互不依赖的两个交付项；按能力领取的语义仍属于 v3 合同。
 
 这些能力必须沿用当前核心合同：
 
@@ -970,6 +978,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 - 不在 Engine 末尾批量提交整个 Trace 的 Items；
 - 不让 Item ID 承担业务去重；
 - Redis 单实例 Scheduler 不支持 Redis Cluster；Cluster 需要独立的 Scheduler 设计；
+- Browser 模式第一版只支持 GET 页面导航，不承担通用 HTTP API 请求；
 - 不下载 Item 附件；该能力尚未实现，已分配到独立的 v5 变更；
 - 不让核心 `spider` crate 依赖 `contrib`。
 
