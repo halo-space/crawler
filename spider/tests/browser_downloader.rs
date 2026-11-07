@@ -37,9 +37,12 @@ async fn browser_returns_rendered_dom_when_enabled() {
     }
 
     let (url, server) = local_page();
-    let browser = Browser::new()
+    let mut browser = Browser::new()
         .with_idle_timeout(Duration::from_secs(30))
         .unwrap();
+    if let Ok(url) = std::env::var("WEBDRIVER_URL") {
+        browser = browser.with_webdriver_url(url);
+    }
     browser.open().await.unwrap();
 
     let request = Request::follow(url)
