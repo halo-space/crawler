@@ -25,6 +25,7 @@
 | HTTP Downloader | 已实现 | 有界解码 body、完整 fetch 超时、结构化 headers/cookies、redirect、proxy/TLS 隔离和有界空闲 Client |
 | Response 字符集解码 | 已实现 | `Response::text()` 按 BOM/header/HTML meta/UTF-8 确定性选择，并保留 HTTP 内容解码后 bytes |
 | Browser Downloader | 已实现 | 基于 `thirtyfour` 的 Chrome/Chromium 页面导航、渲染 DOM、Session 复用、Cookie、CDP 状态读取和 CSS 等待 |
+| Browser 登录配置 | 已实现 | `spider.login` 随 Rules DSL 冻结到 Trace Snapshot；Browser 按快照执行 Cookie 检查和登录动作 |
 | CSS Selector | 已实现 | `Response::css()` 返回原生 `scrape_core::Soup` |
 | CSS Healing | 已实现 | CSS 专属；普通 CSS 未命中后执行确定性全文档候选评分，需要显式开启 |
 | Regex 与 JSON | 已实现 | Regex 选择、完整正文 `Response::json<T>()`，以及不带 Healing 的精确 RFC 9535 JSONPath 选择 |
@@ -573,6 +574,16 @@ Worker 本地临时状态，不进入 Request Snapshot，也不作为跨 Worker 
 JavaScript 执行后的渲染 DOM；主文档状态码和 headers 通过 CDP Network 事件读取，可选的
 `Request.wait_selector` 使用 CSS selector 等待页面节点。浏览器断连、导航失败、等待超时或读取页面失败
 会销毁当前 Session，随后由 `error_download.retry` 负责退避重试。
+
+Spider 可以在 `spider.login` 中声明 Browser 登录配置。Spider 配置创建 Trace 时，`login` 随完整 DSL
+写入 `traces.snapshot.dsl.spider.login`；Worker 不在执行期间重新读取 `spiders` 表，也不增加登录专用
+API。Browser 只从当前 Request 关联的 Trace Snapshot 读取这份配置。没有 `login` 时按匿名 Browser
+Request 执行；有配置时按 `login_key + origin` 在 Worker 内存中复用 Cookie，并执行登录检查和动作。
+`selector`、`url`、`cookie` 检查条件全部满足才算登录成功；`fill` 的 `value` 支持固定值和
+`env:NAME`，`click`、`wait`、`manual` 分别执行页面动作、等待条件和人工等待。登录配置的 `ttl` 与
+`refresh_after` 均使用毫秒，登录动作失败沿用 `error_download.retry`。当前 CookieStore 是 Worker 本地
+内存实现；需要跨 Worker 共享时，可通过 `contrib::browser::RedisCookieStore` 显式注入 Redis 实现。
+Cookie 数据不进入 Request 或 Trace Snapshot。
 
 Downloader 只跟随 `301`、`302`、`303`、`307` 和 `308`。redirect 将带 body 的 Request 改为 GET
 时，会丢弃 body，并在后续跳转删除 `Content-Length`、`Content-Type`、`Content-Encoding` 和

@@ -720,6 +720,37 @@ Cron, Control API, frontend, and their design.
 Optional `fastrace` runtime tracing is implemented; the Browser Downloader now uses `thirtyfour` for
 Chrome/Chromium navigation and rendered DOM, while mixed HTTP/browser end-to-end acceptance remains v5 work. AI provider configuration is already Worker-local: one reusable
 `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.
+
+Browser login belongs to `spider.login`; it is not a separate login Request. When a Trace is created, the login
+configuration is frozen with the Rules DSL at `traces.snapshot.dsl.spider.login`. During Request execution the
+Worker reads it from the current Trace Snapshot and does not reread the `spiders` table. Example:
+
+```yaml
+spider:
+  name: jd_article
+  login:
+    login_key: jd_main
+    url: https://passport.jd.com/
+    check:
+      selector: ".user-name"
+    actions:
+      - kind: fill
+        selector: "#loginname"
+        value: env:JD_USERNAME
+      - kind: fill
+        selector: "#nloginpwd"
+        value: env:JD_PASSWORD
+      - kind: click
+        selector: "#loginsubmit"
+      - kind: manual
+        timeout: 120000
+```
+
+All non-empty `selector`, `url`, and `cookie` checks must pass. `value` accepts a literal or `env:NAME`.
+Cookies are reused in Worker memory by `login_key + origin`; inject
+`contrib::browser::RedisCookieStore` explicitly when Workers must share them. `ttl` and `refresh_after` are milliseconds.
+Login failures use the existing `error_download.retry`. Browser is headless by default; manual QR or challenge
+flows require a visible remote WebDriver or `Browser::with_headless(false)`.
 Memory uses the internal identity `local`, defaults to HTTP mode, and can replace its capability set
 with `Memory::with_modes(...)`; it does not register or heartbeat. Redis, MySQL, and API require stable Worker
 ID, host, and version values on the Scheduler, while `with_modes(...)` freezes their download

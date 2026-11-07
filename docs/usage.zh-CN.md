@@ -678,6 +678,37 @@ API、前端及其设计由独立项目负责。
 可选 `fastrace` 运行期链路追踪已经实现；Browser Downloader 已使用 `thirtyfour` 支持 Chrome/Chromium
 页面导航和渲染 DOM，HTTP/browser 混合端到端验收属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
 `ai::OpenAI` provider，Rules 只保留提示词。
+
+Browser 登录配置属于 `spider.login`，不是独立的登录 Request。创建 Trace 时，它会随 Rules DSL 写入
+`traces.snapshot.dsl.spider.login`；Worker 执行 Request 时只从当前 Trace Snapshot 读取，不重新读取
+`spiders` 表。配置示例：
+
+```yaml
+spider:
+  name: jd_article
+  login:
+    login_key: jd_main
+    url: https://passport.jd.com/
+    check:
+      selector: ".user-name"
+    actions:
+      - kind: fill
+        selector: "#loginname"
+        value: env:JD_USERNAME
+      - kind: fill
+        selector: "#nloginpwd"
+        value: env:JD_PASSWORD
+      - kind: click
+        selector: "#loginsubmit"
+      - kind: manual
+        timeout: 120000
+```
+
+`selector`、`url`、`cookie` 检查条件全部满足才算登录成功；`value` 可以是固定值或 `env:NAME`。
+Cookie 默认按 `login_key + origin` 在 Worker 内存中复用；需要跨 Worker 共享时，显式注入
+`contrib::browser::RedisCookieStore`。`ttl` 和 `refresh_after` 使用毫秒。登录配置不进入
+Request Snapshot，登录失败沿用 `error_download.retry`。默认 Browser 是无头模式；使用人工扫码时应配置
+可见的远程 WebDriver 或通过 `Browser::with_headless(false)` 关闭无头模式。
 Memory 使用内部身份 `local`，默认支持 HTTP，可通过 `Memory::with_modes(...)` 替换能力集合；它不注册、
 也不发送心跳。Redis、MySQL 和 API 要求在 Scheduler 上配置稳定的 Worker ID、host 和 version，
 `with_modes(...)` 冻结其下载能力。缺少元数据或 mode 集合为空会在 Scheduler 配置/open 时被拒绝。

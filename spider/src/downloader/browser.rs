@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+pub use thirtyfour::Cookie;
 use thirtyfour::Proxy;
 use thirtyfour::cdp::events::ResponseReceived;
 use thirtyfour::prelude::{
@@ -23,6 +26,7 @@ struct Session {
     driver: Arc<WebDriver>,
     serial: Mutex<()>,
     last_used: Mutex<Instant>,
+    authenticated: Mutex<HashMap<String, Instant>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -34,33 +38,166 @@ struct SessionKey {
     tls: bool,
     webdriver_url: Option<String>,
     binary: Option<String>,
+    login_key: Option<String>,
 }
 
-pub struct Browser {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CookieKey {
+    login_key: String,
+    origin: String,
+}
+
+struct StoredCookies {
+    saved_at: Instant,
+    ttl: Duration,
+    refresh_after: Duration,
+    cookies: Vec<Cookie>,
+}
+
+pub type CookieLoadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<Vec<Cookie>>, downloader::Error>> + Send + 'a>>;
+pub type CookieSaveFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), downloader::Error>> + Send + 'a>>;
+
+pub trait CookieStore: Send + Sync + 'static {
+    fn load<'a>(&'a self, login_key: &'a str, origin: &'a str) -> CookieLoadFuture<'a>;
+
+    fn save<'a>(
+        &'a self,
+        login_key: &'a str,
+        origin: &'a str,
+        cookies: Vec<Cookie>,
+        ttl: Duration,
+        refresh_after: Duration,
+    ) -> CookieSaveFuture<'a>;
+}
+
+#[derive(Default)]
+pub struct MemoryCookieStore {
+    values: Mutex<HashMap<CookieKey, StoredCookies>>,
+}
+
+impl MemoryCookieStore {
+    async fn load_key(&self, key: &CookieKey) -> Option<Vec<Cookie>> {
+        let mut values = self.values.lock().await;
+        let expired = values
+            .get(key)
+            .is_some_and(|value| value.saved_at.elapsed() >= value.ttl);
+        if expired {
+            values.remove(key);
+            return None;
+        }
+        let refresh = values
+            .get(key)
+            .is_some_and(|value| value.saved_at.elapsed() >= value.refresh_after);
+        if refresh {
+            return None;
+        }
+        values.get(key).map(|value| value.cookies.clone())
+    }
+
+    async fn save_key(
+        &self,
+        key: CookieKey,
+        cookies: Vec<Cookie>,
+        ttl: Duration,
+        refresh_after: Duration,
+    ) {
+        self.values.lock().await.insert(
+            key,
+            StoredCookies {
+                saved_at: Instant::now(),
+                ttl,
+                refresh_after,
+                cookies,
+            },
+        );
+    }
+}
+
+impl CookieStore for MemoryCookieStore {
+    fn load<'a>(&'a self, login_key: &'a str, origin: &'a str) -> CookieLoadFuture<'a> {
+        Box::pin(async move {
+            Ok(self
+                .load_key(&CookieKey {
+                    login_key: login_key.to_string(),
+                    origin: origin.to_string(),
+                })
+                .await)
+        })
+    }
+
+    fn save<'a>(
+        &'a self,
+        login_key: &'a str,
+        origin: &'a str,
+        cookies: Vec<Cookie>,
+        ttl: Duration,
+        refresh_after: Duration,
+    ) -> CookieSaveFuture<'a> {
+        Box::pin(async move {
+            self.save_key(
+                CookieKey {
+                    login_key: login_key.to_string(),
+                    origin: origin.to_string(),
+                },
+                cookies,
+                ttl,
+                refresh_after,
+            )
+            .await;
+            Ok(())
+        })
+    }
+}
+
+pub struct Browser<C = MemoryCookieStore> {
     webdriver_url: Option<String>,
     binary: Option<String>,
+    headless: bool,
     idle_timeout: Duration,
     max_sessions: usize,
     sessions: RwLock<HashMap<SessionKey, Arc<Session>>>,
+    cookies: Arc<C>,
     opened: Mutex<bool>,
 }
 
-impl Default for Browser {
+impl Default for Browser<MemoryCookieStore> {
     fn default() -> Self {
         Self {
             webdriver_url: None,
             binary: None,
+            headless: true,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_sessions: DEFAULT_MAX_SESSIONS,
             sessions: RwLock::new(HashMap::new()),
+            cookies: Arc::new(MemoryCookieStore::default()),
             opened: Mutex::new(false),
         }
     }
 }
 
-impl Browser {
+impl Browser<MemoryCookieStore> {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl<C: CookieStore> Browser<C> {
+    pub fn with_cookie_store<Next>(self, cookie_store: Next) -> Browser<Next>
+    where
+        Next: CookieStore,
+    {
+        Browser {
+            webdriver_url: self.webdriver_url,
+            binary: self.binary,
+            headless: self.headless,
+            idle_timeout: self.idle_timeout,
+            max_sessions: self.max_sessions,
+            sessions: self.sessions,
+            cookies: Arc::new(cookie_store),
+            opened: self.opened,
+        }
     }
 
     pub fn with_webdriver_url(mut self, url: impl Into<String>) -> Self {
@@ -70,6 +207,11 @@ impl Browser {
 
     pub fn with_binary(mut self, path: impl Into<String>) -> Self {
         self.binary = Some(path.into());
+        self
+    }
+
+    pub fn with_headless(mut self, headless: bool) -> Self {
+        self.headless = headless;
         self
     }
 
@@ -122,14 +264,15 @@ impl Browser {
             driver,
             serial: Mutex::new(()),
             last_used: Mutex::new(Instant::now()),
+            authenticated: Mutex::new(HashMap::new()),
         });
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get(&key).cloned() {
             let _ = session.driver.as_ref().clone().quit().await;
             return Ok((key, existing));
         }
-        if sessions.len() >= self.max_sessions {
-            if let Some((old_key, old_session)) = sessions
+        if sessions.len() >= self.max_sessions
+            && let Some((old_key, old_session)) = sessions
                 .iter()
                 .filter_map(|(key, session)| {
                     session
@@ -140,10 +283,9 @@ impl Browser {
                 })
                 .min_by_key(|(_, _, last)| *last)
                 .map(|(key, session, _)| (key, session))
-            {
-                sessions.remove(&old_key);
-                let _ = old_session.driver.as_ref().clone().quit().await;
-            }
+        {
+            sessions.remove(&old_key);
+            let _ = old_session.driver.as_ref().clone().quit().await;
         }
         sessions.insert(key.clone(), session.clone());
         Ok((key, session))
@@ -151,7 +293,9 @@ impl Browser {
 
     async fn create_driver(&self, request: &net::Request) -> Result<WebDriver, downloader::Error> {
         let mut caps = DesiredCapabilities::chrome();
-        caps.add_arg("--headless=new").map_err(driver_error)?;
+        if self.headless {
+            caps.add_arg("--headless=new").map_err(driver_error)?;
+        }
         caps.add_arg("--disable-gpu").map_err(driver_error)?;
         if let Some(binary) = &self.binary {
             caps.set_binary(binary).map_err(driver_error)?;
@@ -198,7 +342,16 @@ impl Browser {
 
         let timeout = Duration::from_millis(request.timeout.unwrap_or(60_000));
         let driver = session.driver.clone();
+        let login = request
+            .snapshot()
+            .and_then(|snapshot| snapshot.dsl.as_ref())
+            .and_then(|config| config.spider.login.clone());
+        let cookies = Arc::clone(&self.cookies);
+        let authenticated = &session.authenticated;
         tokio::time::timeout(timeout, async move {
+            if let Some(login) = login.as_ref() {
+                ensure_login(&driver, authenticated, cookies.as_ref(), login).await?;
+            }
             let cdp = driver.cdp();
             let cdp_session = cdp.connect().await.map_err(driver_error)?;
             let mut responses = cdp_session
@@ -230,12 +383,11 @@ impl Browser {
             }
             if let Some(cookie) = request.cookies.request_header(&url).map_err(|error| {
                 downloader::Error::InvalidConfig(format!("invalid Request cookies: {error}"))
-            })? {
-                if let Ok(value) = cookie.to_str() {
-                    for pair in value.split(';') {
-                        if let Some((name, value)) = pair.trim().split_once('=') {
-                            cookie_values.insert(name.to_string(), value.to_string());
-                        }
+            })? && let Ok(value) = cookie.to_str()
+            {
+                for pair in value.split(';') {
+                    if let Some((name, value)) = pair.trim().split_once('=') {
+                        cookie_values.insert(name.to_string(), value.to_string());
                     }
                 }
             }
@@ -382,7 +534,7 @@ impl Browser {
     }
 }
 
-impl downloader::Download for Browser {
+impl<C: CookieStore> downloader::Download for Browser<C> {
     async fn open(&self) -> Result<(), downloader::Error> {
         let mut opened = self.opened.lock().await;
         if *opened {
@@ -422,10 +574,9 @@ impl downloader::Download for Browser {
         if result
             .as_ref()
             .is_err_and(|error| !matches!(error, downloader::Error::DisallowedRedirect(_)))
+            && let Some(session) = self.sessions.write().await.remove(&key)
         {
-            if let Some(session) = self.sessions.write().await.remove(&key) {
-                let _ = session.driver.as_ref().clone().quit().await;
-            }
+            let _ = session.driver.as_ref().clone().quit().await;
         }
         result
     }
@@ -439,6 +590,11 @@ impl SessionKey {
     ) -> Result<Self, downloader::Error> {
         let url = Url::parse(&request.url)
             .map_err(|error| downloader::Error::InvalidRedirect(error.to_string()))?;
+        let login_key = request
+            .snapshot()
+            .and_then(|snapshot| snapshot.dsl.as_ref())
+            .and_then(|config| config.spider.login.as_ref())
+            .map(|config| config.login_key.clone());
         Ok(Self {
             task_id: request.task_id.clone(),
             trace_id: request.trace_id.clone(),
@@ -454,8 +610,200 @@ impl SessionKey {
                 .is_some_and(|tls| tls.accept_invalid_certs),
             webdriver_url: webdriver_url.map(str::to_string),
             binary: binary.map(str::to_string),
+            login_key,
         })
     }
+}
+
+async fn ensure_login(
+    driver: &WebDriver,
+    authenticated: &Mutex<HashMap<String, Instant>>,
+    cookies: &impl CookieStore,
+    config: &crate::spider::login::Config,
+) -> Result<(), downloader::Error> {
+    let login_url = Url::parse(&config.url)
+        .map_err(|error| downloader::Error::InvalidConfig(format!("invalid login URL: {error}")))?;
+    let origin = login_url.origin().ascii_serialization();
+    let key = format!("{}|{origin}", config.login_key);
+    {
+        let mut state = authenticated.lock().await;
+        if state
+            .get(&key)
+            .is_some_and(|saved_at| saved_at.elapsed() < config.refresh_after_duration())
+        {
+            return Ok(());
+        }
+        state.remove(&key);
+    }
+
+    driver
+        .goto(config.url.clone())
+        .await
+        .map_err(driver_error)?;
+    if let Some(saved) = cookies.load(&config.login_key, &origin).await? {
+        for cookie in saved {
+            if cookie_applies_to_host(&cookie, login_url.host_str().unwrap_or_default()) {
+                driver.add_cookie(cookie).await.map_err(driver_error)?;
+            }
+        }
+        driver
+            .goto(config.url.clone())
+            .await
+            .map_err(driver_error)?;
+    } else {
+        driver.delete_all_cookies().await.map_err(driver_error)?;
+        driver
+            .goto(config.url.clone())
+            .await
+            .map_err(driver_error)?;
+    }
+
+    if !login_check(driver, &config.check).await? {
+        for action in &config.actions {
+            run_login_action(driver, action).await?;
+        }
+        if !login_check(driver, &config.check).await? {
+            return Err(downloader::Error::InvalidConfig(
+                "Browser login check failed after login actions".to_string(),
+            ));
+        }
+    }
+
+    let current = driver
+        .get_all_cookies()
+        .await
+        .map_err(driver_error)?
+        .into_iter()
+        .filter(|cookie| cookie_applies_to_host(cookie, login_url.host_str().unwrap_or_default()))
+        .collect();
+    cookies
+        .save(
+            &config.login_key,
+            &origin,
+            current,
+            config.ttl_duration(),
+            config.refresh_after_duration(),
+        )
+        .await?;
+    authenticated.lock().await.insert(key, Instant::now());
+    Ok(())
+}
+
+async fn login_check(
+    driver: &WebDriver,
+    check: &crate::spider::login::Check,
+) -> Result<bool, downloader::Error> {
+    if !check.selector.is_empty()
+        && driver
+            .query(By::Css(check.selector.as_str()))
+            .first()
+            .await
+            .is_err()
+    {
+        return Ok(false);
+    }
+    if !check.url.is_empty() {
+        let current = driver.current_url().await.map_err(driver_error)?;
+        if !current.as_str().starts_with(&check.url) {
+            return Ok(false);
+        }
+    }
+    if !check.cookie.is_empty()
+        && !driver
+            .get_all_cookies()
+            .await
+            .map_err(driver_error)?
+            .iter()
+            .any(|cookie| cookie.name == check.cookie)
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+async fn run_login_action(
+    driver: &WebDriver,
+    action: &crate::spider::login::Action,
+) -> Result<(), downloader::Error> {
+    match action {
+        crate::spider::login::Action::Fill { selector, value } => {
+            let value = resolve_login_value(value)?;
+            let element = driver
+                .query(By::Css(selector.as_str()))
+                .first()
+                .await
+                .map_err(driver_error)?;
+            element.clear().await.map_err(driver_error)?;
+            element.send_keys(value).await.map_err(driver_error)?;
+        }
+        crate::spider::login::Action::Click { selector } => {
+            driver
+                .query(By::Css(selector.as_str()))
+                .first()
+                .await
+                .map_err(driver_error)?
+                .click()
+                .await
+                .map_err(driver_error)?;
+        }
+        crate::spider::login::Action::Wait {
+            selector,
+            url,
+            timeout,
+        } => {
+            wait_login_condition(driver, selector, url, *timeout).await?;
+        }
+        crate::spider::login::Action::Manual { timeout } => {
+            tokio::time::sleep(Duration::from_millis(*timeout)).await;
+        }
+    }
+    Ok(())
+}
+
+async fn wait_login_condition(
+    driver: &WebDriver,
+    selector: &str,
+    url: &str,
+    timeout: u64,
+) -> Result<(), downloader::Error> {
+    let deadline = Instant::now() + Duration::from_millis(timeout);
+    loop {
+        if !selector.is_empty() && driver.query(By::Css(selector)).first().await.is_ok() {
+            return Ok(());
+        }
+        if !url.is_empty()
+            && driver
+                .current_url()
+                .await
+                .map_err(driver_error)?
+                .as_str()
+                .starts_with(url)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(downloader::Error::Timeout);
+        }
+        tokio::time::sleep(SELECTOR_POLL_INTERVAL).await;
+    }
+}
+
+fn resolve_login_value(value: &str) -> Result<String, downloader::Error> {
+    let Some(name) = value.strip_prefix("env:") else {
+        return Ok(value.to_string());
+    };
+    std::env::var(name).map_err(|_| {
+        downloader::Error::InvalidConfig(format!(
+            "login action references missing Worker environment variable: {name}"
+        ))
+    })
+}
+
+fn cookie_applies_to_host(cookie: &Cookie, host: &str) -> bool {
+    cookie.domain.as_deref().is_none_or(|domain| {
+        let domain = domain.trim_start_matches('.');
+        host.eq_ignore_ascii_case(domain) || host.ends_with(&format!(".{domain}"))
+    })
 }
 
 fn reject_sensitive_headers(request: &net::Request) -> Result<(), downloader::Error> {
@@ -490,5 +838,37 @@ mod tests {
             SessionKey::from_request(&first, None, None).unwrap(),
             SessionKey::from_request(&second, None, None).unwrap()
         );
+    }
+
+    #[test]
+    fn session_key_separates_login_keys_from_the_trace_snapshot() {
+        let config = crate::config::Config::from_yaml(
+            r#"
+spider:
+  name: books
+  login:
+    login_key: account_a
+    url: https://example.com/login
+    check:
+      cookie: sid
+  start:
+    - node: index
+      url: https://example.com
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#,
+        )
+        .unwrap();
+        let snapshot = Arc::new(crate::trace::Snapshot::rules("task", config));
+        let mut request = net::Request::follow("https://example.com").unwrap();
+        request.task_id = "task".to_string();
+        request.trace_id = "trace".to_string();
+        request.set_snapshot(snapshot);
+
+        let key = SessionKey::from_request(&request, None, None).unwrap();
+
+        assert_eq!(key.login_key.as_deref(), Some("account_a"));
     }
 }

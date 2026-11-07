@@ -1,5 +1,6 @@
 pub mod config;
 mod contract;
+pub mod login;
 pub(crate) mod tx;
 
 pub use crate::error::spider::Error;

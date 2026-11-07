@@ -33,6 +33,9 @@ pub(super) fn check(config: &spider::Config, graph: &graph::Config) -> Result<()
         ));
     }
     check_allowed_domains(&config.allowed_domains, "spider.allowed_domains")?;
+    if let Some(login) = &config.login {
+        login.validate().map_err(config::Error::Message)?;
+    }
     for spec in &config.start {
         if spec.node.trim().is_empty() {
             return Err(config::Error::Message(

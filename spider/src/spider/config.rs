@@ -12,4 +12,6 @@ pub struct Config {
     pub start: Vec<crate::graph::request::Spec>,
     #[serde(default)]
     pub timezone: Option<String>,
+    #[serde(default)]
+    pub login: Option<super::login::Config>,
 }

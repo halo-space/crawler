@@ -25,6 +25,7 @@ The workspace contains four crates:
 | HTTP Downloader | Implemented | Bounded decoded body, whole-fetch timeout, structured headers/cookies, redirects, proxy/TLS isolation, and bounded idle clients |
 | Response charset decoding | Implemented | Deterministic BOM/header/HTML-meta/UTF-8 selection in `Response::text()` while preserving post-content-decoding bytes |
 | Browser Downloader | Implemented | `thirtyfour`-based Chrome/Chromium navigation, rendered DOM, Session reuse, cookies, CDP response metadata, and CSS waits |
+| Browser login configuration | Implemented | `spider.login` is frozen into the Trace Snapshot; Browser performs cookie checks and login actions from that snapshot |
 | CSS Selector | Implemented | `Response::css()` returns the native `scrape_core::Soup` |
 | CSS Healing | Implemented | CSS-only deterministic whole-document candidate scoring after an exact CSS miss; opt-in only |
 | Regex and JSON | Implemented | Regex selection, full-body `Response::json<T>()`, and exact RFC 9535 JSONPath selection without Healing |
@@ -649,6 +650,17 @@ Snapshot and are not a cross-Worker recovery source. Browser `Response.body` is 
 execution. Main-document status and headers come from CDP Network events, and optional `Request.wait_selector`
 waits for a CSS selector. Browser disconnects, navigation failures, wait timeouts, and page-read failures destroy
 the Session; `error_download.retry` supplies the backoff and retry policy.
+
+A Spider may declare Browser login under `spider.login`. When a Spider configuration creates a Trace, the login
+configuration is frozen with the complete DSL at `traces.snapshot.dsl.spider.login`. The Worker does not reread the
+`spiders` table during execution and no login-specific API is added. Browser reads the configuration only from the
+Trace Snapshot associated with the current Request. Without `login`, the Request is anonymous. With it, the Worker
+reuses cookies by `login_key + origin` and runs the login check and actions. All non-empty `selector`, `url`, and
+`cookie` checks must pass. `fill.value` accepts a literal or `env:NAME`; `click`, `wait`, and `manual` perform
+the corresponding page action, wait, and human-wait behavior. `ttl` and `refresh_after` are milliseconds, and
+login failures use the existing `error_download.retry`. The current CookieStore is Worker-local memory and is not
+stored in Request or Trace Snapshot. `contrib::browser::RedisCookieStore` can be injected explicitly when
+Workers need to share the CookieStore through Redis.
 
 The Downloader follows only `301`, `302`, `303`, `307`, and `308`. A redirect that changes a
 body-bearing Request to GET discards the body and removes `Content-Length`, `Content-Type`,
