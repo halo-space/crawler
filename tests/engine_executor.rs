@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use bytes::Bytes;
-use serde_json::Value;
 use halo::harbor::item::{Item, Store};
 use halo::harbor::middleware::{BoxFuture, Middleware, Next, Spec};
 use halo::harbor::scheduler::{Init, Scheduler};
 use halo::harbor::{downloader, engine, net, payload};
+use serde_json::Value;
 
 #[path = "support/ai.rs"]
 mod ai;
@@ -499,8 +499,11 @@ async fn rules_ai_without_a_provider_returns_a_startup_error() {
 
 #[test]
 fn rules_trace_does_not_persist_ai_provider_configuration() {
-    let encoded =
-        serde_json::to_string(&halo::harbor::trace::Snapshot::rules("ai-rules", ai_rules())).unwrap();
+    let encoded = serde_json::to_string(&halo::harbor::trace::Snapshot::rules(
+        "ai-rules",
+        ai_rules(),
+    ))
+    .unwrap();
 
     for provider_field in ["base_url", "api_key", "model_name"] {
         assert!(!encoded.contains(provider_field), "{provider_field}");
@@ -512,7 +515,8 @@ async fn code_parse_retry_keeps_openai_after_scheduler_replacement() {
     let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start(["not JSON", r#"{"title":"Rust"}"#]);
     let openai =
-        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
+        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model")
+            .unwrap();
     let value = Arc::new(Mutex::new(None));
     let scheduler =
         LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))).with_lease(ai_test_lease());
@@ -540,7 +544,8 @@ async fn rules_code_and_declarative_parsers_share_engine_openai() {
     let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start([r#"{"source":"code"}"#, r#"{"source":"rules"}"#]);
     let openai =
-        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
+        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model")
+            .unwrap();
     let mut engine = engine::Builder::new()
         .with_ai(openai)
         .with_rules(ai_rules())
@@ -561,7 +566,8 @@ async fn rules_builder_keeps_openai_after_scheduler_replacement() {
     let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start([r#"{"title":"Rust"}"#]);
     let openai =
-        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
+        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model")
+            .unwrap();
     let scheduler =
         LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))).with_lease(ai_test_lease());
     let mut engine = engine::Builder::new()
@@ -1683,7 +1689,9 @@ impl Store for LifecycleStore {
     async fn close(&self) -> Result<(), halo::harbor::item::Error> {
         self.calls.lock().unwrap().push("store.close");
         if self.fail_close {
-            return Err(halo::harbor::item::Error::Message("store close".to_string()));
+            return Err(halo::harbor::item::Error::Message(
+                "store close".to_string(),
+            ));
         }
         Ok(())
     }
@@ -1691,7 +1699,9 @@ impl Store for LifecycleStore {
     async fn submit(&self, _payload: &payload::Payload) -> Result<(), halo::harbor::item::Error> {
         self.calls.lock().unwrap().push("store.submit");
         if self.fail_submit {
-            return Err(halo::harbor::item::Error::Message("store submit".to_string()));
+            return Err(halo::harbor::item::Error::Message(
+                "store submit".to_string(),
+            ));
         }
         Ok(())
     }
@@ -1917,7 +1927,10 @@ impl Scheduler for LifecycleScheduler {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn release(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
@@ -1927,7 +1940,9 @@ impl Scheduler for LifecycleScheduler {
     ) -> Result<(), halo::harbor::scheduler::Error> {
         self.lease_refreshes.fetch_add(1, Ordering::SeqCst);
         if self.reject_refresh {
-            return Err(halo::harbor::scheduler::Error::LeaseMismatch(payload.id.clone()));
+            return Err(halo::harbor::scheduler::Error::LeaseMismatch(
+                payload.id.clone(),
+            ));
         }
         if self
             .transient_refreshes
@@ -1946,13 +1961,19 @@ impl Scheduler for LifecycleScheduler {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn success(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.completions.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.completion_delay).await;
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn failure(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.completions.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.completion_delay).await;
         self.inner.failure(payload).await
@@ -2047,7 +2068,10 @@ impl Scheduler for FlakyScheduler {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn release(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
@@ -2058,7 +2082,10 @@ impl Scheduler for FlakyScheduler {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn success(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(halo::harbor::scheduler::Error::Unavailable(
                 "success failed".to_string(),
@@ -2079,7 +2106,10 @@ impl Scheduler for FlakyScheduler {
         Ok(())
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn failure(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.failure_attempts
             .lock()
             .unwrap()
@@ -2192,7 +2222,9 @@ impl Store for RecordingStore {
             .unwrap()
             .push(PayloadRecord::from_payload(payload));
         if self.reject {
-            return Err(halo::harbor::item::Error::Message("item submit".to_string()));
+            return Err(halo::harbor::item::Error::Message(
+                "item submit".to_string(),
+            ));
         }
         Ok(())
     }
@@ -2300,7 +2332,10 @@ impl Scheduler for RecordingScheduler {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn release(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
@@ -2311,7 +2346,10 @@ impl Scheduler for RecordingScheduler {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn success(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.records
             .lock()
             .unwrap()
@@ -2319,7 +2357,10 @@ impl Scheduler for RecordingScheduler {
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn failure(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.records
             .lock()
             .unwrap()
@@ -2385,7 +2426,10 @@ impl Scheduler for FailingCloseScheduler {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn release(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
@@ -2396,11 +2440,17 @@ impl Scheduler for FailingCloseScheduler {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn success(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn failure(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.failure(payload).await
     }
 }
@@ -2606,7 +2656,9 @@ impl StartEmitFailSpider {
         let request = net::Request::follow("https://example.com/accepted")
             .map_err(|error| halo::harbor::Error::Message(error.to_string()))?;
         self.tx.request(vec![request]).await?;
-        Err(halo::harbor::Error::Message("start after output".to_string()))
+        Err(halo::harbor::Error::Message(
+            "start after output".to_string(),
+        ))
     }
 
     async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {

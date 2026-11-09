@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use crate::{config, graph, net, harbor};
+use crate::{config, graph, harbor, net};
 
 pub(super) fn check(
     config: &harbor::SpiderConfig,

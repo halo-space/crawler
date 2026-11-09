@@ -1,5 +1,5 @@
-use redis::AsyncCommands as _;
 use halo::harbor::{scheduler, trace};
+use redis::AsyncCommands as _;
 
 use super::Redis;
 use super::error::redis as redis_error;

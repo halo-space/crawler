@@ -1,9 +1,9 @@
 use std::time::Duration;
 use std::{collections::HashMap, io::Read as _, io::Write as _, sync::Arc};
 
-use serde_json::json;
 use halo::harbor::scheduler::Init as _;
 use halo::harbor::{Scheduler as _, net, payload, scheduler, trace};
+use serde_json::json;
 
 use super::Api;
 use super::client;

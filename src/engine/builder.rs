@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::runtime::{MAX_EVENTS, Runtime};
 use crate::harbor::Spider as _;
 use crate::harbor::tx;
-use crate::{config, downloader, engine, middleware, scheduler, harbor};
+use crate::{config, downloader, engine, harbor, middleware, scheduler};
 
 pub struct Builder<
     S = scheduler::Memory,

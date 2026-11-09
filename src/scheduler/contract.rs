@@ -8,6 +8,15 @@ pub trait Scheduler: Send + Sync {
         None
     }
 
+    /// Returns the current upper bound for one claim and its local execution window.
+    ///
+    /// Backends without a remotely mutable Worker limit keep the Engine-provided value.
+    /// A control-plane-backed backend may replace it after a heartbeat without changing the
+    /// Engine or the Request contract.
+    fn claim_limit(&self, configured: usize) -> usize {
+        configured
+    }
+
     /// 打开调度器持有的连接、存储或运行期资源。
     /// `concurrency` 是本次 Engine 运行冻结后的 Request 并发数。
     fn open(

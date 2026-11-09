@@ -175,6 +175,10 @@ impl scheduler::Scheduler for Api {
         Some(self.lease)
     }
 
+    fn claim_limit(&self, configured: usize) -> usize {
+        self.runtime.claim_limit().unwrap_or(configured)
+    }
+
     async fn open(&self, concurrency: usize) -> Result<(), scheduler::Error> {
         let _lifecycle = self.runtime.lifecycle.lock().await;
         let _activity = self.runtime.activity.write().await;

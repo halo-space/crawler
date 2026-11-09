@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::Value;
 use halo::harbor::{net, payload, scheduler, trace};
+use serde_json::Value;
 use sqlx::mysql::MySqlRow;
 use sqlx::{MySql as SqlMySql, Row as _, Transaction};
 

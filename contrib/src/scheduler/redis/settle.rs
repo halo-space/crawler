@@ -1,5 +1,5 @@
-use serde::Serialize;
 use halo::harbor::{net, payload, scheduler, stats};
+use serde::Serialize;
 
 use super::Redis;
 use super::error::redis as redis_error;

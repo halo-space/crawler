@@ -20,6 +20,7 @@ struct ClaimScheduler {
     active: AtomicUsize,
     max_active: AtomicUsize,
     transient: AtomicUsize,
+    dynamic_limit: AtomicUsize,
     opened_concurrency: AtomicUsize,
     local: bool,
 }
@@ -32,6 +33,7 @@ impl ClaimScheduler {
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
             transient: AtomicUsize::new(transient),
+            dynamic_limit: AtomicUsize::new(0),
             opened_concurrency: AtomicUsize::new(0),
             local: true,
         }
@@ -48,11 +50,21 @@ impl ClaimScheduler {
         self.inner = halo::harbor::Memory::new().with_modes(modes);
         self
     }
+
+    fn with_dynamic_limit(self, limit: usize) -> Self {
+        self.dynamic_limit.store(limit, Ordering::SeqCst);
+        self
+    }
 }
 
 impl Scheduler for ClaimScheduler {
     fn lease(&self) -> Option<halo::harbor::scheduler::Lease> {
         self.inner.lease()
+    }
+
+    fn claim_limit(&self, configured: usize) -> usize {
+        let limit = self.dynamic_limit.load(Ordering::SeqCst);
+        if limit == 0 { configured } else { limit }
     }
 
     async fn open(&self, concurrency: usize) -> Result<(), halo::harbor::scheduler::Error> {
@@ -111,7 +123,10 @@ impl Scheduler for ClaimScheduler {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn release(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
@@ -122,11 +137,17 @@ impl Scheduler for ClaimScheduler {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn success(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn failure(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.failure(payload).await
     }
 }
@@ -319,6 +340,28 @@ async fn claim_limit_fills_concurrency_in_multiple_single_claims() {
         ]
     );
     assert!(calls.iter().all(|claim| claim.limit <= 4));
+}
+
+#[tokio::test]
+async fn scheduler_can_raise_the_runtime_claim_limit_after_startup() {
+    let scheduler = ClaimScheduler::new(0).with_dynamic_limit(8);
+    init_run(&scheduler).await;
+    scheduler
+        .push(payload::Payload::new().requests(requests(8)))
+        .await
+        .unwrap();
+
+    let mut runtime = engine::Builder::new()
+        .with_scheduler(scheduler)
+        .with_downloader(ai_downloader())
+        .with_spider(EmptySpider::new())
+        .build()
+        .with_concurrency(4)
+        .with_claim_limit(4);
+
+    runtime.start_until_idle().await.unwrap();
+
+    assert_eq!(runtime.scheduler().calls.lock().unwrap()[0].limit, 8);
 }
 
 #[tokio::test]

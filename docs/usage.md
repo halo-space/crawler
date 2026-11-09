@@ -20,17 +20,20 @@ defines a Spider with the `#[spider]` macro, extracts an Item, and runs an Engin
 cargo run -p examples --bin basic
 ```
 
-The standalone Worker service is in the `harbor-worker` crate. It connects to the Master API,
-consumes already-published Requests, restores Rules from Trace Snapshots, and writes Items through
-the Worker-owned Store:
+The standalone Worker service is in the `halo-harbor-worker` crate. It assembles the selected
+Scheduler, consumes Requests, restores Rules from Trace Snapshots when the Scheduler provides them,
+and writes Items through the Worker-owned Store. The default is the in-memory Scheduler:
 
 ```bash
-HARBOR_MASTER_URL=https://master.example.com/ \
-HARBOR_TOKEN=... \
+HARBOR_SCHEDULER=memory \
 HARBOR_WORKER_ID=worker-01 \
 HARBOR_WORKER_LIMIT=5 \
-cargo run -p harbor-worker
+cargo run -p halo-harbor-worker
 ```
+
+Set `HARBOR_SCHEDULER=redis` with `HARBOR_REDIS_URL`, `mysql` with `HARBOR_MYSQL_DSN`, or
+`master_api` with `HARBOR_MASTER_URL` and `HARBOR_TOKEN`. Registration, heartbeat, claiming,
+recovery, and settlement belong to the selected Scheduler backend.
 
 The macro supplies the internal event sender, so application code only defines Spider fields and
 handlers. Build an Engine with `engine::Engine::new().with_spider(...).build()`, then call
@@ -58,7 +61,7 @@ contracts. It is assembled exactly like Memory; Engine has no Redis-specific pat
 
 ```rust
 use contrib::scheduler::redis::Redis;
-use spider::{engine, net};
+use halo::harbor::{engine, net};
 
 let scheduler = Redis::new("redis://127.0.0.1:6379")?
     .with_namespace("crawler")?
@@ -136,7 +139,7 @@ DSN; there is no additional namespace:
 
 ```rust
 use contrib::scheduler::mysql::MySql;
-use spider::{engine, net};
+use halo::harbor::{engine, net};
 
 let scheduler = MySql::new("mysql://crawler:secret@127.0.0.1:3306/crawler")?
     .with_worker_id("worker-01")?
@@ -180,7 +183,7 @@ transport, namespace, and authentication:
 
 ```rust
 use contrib::scheduler::api::Api;
-use spider::net;
+use halo::harbor::net;
 
 let scheduler = Api::new("https://master.example.com", api_key)?
     .with_namespace("crawler")?
@@ -245,7 +248,7 @@ objects, or arrays:
 
 ```rust
 let document: serde_json::Value = response.json()?;
-let stock_codes = spider::selector::json::select(&document, "$.data.diff[*].f12")?;
+let stock_codes = halo::harbor::selector::json::select(&document, "$.data.diff[*].f12")?;
 ```
 
 Rules mode uses the same selector directly. This is a complete configuration for the EastMoney test
@@ -317,7 +320,7 @@ Provider configuration is Worker-local and is constructed once, then reused by c
 selection through `response.ai(expr).await`:
 
 ```rust
-use spider::{ai, engine};
+use halo::harbor::{ai, engine};
 
 let openai = ai::OpenAI::new(
     "https://api.example.com/v1",
@@ -559,7 +562,7 @@ so they are visible when the program runs in a local terminal:
 
 ```rust
 use fastrace::collector::{Config, ConsoleReporter};
-use spider::{engine, trace};
+use halo::harbor::{engine, trace};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

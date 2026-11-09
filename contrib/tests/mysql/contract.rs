@@ -71,7 +71,10 @@ fn isolated(urls: &Arc<Mutex<VecDeque<String>>>, lease: Lease) -> MySql {
         .unwrap()
         .with_worker_version("test")
         .unwrap()
-        .with_modes([halo::harbor::net::Mode::Http, halo::harbor::net::Mode::Browser])
+        .with_modes([
+            halo::harbor::net::Mode::Http,
+            halo::harbor::net::Mode::Browser,
+        ])
         .unwrap()
         .with_lease(lease)
         .unwrap()

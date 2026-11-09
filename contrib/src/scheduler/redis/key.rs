@@ -8,7 +8,9 @@ pub(super) struct Keys {
 }
 
 impl Keys {
-    pub(super) fn new(namespace: impl Into<String>) -> Result<Self, halo::harbor::scheduler::Error> {
+    pub(super) fn new(
+        namespace: impl Into<String>,
+    ) -> Result<Self, halo::harbor::scheduler::Error> {
         let namespace = namespace.into();
         if namespace.trim().is_empty() {
             return Err(halo::harbor::scheduler::Error::Message(

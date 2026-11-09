@@ -35,18 +35,19 @@ Run the Rules example:
 cargo run -p examples --bin rules
 ```
 
-Run the standalone Worker service after configuring its Master API connection:
+Run the standalone Worker service with the default in-memory Scheduler:
 
 ```bash
-HARBOR_MASTER_URL=https://master.example.com/ \
-HARBOR_TOKEN=... \
 HARBOR_WORKER_ID=worker-01 \
 HARBOR_WORKER_LIMIT=5 \
 cargo run -p halo-harbor-worker
 ```
 
-The Worker receives Requests from the Master API and restores the Rules graph from each Trace
-Snapshot. It does not read the Master database directly. `HARBOR_WORKER_LIMIT` is the initial single-claim batch size; the Master heartbeat can change the runtime value for later claims.
+The Worker assembles one shared Engine and can select `memory`, `redis`, `mysql`, or `master_api`
+with `HARBOR_SCHEDULER`. Redis and MySQL use `HARBOR_REDIS_URL` or `HARBOR_MYSQL_DSN`; the
+Master API backend uses `HARBOR_MASTER_URL` and `HARBOR_TOKEN`. Each Scheduler owns its own
+registration, heartbeat, claiming, recovery, and settlement behavior. `HARBOR_WORKER_LIMIT` is
+the initial claim limit; a control-plane Scheduler may update it through its heartbeat.
 
 The smallest Engine assembly is:
 
@@ -67,10 +68,10 @@ replaceable.
 
 | Crate | Responsibility |
 | --- | --- |
-| `harbor` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
-| `macros` | Spider, handler, and Item derive macros |
+| `halo-harbor` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
+| `halo-harbor-macros` | Spider, handler, and Item derive macros |
 | `contrib` | Redis/MySQL Schedulers, the Worker-side API Scheduler adapter, and distributed middleware implementations |
-| `halo-harbor-worker` | Standalone Worker service that connects to Master API, runs the shared Engine, and writes Items through a Worker-owned Store |
+| `halo-harbor-worker` | Standalone Worker service that assembles a selected Scheduler, runs the shared Engine, and writes Items through a Worker-owned Store |
 | `examples` | Executable code-mode and Rules-mode examples |
 
 ## Documentation

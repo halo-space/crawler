@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use sha2::{Digest as _, Sha256};
 use halo::harbor::{net, scheduler};
+use sha2::{Digest as _, Sha256};
 use sqlx::{MySql, MySqlPool, Row as _, Transaction};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;

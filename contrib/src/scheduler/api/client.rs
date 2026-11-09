@@ -3,10 +3,10 @@ mod response;
 use std::time::Duration;
 
 use bytes::Bytes;
+use halo::harbor::scheduler;
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use halo::harbor::scheduler;
 
 use super::error::Error;
 

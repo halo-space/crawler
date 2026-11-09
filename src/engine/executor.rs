@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::engine::contract::Execute;
-use crate::{net, harbor};
+use crate::{harbor, net};
 
 /// The single runtime executor for both code and Rules Traces.
 pub struct Executor<P> {

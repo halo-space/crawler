@@ -2,12 +2,12 @@ pub mod ai;
 pub mod config;
 pub mod downloader;
 pub mod graph;
+pub mod harbor;
 pub mod item;
 pub mod middleware;
 pub mod net;
 pub mod scheduler;
 pub mod selector;
-pub mod harbor;
 pub mod stats;
 
 /// Unified error returned by the framework runtime.

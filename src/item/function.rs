@@ -1,4 +1,4 @@
-use crate::{net, harbor};
+use crate::{harbor, net};
 
 pub type Call<S> = for<'a> fn(&'a S, <S as harbor::Spider>::Item) -> net::BoxFuture<'a>;
 

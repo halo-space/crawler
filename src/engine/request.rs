@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::engine::contract::Execute;
 use crate::harbor::tx;
-use crate::{downloader, middleware, net, scheduler, harbor, stats};
+use crate::{downloader, harbor, middleware, net, scheduler, stats};
 
 pub(super) mod task;
 

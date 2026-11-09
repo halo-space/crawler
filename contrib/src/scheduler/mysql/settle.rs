@@ -1,5 +1,5 @@
-use serde_json::Value;
 use halo::harbor::{net, payload, scheduler, stats};
+use serde_json::Value;
 use sqlx::{MySql, Row as _, Transaction};
 
 use super::MySql as Scheduler;

@@ -1,7 +1,7 @@
 mod graph;
+mod harbor;
 mod item;
 mod rules;
-mod harbor;
 
 use super::{Config, Error};
 

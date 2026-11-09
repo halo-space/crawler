@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::graph;
-use crate::net::Request;
 use crate::harbor;
+use crate::net::Request;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -494,7 +494,11 @@ item:
 
         let error = Config::from_yaml(&rules).unwrap_err();
 
-        assert!(error.to_string().contains("must use halo-validator type array"));
+        assert!(
+            error
+                .to_string()
+                .contains("must use halo-validator type array")
+        );
     }
 
     #[test]

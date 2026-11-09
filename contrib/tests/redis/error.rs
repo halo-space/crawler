@@ -338,7 +338,9 @@ async fn push_rejects_a_trace_whose_snapshot_was_removed() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap_err();
-    assert!(matches!(error, halo::harbor::scheduler::Error::TraceNotFound(id) if id == "missing-trace"));
+    assert!(
+        matches!(error, halo::harbor::scheduler::Error::TraceNotFound(id) if id == "missing-trace")
+    );
     let exists = redis::cmd("EXISTS")
         .arg(key::request(&namespace, "missing-trace-request"))
         .query_async::<usize>(&mut connection)

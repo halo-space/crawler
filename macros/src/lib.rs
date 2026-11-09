@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 
-mod item;
 mod harbor;
+mod item;
 
 #[proc_macro_derive(Item, attributes(serde))]
 pub fn item(input: TokenStream) -> TokenStream {

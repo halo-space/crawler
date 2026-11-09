@@ -31,23 +31,23 @@ cargo run -p examples --bin basic
 cargo run -p examples --bin rules
 ```
 
-运行独立 Worker 服务前，先配置 Master API 连接：
+运行独立 Worker 服务，默认使用 Memory Scheduler：
 
 ```bash
-HARBOR_MASTER_URL=https://master.example.com/ \
-HARBOR_TOKEN=... \
 HARBOR_WORKER_ID=worker-01 \
 HARBOR_WORKER_LIMIT=5 \
 cargo run -p halo-harbor-worker
 ```
 
-Worker 通过 Master API 领取 Request，并从每个 Trace Snapshot 恢复 Rules 图；它不会直接访问
-Master 数据库。`HARBOR_WORKER_LIMIT` 是首次注册时的单次领取上限，后续心跳可以动态更新后续领取的数量。
+Worker 通过 `HARBOR_SCHEDULER` 选择 `memory`、`redis`、`mysql` 或 `master_api`。
+Redis 和 MySQL 分别使用 `HARBOR_REDIS_URL`、`HARBOR_MYSQL_DSN`；Master API 使用
+`HARBOR_MASTER_URL`、`HARBOR_TOKEN`。注册、心跳、领取、恢复和结算都由选中的 Scheduler
+自己负责。`HARBOR_WORKER_LIMIT` 是初始领取上限，支持控制面的 Scheduler 可以在心跳时更新它。
 
 最小 Engine 装配方式：
 
 ```rust
-let mut engine = spider::engine::Engine::new()
+let mut engine = halo::harbor::engine::Engine::new()
     .with_spider(BasicSpider::new())
     .build();
 
@@ -62,10 +62,10 @@ engine.start().await?;
 
 | Crate | 职责 |
 | --- | --- |
-| `spider` | 核心运行时、Engine、Scheduler 合同、HTTP 下载、Rules、Selector 与 Item Store |
-| `macros` | Spider、处理函数与 Item 派生宏 |
+| `halo-harbor` | 核心运行时、Engine、Scheduler 合同、HTTP 下载、Rules、Selector 与 Item Store |
+| `halo-harbor-macros` | Spider、处理函数与 Item 派生宏 |
 | `contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式中间件实现 |
-| `halo-harbor-worker` | 独立 Worker 服务，连接 Master API，运行共享 Engine，并通过 Worker 自己的 Store 写入 Item |
+| `halo-harbor-worker` | 独立 Worker 服务，装配选中的 Scheduler，运行共享 Engine，并通过 Worker 自己的 Store 写入 Item |
 | `examples` | 可直接运行的代码模式与 Rules 模式示例 |
 
 ## 文档

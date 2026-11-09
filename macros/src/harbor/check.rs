@@ -85,7 +85,9 @@ fn is_error(ty: &Type) -> bool {
     };
     let segments = &path.path.segments;
 
-    segments.last().is_some_and(|segment| segment.ident == "Error")
+    segments
+        .last()
+        .is_some_and(|segment| segment.ident == "Error")
         && (segments.len() == 1 || segments.iter().any(|segment| segment.ident == "harbor"))
 }
 

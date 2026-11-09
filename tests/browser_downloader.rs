@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use macros::harbor;
 use halo::harbor::downloader::Download;
 use halo::harbor::downloader::Downloader;
 use halo::harbor::downloader::browser::Browser;
 use halo::harbor::net::{Mode, Request, Response};
 use halo::harbor::{Error, engine};
+use macros::harbor;
 
 fn local_page() -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use serde_json::Value;
 use halo::harbor::item::{Item, Store};
 use halo::harbor::middleware::{BoxFuture, Middleware, Spec};
 use halo::harbor::scheduler::{Init, Scheduler};
 use halo::harbor::{downloader, engine, net, payload};
+use serde_json::Value;
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -100,7 +100,10 @@ impl Scheduler for RecordingScheduler {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn release(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
@@ -111,7 +114,10 @@ impl Scheduler for RecordingScheduler {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn success(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.records.lock().unwrap().push(PayloadRecord {
             id: payload.id.clone(),
             state: payload.state,
@@ -121,7 +127,10 @@ impl Scheduler for RecordingScheduler {
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
+    async fn failure(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.records.lock().unwrap().push(PayloadRecord {
             id: payload.id.clone(),
             state: payload.state,
@@ -172,7 +181,10 @@ impl FlakyStore {
         self
     }
 
-    async fn block_output(&self, payload: &payload::Payload) -> Result<(), halo::harbor::item::Error> {
+    async fn block_output(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::item::Error> {
         let output = self
             .dir
             .join("data")
@@ -204,7 +216,10 @@ impl FlakyStore {
         Ok(())
     }
 
-    async fn unblock_output(&self, payload: &payload::Payload) -> Result<(), halo::harbor::item::Error> {
+    async fn unblock_output(
+        &self,
+        payload: &payload::Payload,
+    ) -> Result<(), halo::harbor::item::Error> {
         let output = self
             .dir
             .join("data")
@@ -309,7 +324,9 @@ impl TestItem {
 }
 
 impl Item for TestItem {
-    fn from_values(mut values: halo::harbor::item::Values) -> Result<Self, halo::harbor::item::Error> {
+    fn from_values(
+        mut values: halo::harbor::item::Values,
+    ) -> Result<Self, halo::harbor::item::Error> {
         let title = values
             .shift_remove("title")
             .and_then(|value| value.as_str().map(str::to_string));

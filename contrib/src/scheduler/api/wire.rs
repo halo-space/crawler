@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use halo::harbor::{net, trace};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use halo::harbor::{net, trace};
 
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct Context {

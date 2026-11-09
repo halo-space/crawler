@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::runtime::MAX_EVENTS;
 use crate::harbor::tx;
-use crate::{config, downloader, middleware, scheduler, harbor};
+use crate::{config, downloader, harbor, middleware, scheduler};
 
 /// Rules 模式装配完成后的 Engine 类型。
 pub type Runtime<S, D, F, O = crate::item::Jsonl> = super::runtime::Runtime<

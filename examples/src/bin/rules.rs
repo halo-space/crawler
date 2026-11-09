@@ -61,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     #[test]
     fn newspaper_rules_are_valid() {
-        halo::harbor::config::Config::from_yaml(include_str!("../../rules-newspaper.yaml")).unwrap();
+        halo::harbor::config::Config::from_yaml(include_str!("../../rules-newspaper.yaml"))
+            .unwrap();
     }
 }
