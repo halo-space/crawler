@@ -1161,6 +1161,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "halo-validator"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8684d0cbb56b1d3093557c0dc484b0b276c0738e18e0c58593624fe241f16553"
+dependencies = [
+ "halo-validator-derive",
+ "http",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror",
+ "unicode-ident",
+ "url",
+]
+
+[[package]]
+name = "halo-validator-derive"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2075a485b60f14d084dc1e9a975a19a9018afb1d6773e36824098c23507330d"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "harbor"
 version = "0.1.0"
 dependencies = [
@@ -1175,6 +1204,7 @@ dependencies = [
  "fastrand",
  "flate2",
  "futures-util",
+ "halo-validator",
  "http",
  "indexmap",
  "kameo",
@@ -1199,7 +1229,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "validator",
 ]
 
 [[package]]
@@ -3743,33 +3772,6 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "validator"
-version = "0.1.0"
-source = "git+https://github.com/halo-space/validator.git?rev=2b3128a#2b3128a0b84669c4e4d09684343719b5c8a1047b"
-dependencies = [
- "http",
- "regex",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "thiserror",
- "unicode-ident",
- "url",
- "validator-derive",
-]
-
-[[package]]
-name = "validator-derive"
-version = "0.1.0"
-source = "git+https://github.com/halo-space/validator.git?rev=2b3128a#2b3128a0b84669c4e4d09684343719b5c8a1047b"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.118",
 ]
 
 [[package]]

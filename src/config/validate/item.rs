@@ -30,7 +30,7 @@ pub(super) fn check(
             })?;
             if schema.get("type").and_then(serde_json::Value::as_str) != Some("array") {
                 return Err(config::Error::Message(format!(
-                    "node {node_name} media field {name} must use validator type array"
+                    "node {node_name} media field {name} must use halo-validator type array"
                 )));
             }
         }
