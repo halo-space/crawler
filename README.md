@@ -42,7 +42,7 @@ HARBOR_MASTER_URL=https://master.example.com/ \
 HARBOR_TOKEN=... \
 HARBOR_WORKER_ID=worker-01 \
 HARBOR_WORKER_LIMIT=5 \
-cargo run -p harbor-worker
+cargo run -p halo-harbor-worker
 ```
 
 The Worker receives Requests from the Master API and restores the Rules graph from each Trace
@@ -51,7 +51,7 @@ Snapshot. It does not read the Master database directly. `HARBOR_WORKER_LIMIT` i
 The smallest Engine assembly is:
 
 ```rust
-let mut engine = harbor::engine::Engine::new()
+let mut engine = halo::harbor::engine::Engine::new()
     .with_spider(BasicSpider::new())
     .build();
 
@@ -70,7 +70,7 @@ replaceable.
 | `harbor` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
 | `macros` | Spider, handler, and Item derive macros |
 | `contrib` | Redis/MySQL Schedulers, the Worker-side API Scheduler adapter, and distributed middleware implementations |
-| `harbor-worker` | Standalone Worker service that connects to Master API, runs the shared Engine, and writes Items through a Worker-owned Store |
+| `halo-harbor-worker` | Standalone Worker service that connects to Master API, runs the shared Engine, and writes Items through a Worker-owned Store |
 | `examples` | Executable code-mode and Rules-mode examples |
 
 ## Documentation

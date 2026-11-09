@@ -1,6 +1,6 @@
 use contrib::scheduler::redis::Redis;
-use harbor::scheduler::Init;
-use harbor::{Scheduler, trace};
+use halo::harbor::scheduler::Init;
+use halo::harbor::{Scheduler, trace};
 
 pub(super) const TASK_ID: &str = "redis-test-task";
 pub(super) const TRACE_ID: &str = "redis-test-trace";

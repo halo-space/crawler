@@ -31,17 +31,17 @@ pub(super) fn structure(mut item: ItemStruct) -> proc_macro2::TokenStream {
         impl #impl_generics #ident #ty_generics #where_clause {
             pub fn new(
                 #(#constructor_args,)*
-            ) -> impl ::harbor::SpiderFactory<Spider = Self> {
+            ) -> impl ::halo::harbor::SpiderFactory<Spider = Self> {
                 #factory {
                     #(#constructor_fields,)*
                 }
             }
         }
 
-        impl #impl_generics ::harbor::SpiderFactory for #factory #ty_generics #where_clause {
+        impl #impl_generics ::halo::harbor::SpiderFactory for #factory #ty_generics #where_clause {
             type Spider = #ident #ty_generics;
 
-            fn build(self, tx: ::harbor::Tx) -> Self::Spider {
+            fn build(self, tx: ::halo::harbor::Tx) -> Self::Spider {
                 #ident {
                     #(#build_fields,)*
                     tx,
@@ -82,12 +82,12 @@ fn fields(item: &ItemStruct) -> Result<Vec<(syn::Ident, syn::Type)>, proc_macro2
 fn inject_tx(item: &mut ItemStruct) -> Result<(), proc_macro2::TokenStream> {
     match &mut item.fields {
         Fields::Unit => {
-            let fields: FieldsNamed = parse_quote!({ tx: ::harbor::Tx });
+            let fields: FieldsNamed = parse_quote!({ tx: ::halo::harbor::Tx });
             item.fields = Fields::Named(fields);
             Ok(())
         }
         Fields::Named(fields) => {
-            fields.named.push(parse_quote!(tx: ::harbor::Tx));
+            fields.named.push(parse_quote!(tx: ::halo::harbor::Tx));
             Ok(())
         }
         Fields::Unnamed(_) => Err(quote! {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use harbor::{net, scheduler};
+use halo::harbor::{net, scheduler};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 

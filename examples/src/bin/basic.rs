@@ -1,4 +1,4 @@
-use harbor::{engine, net};
+use halo::harbor::{engine, net};
 
 #[macros::harbor]
 struct BasicSpider;
@@ -13,11 +13,11 @@ impl BasicSpider {
         vec!["https://example.com/".to_string()]
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         let soup = response.css()?;
         let title = soup
             .find("h1")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?
             .map(|node| node.text())
             .unwrap_or_else(|| response.url.clone());
 
@@ -31,14 +31,14 @@ impl BasicSpider {
 struct BasicItem {
     title: String,
     #[serde(skip)]
-    state: harbor::item::State,
+    state: halo::harbor::item::State,
 }
 
 impl BasicItem {
     fn new(title: String) -> Self {
         Self {
             title,
-            state: harbor::item::State::default(),
+            state: halo::harbor::item::State::default(),
         }
     }
 }

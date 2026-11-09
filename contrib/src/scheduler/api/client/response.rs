@@ -1,7 +1,7 @@
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use harbor::scheduler;
+use halo::harbor::scheduler;
 
 use super::super::wire;
 

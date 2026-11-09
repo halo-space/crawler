@@ -1,9 +1,9 @@
 use base64::Engine as _;
 
-use harbor::Item;
-use harbor::middleware::dedup::{Config, Ttl};
-use harbor::middleware::{BoxFuture, Middleware, Next, Spec};
-use harbor::net::Request;
+use halo::harbor::Item;
+use halo::harbor::middleware::dedup::{Config, Ttl};
+use halo::harbor::middleware::{BoxFuture, Middleware, Next, Spec};
+use halo::harbor::net::Request;
 
 use super::connection::Connection;
 
@@ -22,7 +22,7 @@ pub struct Redis {
 
 impl Options {
     /// Creates Bloom options with a positive capacity and an error rate in `0.0..1.0`.
-    pub fn new(capacity: usize, error_rate: f64) -> Result<Self, harbor::middleware::Error> {
+    pub fn new(capacity: usize, error_rate: f64) -> Result<Self, halo::harbor::middleware::Error> {
         if capacity == 0 {
             return Err(invalid("capacity must be greater than zero"));
         }
@@ -43,7 +43,7 @@ impl Redis {
     pub fn new(
         url: impl Into<String>,
         options: Options,
-    ) -> Result<Self, harbor::middleware::Error> {
+    ) -> Result<Self, halo::harbor::middleware::Error> {
         Ok(Self {
             connection: Connection::new(url)
                 .map_err(|error| invalid(format!("Redis URL is invalid: {error}")))?,
@@ -53,8 +53,8 @@ impl Redis {
 
     async fn contains_or_insert(
         &self,
-        fingerprint: &harbor::middleware::dedup::Fingerprint,
-    ) -> Result<bool, harbor::middleware::Error> {
+        fingerprint: &halo::harbor::middleware::dedup::Fingerprint,
+    ) -> Result<bool, halo::harbor::middleware::Error> {
         let mut connection = self.connection.manager().await.map_err(redis_error)?;
         let inserted = redis::cmd("BF.INSERT")
             .arg(key(fingerprint.task_id(), fingerprint.node()))
@@ -141,7 +141,7 @@ fn key(task_id: &str, node: &str) -> String {
     format!("dedup:{}:{}", encoder.encode(task_id), encoder.encode(node))
 }
 
-fn redis_error(error: redis::RedisError) -> harbor::middleware::Error {
+fn redis_error(error: redis::RedisError) -> halo::harbor::middleware::Error {
     let detail = error.to_string();
     if detail.to_ascii_lowercase().contains("unknown command")
         && detail.to_ascii_lowercase().contains("bf.insert")
@@ -151,15 +151,15 @@ fn redis_error(error: redis::RedisError) -> harbor::middleware::Error {
     message(format!("Redis Dedup operation failed: {detail}"))
 }
 
-fn invalid(message: impl Into<String>) -> harbor::middleware::Error {
-    harbor::middleware::Error::InvalidConfig {
+fn invalid(message: impl Into<String>) -> halo::harbor::middleware::Error {
+    halo::harbor::middleware::Error::InvalidConfig {
         name: "dedup".to_string(),
         message: message.into(),
     }
 }
 
-fn message(message: impl Into<String>) -> harbor::middleware::Error {
-    harbor::middleware::Error::Message(message.into())
+fn message(message: impl Into<String>) -> halo::harbor::middleware::Error {
+    halo::harbor::middleware::Error::Message(message.into())
 }
 
 #[cfg(test)]
@@ -232,7 +232,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            harbor::middleware::Error::InvalidConfig { name, message }
+            halo::harbor::middleware::Error::InvalidConfig { name, message }
                 if name == "dedup" && message.contains("does not support finite")
         ));
     }

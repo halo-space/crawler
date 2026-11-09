@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use harbor::item::State;
-use harbor::{config, engine, net};
+use halo::harbor::item::State;
+use halo::harbor::{config, engine, net};
 
 #[derive(serde::Deserialize, serde::Serialize, macros::Item)]
 #[serde(deny_unknown_fields)]
@@ -25,12 +25,12 @@ impl Newspaper {
         "newspaper-worker"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 
     #[item]
-    async fn save(&self, article: ArticleItem) -> Result<(), harbor::Error> {
+    async fn save(&self, article: ArticleItem) -> Result<(), halo::harbor::Error> {
         self.tx.item(vec![article]).await
     }
 }
@@ -61,6 +61,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     #[test]
     fn newspaper_rules_are_valid() {
-        harbor::config::Config::from_yaml(include_str!("../../rules-newspaper.yaml")).unwrap();
+        halo::harbor::config::Config::from_yaml(include_str!("../../rules-newspaper.yaml")).unwrap();
     }
 }

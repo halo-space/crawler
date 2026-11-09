@@ -15,7 +15,7 @@ use crate::harbor;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub spider: harbor::Config,
+    pub spider: harbor::SpiderConfig,
     pub graph: graph::Config,
     #[serde(default)]
     pub item: Option<crate::item::Config>,

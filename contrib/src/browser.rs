@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use redis::AsyncCommands as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use harbor::downloader::Error;
-use harbor::downloader::browser::{Cookie, CookieLoadFuture, CookieSaveFuture, CookieStore};
+use halo::harbor::downloader::Error;
+use halo::harbor::downloader::browser::{Cookie, CookieLoadFuture, CookieSaveFuture, CookieStore};
 
 const DEFAULT_NAMESPACE: &str = "crawler";
 

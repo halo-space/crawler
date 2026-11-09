@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use harbor::{Scheduler as _, payload};
+use halo::harbor::{Scheduler as _, payload};
 use sqlx::Row as _;
 
 use super::{fixture, server};

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use harbor::{net, scheduler, trace};
+use halo::harbor::{net, scheduler, trace};
 
 use super::super::{Api, wire};
 
@@ -679,7 +679,7 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use harbor::trace;
+    use halo::harbor::trace;
 
     use super::*;
 

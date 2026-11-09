@@ -7,10 +7,10 @@ use std::thread;
 
 use bytes::Bytes;
 use serde_json::Value;
-use harbor::item::{Item, Store};
-use harbor::middleware::{BoxFuture, Middleware, Next, Spec};
-use harbor::scheduler::{Init, Scheduler};
-use harbor::{downloader, engine, net, payload};
+use halo::harbor::item::{Item, Store};
+use halo::harbor::middleware::{BoxFuture, Middleware, Next, Spec};
+use halo::harbor::scheduler::{Init, Scheduler};
+use halo::harbor::{downloader, engine, net, payload};
 
 #[path = "support/ai.rs"]
 mod ai;
@@ -29,7 +29,7 @@ async fn init_run(scheduler: &impl Init) {
     scheduler
         .init(
             FIXTURE_TRACE.to_string(),
-            harbor::trace::Snapshot::code(FIXTURE_TASK),
+            halo::harbor::trace::Snapshot::code(FIXTURE_TASK),
             Vec::new(),
         )
         .await
@@ -45,7 +45,7 @@ impl RulesSpider {
         "rules"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -55,7 +55,7 @@ impl RulesSpider {
 struct RulesItem {
     title: String,
     #[serde(skip)]
-    state: harbor::item::State,
+    state: halo::harbor::item::State,
 }
 
 #[macros::harbor]
@@ -69,12 +69,12 @@ impl TypedRulesSpider {
         "typed-rules"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 
     #[item]
-    async fn publish(&self, item: RulesItem) -> Result<(), harbor::Error> {
+    async fn publish(&self, item: RulesItem) -> Result<(), halo::harbor::Error> {
         assert_eq!(item.title, "First Book");
         assert!(item.schema().is_some());
         self.called.store(true, Ordering::SeqCst);
@@ -93,20 +93,20 @@ impl RetryingRequestSpider {
         "retrying-request"
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         let request = response
             .follow("/child")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?
             .node(Self::child);
         self.tx.request(vec![request]).await?;
 
         if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err(harbor::Error::Message("retry parse".to_string()));
+            return Err(halo::harbor::Error::Message("retry parse".to_string()));
         }
         Ok(())
     }
 
-    async fn child(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn child(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -130,9 +130,9 @@ impl AiCodeSpider {
         "ai-code"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         let request = net::Request::follow("https://example.com/article")
-            .map_err(harbor::Error::Net)?
+            .map_err(halo::harbor::Error::Net)?
             .with_middleware(
                 Spec::new("retry")
                     .hook("error_parse")
@@ -141,7 +141,7 @@ impl AiCodeSpider {
         self.tx.request(vec![request]).await
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         let value = response.ai("extract the article as JSON").await?;
         *self.value.lock().unwrap() = Some(value);
         Ok(())
@@ -157,7 +157,7 @@ impl AiRulesSpider {
         "ai-rules"
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         response.ai("extract metadata as JSON").await?;
         Ok(())
     }
@@ -169,14 +169,14 @@ impl RetryingRulesSpider {
         "retrying-rules"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 
     #[item]
-    async fn publish(&self, _item: RulesItem) -> Result<(), harbor::Error> {
+    async fn publish(&self, _item: RulesItem) -> Result<(), halo::harbor::Error> {
         if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err(harbor::Error::Message("retry rules item".to_string()));
+            return Err(halo::harbor::Error::Message("retry rules item".to_string()));
         }
         Ok(())
     }
@@ -188,12 +188,12 @@ impl RetryingRulesStoreSpider {
         "retrying-rules-store"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 
     #[item]
-    async fn publish(&self, item: TestItem) -> Result<(), harbor::Error> {
+    async fn publish(&self, item: TestItem) -> Result<(), halo::harbor::Error> {
         let retry = Spec::new("retry")
             .hook("error_item")
             .args(serde_json::json!({"count": 1, "backoff": [0]}));
@@ -255,7 +255,7 @@ impl FailureAttempt {
 struct ItemAttempt {
     id: String,
     data: Value,
-    schema: Option<harbor::item::SchemaKey>,
+    schema: Option<halo::harbor::item::SchemaKey>,
     vals: HashMap<String, Value>,
     middlewares: Vec<Spec>,
 }
@@ -268,7 +268,7 @@ struct StoreAttempt {
 }
 
 impl StoreAttempt {
-    fn from_payload(payload: &payload::Payload) -> Result<Self, harbor::item::Error> {
+    fn from_payload(payload: &payload::Payload) -> Result<Self, halo::harbor::item::Error> {
         let items = payload
             .items
             .iter()
@@ -281,7 +281,7 @@ impl StoreAttempt {
                     middlewares: item.middlewares().to_vec(),
                 })
             })
-            .collect::<Result<Vec<_>, harbor::item::Error>>()?;
+            .collect::<Result<Vec<_>, halo::harbor::item::Error>>()?;
         Ok(Self {
             payload: FailureAttempt::from_payload(payload),
             request_ids: payload
@@ -311,7 +311,7 @@ impl Middleware for RejectSeedAdmission {
         _spec: &'a Spec,
     ) -> BoxFuture<'a, Next<net::Request>> {
         Box::pin(async {
-            Err(harbor::middleware::Error::Message(
+            Err(halo::harbor::middleware::Error::Message(
                 "Rules seed admission must not run".to_string(),
             ))
         })
@@ -408,7 +408,7 @@ impl Middleware for FailingErrorItemMiddleware {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(harbor::middleware::Error::Message(
+                return Err(halo::harbor::middleware::Error::Message(
                     "error item callback".to_string(),
                 ));
             }
@@ -439,8 +439,8 @@ impl downloader::Download for TestDownload {
     }
 }
 
-fn ai_rules() -> harbor::config::Config {
-    harbor::config::Config::from_yaml(
+fn ai_rules() -> halo::harbor::config::Config {
+    halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: ai-rules
@@ -475,8 +475,8 @@ fn ai_test_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn ai_test_lease() -> harbor::scheduler::Lease {
-    harbor::scheduler::Lease::new(
+fn ai_test_lease() -> halo::harbor::scheduler::Lease {
+    halo::harbor::scheduler::Lease::new(
         std::time::Duration::from_secs(5),
         std::time::Duration::from_millis(100),
     )
@@ -500,7 +500,7 @@ async fn rules_ai_without_a_provider_returns_a_startup_error() {
 #[test]
 fn rules_trace_does_not_persist_ai_provider_configuration() {
     let encoded =
-        serde_json::to_string(&harbor::trace::Snapshot::rules("ai-rules", ai_rules())).unwrap();
+        serde_json::to_string(&halo::harbor::trace::Snapshot::rules("ai-rules", ai_rules())).unwrap();
 
     for provider_field in ["base_url", "api_key", "model_name"] {
         assert!(!encoded.contains(provider_field), "{provider_field}");
@@ -512,7 +512,7 @@ async fn code_parse_retry_keeps_openai_after_scheduler_replacement() {
     let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start(["not JSON", r#"{"title":"Rust"}"#]);
     let openai =
-        harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
+        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
     let value = Arc::new(Mutex::new(None));
     let scheduler =
         LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))).with_lease(ai_test_lease());
@@ -540,7 +540,7 @@ async fn rules_code_and_declarative_parsers_share_engine_openai() {
     let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start([r#"{"source":"code"}"#, r#"{"source":"rules"}"#]);
     let openai =
-        harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
+        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
     let mut engine = engine::Builder::new()
         .with_ai(openai)
         .with_rules(ai_rules())
@@ -561,7 +561,7 @@ async fn rules_builder_keeps_openai_after_scheduler_replacement() {
     let _guard = ai_test_lock().lock().await;
     let provider = ai::Server::start([r#"{"title":"Rust"}"#]);
     let openai =
-        harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
+        halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model").unwrap();
     let scheduler =
         LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))).with_lease(ai_test_lease());
     let mut engine = engine::Builder::new()
@@ -582,7 +582,7 @@ async fn rules_builder_keeps_openai_after_scheduler_replacement() {
 
 #[tokio::test]
 async fn rules_node_without_emissions_succeeds() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-test
@@ -615,7 +615,7 @@ graph:
 
 #[tokio::test]
 async fn rules_seeds_bypass_admission_but_runtime_requests_use_dedup() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-seed-publication
@@ -700,7 +700,7 @@ impl downloader::Download for RulesDownload {
 
 #[tokio::test]
 async fn rules_mode_expands_list_requests_and_submits_items() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-books
@@ -778,7 +778,7 @@ item:
 
 #[tokio::test]
 async fn rules_store_retry_reuses_the_same_payload_and_settles_success() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: retrying-rules-store
@@ -818,7 +818,7 @@ item:
 
 #[tokio::test]
 async fn rules_builds_the_spider_item_type_and_calls_the_configured_function() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: typed-rules
@@ -852,7 +852,7 @@ item:
     let called = Arc::new(AtomicBool::new(false));
     let dir = std::env::temp_dir().join(format!("crawler-typed-{}", uuid::Uuid::now_v7()));
     let mut engine = engine::Builder::new()
-        .with_store(harbor::item::Jsonl::with_dir(&dir))
+        .with_store(halo::harbor::item::Jsonl::with_dir(&dir))
         .with_rules(config)
         .with_spider(TypedRulesSpider::new(called.clone()))
         .with_downloader(RulesDownload)
@@ -901,7 +901,7 @@ async fn code_parse_retry_reuses_the_emitted_request_id() {
 
 #[tokio::test]
 async fn rules_retry_reuses_the_request_edge_id_after_item_failure() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: retrying-rules
@@ -972,7 +972,7 @@ item:
 
 #[tokio::test]
 async fn rules_builder_rejects_an_unregistered_item_function() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: typed-rules
@@ -1052,15 +1052,15 @@ struct FailingAttachmentDownloader {
     attempts: Arc<AtomicUsize>,
 }
 
-impl harbor::item::attachment::AttachmentDownloader for FailingAttachmentDownloader {
+impl halo::harbor::item::attachment::AttachmentDownloader for FailingAttachmentDownloader {
     fn download<'a>(
         &'a self,
         _item: &'a mut dyn Item,
-        _config: &'a harbor::item::attachment::Config,
-    ) -> harbor::item::attachment::BoxFuture<'a, Result<(), harbor::item::Error>> {
+        _config: &'a halo::harbor::item::attachment::Config,
+    ) -> halo::harbor::item::attachment::BoxFuture<'a, Result<(), halo::harbor::item::Error>> {
         Box::pin(async move {
             self.attempts.fetch_add(1, Ordering::SeqCst);
-            Err(harbor::item::Error::Message(
+            Err(halo::harbor::item::Error::Message(
                 "attachment fixture failure".to_string(),
             ))
         })
@@ -1072,8 +1072,8 @@ fn media_download_rules(
     media_path: &std::path::Path,
     source: &str,
     retry_count: usize,
-) -> harbor::config::Config {
-    harbor::config::Config::from_yaml(&media_download_rules_yaml(
+) -> halo::harbor::config::Config {
+    halo::harbor::config::Config::from_yaml(&media_download_rules_yaml(
         task,
         media_path,
         source,
@@ -1154,7 +1154,7 @@ fn one_shot_media_server(body: &'static [u8]) -> (String, thread::JoinHandle<()>
 
 #[tokio::test]
 async fn rules_media_field_is_normalized_before_validation_and_submit() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-media
@@ -1192,7 +1192,7 @@ item:
     .unwrap();
     let dir = std::env::temp_dir().join(format!("crawler-media-{}", uuid::Uuid::now_v7()));
     let mut engine = engine::Builder::new()
-        .with_store(harbor::item::Jsonl::with_dir(&dir))
+        .with_store(halo::harbor::item::Jsonl::with_dir(&dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(MediaDownload)
@@ -1229,7 +1229,7 @@ async fn rules_attachment_download_runs_before_store_and_preserves_src() {
     let media_dir = root.join("media");
     let config = media_download_rules("rules-attachment", &media_dir, &source, 0);
     let mut engine = engine::Builder::new()
-        .with_store(harbor::item::Jsonl::with_dir(&output_dir))
+        .with_store(halo::harbor::item::Jsonl::with_dir(&output_dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(AttachmentPageDownload {
@@ -1278,7 +1278,7 @@ async fn exhausted_attachment_download_retries_keep_request_successful() {
         2,
     );
     let mut engine = engine::Builder::new()
-        .with_store(harbor::item::Jsonl::with_dir(&output_dir))
+        .with_store(halo::harbor::item::Jsonl::with_dir(&output_dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_attachment_downloader(FailingAttachmentDownloader {
@@ -1326,9 +1326,9 @@ async fn rules_node_can_skip_item_download_middleware() {
         "    index:\n      fields:",
         "    index:\n      middlewares:\n        - hook: before_item\n          name: download\n          skip: true\n      fields:",
     );
-    let config = harbor::config::Config::from_yaml(&rules).unwrap();
+    let config = halo::harbor::config::Config::from_yaml(&rules).unwrap();
     let mut engine = engine::Builder::new()
-        .with_store(harbor::item::Jsonl::with_dir(&output_dir))
+        .with_store(halo::harbor::item::Jsonl::with_dir(&output_dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_attachment_downloader(FailingAttachmentDownloader {
@@ -1347,7 +1347,7 @@ async fn rules_node_can_skip_item_download_middleware() {
 
 #[tokio::test]
 async fn rules_required_field_failure_fails_only_that_request() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-fail
@@ -1400,7 +1400,7 @@ impl downloader::Download for PagingDownload {
 
 #[tokio::test]
 async fn rules_pagination_self_loop_stops_when_next_link_is_absent() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-pages
@@ -1466,7 +1466,7 @@ impl downloader::Download for IsolatedRulesDownload {
 
 #[tokio::test]
 async fn rules_error_fails_only_the_invalid_request() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-isolation
@@ -1524,7 +1524,7 @@ impl downloader::Download for ConcurrentRulesDownload {
 
 #[tokio::test]
 async fn rules_requests_execute_concurrently() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-concurrent
@@ -1672,26 +1672,26 @@ impl LifecycleStore {
 }
 
 impl Store for LifecycleStore {
-    async fn open(&self) -> Result<(), harbor::item::Error> {
+    async fn open(&self) -> Result<(), halo::harbor::item::Error> {
         self.calls.lock().unwrap().push("store.open");
         if self.fail_open {
-            return Err(harbor::item::Error::Message("store open".to_string()));
+            return Err(halo::harbor::item::Error::Message("store open".to_string()));
         }
         Ok(())
     }
 
-    async fn close(&self) -> Result<(), harbor::item::Error> {
+    async fn close(&self) -> Result<(), halo::harbor::item::Error> {
         self.calls.lock().unwrap().push("store.close");
         if self.fail_close {
-            return Err(harbor::item::Error::Message("store close".to_string()));
+            return Err(halo::harbor::item::Error::Message("store close".to_string()));
         }
         Ok(())
     }
 
-    async fn submit(&self, _payload: &payload::Payload) -> Result<(), harbor::item::Error> {
+    async fn submit(&self, _payload: &payload::Payload) -> Result<(), halo::harbor::item::Error> {
         self.calls.lock().unwrap().push("store.submit");
         if self.fail_submit {
-            return Err(harbor::item::Error::Message("store submit".to_string()));
+            return Err(halo::harbor::item::Error::Message("store submit".to_string()));
         }
         Ok(())
     }
@@ -1703,20 +1703,20 @@ struct GatedStore {
 }
 
 impl Store for GatedStore {
-    async fn open(&self) -> Result<(), harbor::item::Error> {
+    async fn open(&self) -> Result<(), halo::harbor::item::Error> {
         self.calls.lock().unwrap().push("store.open");
         Ok(())
     }
 
-    async fn close(&self) -> Result<(), harbor::item::Error> {
+    async fn close(&self) -> Result<(), halo::harbor::item::Error> {
         self.calls.lock().unwrap().push("store.close");
         Ok(())
     }
 
-    async fn submit(&self, payload: &payload::Payload) -> Result<(), harbor::item::Error> {
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), halo::harbor::item::Error> {
         payload
             .validate_store()
-            .map_err(|message| harbor::item::Error::Message(message.to_string()))?;
+            .map_err(|message| halo::harbor::item::Error::Message(message.to_string()))?;
         self.calls.lock().unwrap().push("store.submit");
         self.gate.entered.add_permits(1);
         self.gate.release.acquire().await.unwrap().forget();
@@ -1785,7 +1785,7 @@ impl downloader::Download for SlowDownload {
 }
 
 struct LifecycleScheduler {
-    inner: harbor::Memory,
+    inner: halo::harbor::Memory,
     calls: Arc<Mutex<Vec<&'static str>>>,
     fail_push: bool,
     push_gate: Option<Arc<PushGate>>,
@@ -1798,8 +1798,8 @@ struct LifecycleScheduler {
 }
 
 impl LifecycleScheduler {
-    fn test_lease() -> harbor::scheduler::Lease {
-        harbor::scheduler::Lease::new(
+    fn test_lease() -> halo::harbor::scheduler::Lease {
+        halo::harbor::scheduler::Lease::new(
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(5),
         )
@@ -1808,7 +1808,7 @@ impl LifecycleScheduler {
 
     fn new(calls: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
-            inner: harbor::Memory::new().with_lease(Self::test_lease()),
+            inner: halo::harbor::Memory::new().with_lease(Self::test_lease()),
             calls,
             fail_push: false,
             push_gate: None,
@@ -1823,7 +1823,7 @@ impl LifecycleScheduler {
 
     fn fail_push(calls: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
-            inner: harbor::Memory::new().with_lease(Self::test_lease()),
+            inner: halo::harbor::Memory::new().with_lease(Self::test_lease()),
             calls,
             fail_push: true,
             push_gate: None,
@@ -1841,8 +1841,8 @@ impl LifecycleScheduler {
         self
     }
 
-    fn with_lease(mut self, lease: harbor::scheduler::Lease) -> Self {
-        self.inner = harbor::Memory::new().with_lease(lease);
+    fn with_lease(mut self, lease: halo::harbor::scheduler::Lease) -> Self {
+        self.inner = halo::harbor::Memory::new().with_lease(lease);
         self
     }
 
@@ -1868,28 +1868,28 @@ impl LifecycleScheduler {
 }
 
 impl Scheduler for LifecycleScheduler {
-    fn lease(&self) -> Option<harbor::scheduler::Lease> {
+    fn lease(&self) -> Option<halo::harbor::scheduler::Lease> {
         self.inner.lease()
     }
 
-    async fn open(&self, concurrency: usize) -> Result<(), harbor::scheduler::Error> {
+    async fn open(&self, concurrency: usize) -> Result<(), halo::harbor::scheduler::Error> {
         self.calls.lock().unwrap().push("scheduler.open");
         self.inner.open(concurrency).await
     }
 
-    async fn close(&self) -> Result<(), harbor::scheduler::Error> {
+    async fn close(&self) -> Result<(), halo::harbor::scheduler::Error> {
         self.calls.lock().unwrap().push("scheduler.close");
         self.inner.close().await
     }
 
-    async fn push(&self, payload: payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn push(&self, payload: payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         if self.fail_push {
             self.calls.lock().unwrap().push("scheduler.push");
             if let Some(gate) = &self.push_gate {
                 gate.entered.add_permits(1);
                 gate.release.acquire().await.unwrap().forget();
             }
-            return Err(harbor::scheduler::Error::Message("push".to_string()));
+            return Err(halo::harbor::scheduler::Error::Message("push".to_string()));
         }
 
         self.inner.push(payload).await
@@ -1898,36 +1898,36 @@ impl Scheduler for LifecycleScheduler {
     async fn trace(
         &self,
         trace_id: &str,
-    ) -> Result<Option<harbor::trace::Snapshot>, harbor::scheduler::Error> {
+    ) -> Result<Option<halo::harbor::trace::Snapshot>, halo::harbor::scheduler::Error> {
         self.inner.trace(trace_id).await
     }
 
     async fn next_requests(
         &self,
         limit: usize,
-    ) -> Result<Vec<net::Request>, harbor::scheduler::Error> {
+    ) -> Result<Vec<net::Request>, halo::harbor::scheduler::Error> {
         self.inner.next_requests(limit).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, harbor::scheduler::Error> {
+    async fn has_pending_requests(&self) -> Result<bool, halo::harbor::scheduler::Error> {
         self.inner.has_pending_requests().await
     }
 
-    async fn ack(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn ack(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
     async fn refresh_lease(
         &self,
         payload: &payload::Payload,
-    ) -> Result<(), harbor::scheduler::Error> {
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.lease_refreshes.fetch_add(1, Ordering::SeqCst);
         if self.reject_refresh {
-            return Err(harbor::scheduler::Error::LeaseMismatch(payload.id.clone()));
+            return Err(halo::harbor::scheduler::Error::LeaseMismatch(payload.id.clone()));
         }
         if self
             .transient_refreshes
@@ -1936,7 +1936,7 @@ impl Scheduler for LifecycleScheduler {
             })
             .is_ok()
         {
-            return Err(harbor::scheduler::Error::Unavailable(
+            return Err(halo::harbor::scheduler::Error::Unavailable(
                 "transient lease refresh".to_string(),
             ));
         }
@@ -1946,13 +1946,13 @@ impl Scheduler for LifecycleScheduler {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.completions.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.completion_delay).await;
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.completions.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.completion_delay).await;
         self.inner.failure(payload).await
@@ -1981,20 +1981,20 @@ impl Init for LifecycleScheduler {
     async fn init(
         &self,
         trace_id: String,
-        snapshot: harbor::trace::Snapshot,
+        snapshot: halo::harbor::trace::Snapshot,
         requests: Vec<net::Request>,
-    ) -> Result<(), harbor::scheduler::Error> {
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.init(trace_id, snapshot, requests).await
     }
 }
 
 struct FailingCloseScheduler {
-    inner: harbor::Memory,
+    inner: halo::harbor::Memory,
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
 struct FlakyScheduler {
-    inner: harbor::Memory,
+    inner: halo::harbor::Memory,
     fail_next: AtomicBool,
     fail_after_commit: AtomicBool,
     transient_after_commit: bool,
@@ -2005,33 +2005,33 @@ struct FlakyScheduler {
 }
 
 impl Scheduler for FlakyScheduler {
-    fn lease(&self) -> Option<harbor::scheduler::Lease> {
+    fn lease(&self) -> Option<halo::harbor::scheduler::Lease> {
         self.inner.lease()
     }
 
-    async fn open(&self, concurrency: usize) -> Result<(), harbor::scheduler::Error> {
+    async fn open(&self, concurrency: usize) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.open(concurrency).await
     }
 
-    async fn close(&self) -> Result<(), harbor::scheduler::Error> {
+    async fn close(&self) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.close().await
     }
 
-    async fn push(&self, payload: payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn push(&self, payload: payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.push(payload).await
     }
 
     async fn trace(
         &self,
         trace_id: &str,
-    ) -> Result<Option<harbor::trace::Snapshot>, harbor::scheduler::Error> {
+    ) -> Result<Option<halo::harbor::trace::Snapshot>, halo::harbor::scheduler::Error> {
         self.inner.trace(trace_id).await
     }
 
     async fn next_requests(
         &self,
         limit: usize,
-    ) -> Result<Vec<net::Request>, harbor::scheduler::Error> {
+    ) -> Result<Vec<net::Request>, halo::harbor::scheduler::Error> {
         let call = self.claim_calls.fetch_add(1, Ordering::SeqCst);
         if self.delay_second_claim && call == 1 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2039,39 +2039,39 @@ impl Scheduler for FlakyScheduler {
         self.inner.next_requests(limit).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, harbor::scheduler::Error> {
+    async fn has_pending_requests(&self) -> Result<bool, halo::harbor::scheduler::Error> {
         self.inner.has_pending_requests().await
     }
 
-    async fn ack(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn ack(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
     async fn refresh_lease(
         &self,
         payload: &payload::Payload,
-    ) -> Result<(), harbor::scheduler::Error> {
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
-            return Err(harbor::scheduler::Error::Unavailable(
+            return Err(halo::harbor::scheduler::Error::Unavailable(
                 "success failed".to_string(),
             ));
         }
         self.inner.success(payload).await?;
         if self.fail_after_commit.swap(false, Ordering::SeqCst) {
             return if self.transient_after_commit {
-                Err(harbor::scheduler::Error::Unavailable(
+                Err(halo::harbor::scheduler::Error::Unavailable(
                     "success response lost after commit".to_string(),
                 ))
             } else {
-                Err(harbor::scheduler::Error::Message(
+                Err(halo::harbor::scheduler::Error::Message(
                     "success response failed after commit".to_string(),
                 ))
             };
@@ -2079,14 +2079,14 @@ impl Scheduler for FlakyScheduler {
         Ok(())
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.failure_attempts
             .lock()
             .unwrap()
             .push(FailureAttempt::from_payload(payload));
         self.inner.failure(payload).await?;
         if self.failure_response_lost.swap(false, Ordering::SeqCst) {
-            return Err(harbor::scheduler::Error::Unavailable(
+            return Err(halo::harbor::scheduler::Error::Unavailable(
                 "failure response lost after commit".to_string(),
             ));
         }
@@ -2102,9 +2102,9 @@ impl Init for FlakyScheduler {
     async fn init(
         &self,
         trace_id: String,
-        snapshot: harbor::trace::Snapshot,
+        snapshot: halo::harbor::trace::Snapshot,
         requests: Vec<net::Request>,
-    ) -> Result<(), harbor::scheduler::Error> {
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.init(trace_id, snapshot, requests).await
     }
 }
@@ -2112,7 +2112,7 @@ impl Init for FlakyScheduler {
 type RequestRecords = Arc<Mutex<Vec<(PayloadRecord, Vec<net::Request>)>>>;
 
 struct RecordingScheduler {
-    inner: harbor::Memory,
+    inner: halo::harbor::Memory,
     requests: RequestRecords,
     records: Arc<Mutex<Vec<PayloadRecord>>>,
     reject_emitted: bool,
@@ -2122,7 +2122,7 @@ struct RecordingScheduler {
 impl RecordingScheduler {
     fn new(requests: RequestRecords, records: Arc<Mutex<Vec<PayloadRecord>>>) -> Self {
         Self {
-            inner: harbor::Memory::new(),
+            inner: halo::harbor::Memory::new(),
             requests,
             records,
             reject_emitted: false,
@@ -2175,48 +2175,48 @@ impl RetryOnceStore {
 }
 
 impl Store for RecordingStore {
-    async fn open(&self) -> Result<(), harbor::item::Error> {
+    async fn open(&self) -> Result<(), halo::harbor::item::Error> {
         Ok(())
     }
 
-    async fn close(&self) -> Result<(), harbor::item::Error> {
+    async fn close(&self) -> Result<(), halo::harbor::item::Error> {
         Ok(())
     }
 
-    async fn submit(&self, payload: &payload::Payload) -> Result<(), harbor::item::Error> {
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), halo::harbor::item::Error> {
         payload
             .validate_store()
-            .map_err(|message| harbor::item::Error::Message(message.to_string()))?;
+            .map_err(|message| halo::harbor::item::Error::Message(message.to_string()))?;
         self.items
             .lock()
             .unwrap()
             .push(PayloadRecord::from_payload(payload));
         if self.reject {
-            return Err(harbor::item::Error::Message("item submit".to_string()));
+            return Err(halo::harbor::item::Error::Message("item submit".to_string()));
         }
         Ok(())
     }
 }
 
 impl Store for RetryOnceStore {
-    async fn open(&self) -> Result<(), harbor::item::Error> {
+    async fn open(&self) -> Result<(), halo::harbor::item::Error> {
         Ok(())
     }
 
-    async fn close(&self) -> Result<(), harbor::item::Error> {
+    async fn close(&self) -> Result<(), halo::harbor::item::Error> {
         Ok(())
     }
 
-    async fn submit(&self, payload: &payload::Payload) -> Result<(), harbor::item::Error> {
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), halo::harbor::item::Error> {
         payload
             .validate_store()
-            .map_err(|message| harbor::item::Error::Message(message.to_string()))?;
+            .map_err(|message| halo::harbor::item::Error::Message(message.to_string()))?;
         self.attempts
             .lock()
             .unwrap()
             .push(StoreAttempt::from_payload(payload)?);
         if self.fail_next.swap(false, Ordering::SeqCst) {
-            return Err(harbor::item::Error::Message(
+            return Err(halo::harbor::item::Error::Message(
                 "retrying Rules Store submit".to_string(),
             ));
         }
@@ -2225,19 +2225,19 @@ impl Store for RetryOnceStore {
 }
 
 impl Scheduler for RecordingScheduler {
-    fn lease(&self) -> Option<harbor::scheduler::Lease> {
+    fn lease(&self) -> Option<halo::harbor::scheduler::Lease> {
         self.inner.lease()
     }
 
-    async fn open(&self, concurrency: usize) -> Result<(), harbor::scheduler::Error> {
+    async fn open(&self, concurrency: usize) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.open(concurrency).await
     }
 
-    async fn close(&self) -> Result<(), harbor::scheduler::Error> {
+    async fn close(&self) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.close().await
     }
 
-    async fn push(&self, payload: payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn push(&self, payload: payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         let emitted = payload
             .requests
             .iter()
@@ -2252,7 +2252,7 @@ impl Scheduler for RecordingScheduler {
             payload.requests.clone(),
         ));
         if reject {
-            return Err(harbor::scheduler::Error::Message(
+            return Err(halo::harbor::scheduler::Error::Message(
                 "emitted request push".to_string(),
             ));
         }
@@ -2270,14 +2270,14 @@ impl Scheduler for RecordingScheduler {
     async fn trace(
         &self,
         trace_id: &str,
-    ) -> Result<Option<harbor::trace::Snapshot>, harbor::scheduler::Error> {
+    ) -> Result<Option<halo::harbor::trace::Snapshot>, halo::harbor::scheduler::Error> {
         self.inner.trace(trace_id).await
     }
 
     async fn next_requests(
         &self,
         limit: usize,
-    ) -> Result<Vec<net::Request>, harbor::scheduler::Error> {
+    ) -> Result<Vec<net::Request>, halo::harbor::scheduler::Error> {
         let requests = self.inner.next_requests(limit).await?;
         if requests.is_empty()
             && let Some(sync) = &self.claim_sync
@@ -2292,26 +2292,26 @@ impl Scheduler for RecordingScheduler {
         Ok(requests)
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, harbor::scheduler::Error> {
+    async fn has_pending_requests(&self) -> Result<bool, halo::harbor::scheduler::Error> {
         self.inner.has_pending_requests().await
     }
 
-    async fn ack(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn ack(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
     async fn refresh_lease(
         &self,
         payload: &payload::Payload,
-    ) -> Result<(), harbor::scheduler::Error> {
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.records
             .lock()
             .unwrap()
@@ -2319,7 +2319,7 @@ impl Scheduler for RecordingScheduler {
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.records
             .lock()
             .unwrap()
@@ -2336,71 +2336,71 @@ impl Init for RecordingScheduler {
     async fn init(
         &self,
         trace_id: String,
-        snapshot: harbor::trace::Snapshot,
+        snapshot: halo::harbor::trace::Snapshot,
         requests: Vec<net::Request>,
-    ) -> Result<(), harbor::scheduler::Error> {
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.init(trace_id, snapshot, requests).await
     }
 }
 
 impl Scheduler for FailingCloseScheduler {
-    fn lease(&self) -> Option<harbor::scheduler::Lease> {
+    fn lease(&self) -> Option<halo::harbor::scheduler::Lease> {
         self.inner.lease()
     }
 
-    async fn open(&self, _concurrency: usize) -> Result<(), harbor::scheduler::Error> {
+    async fn open(&self, _concurrency: usize) -> Result<(), halo::harbor::scheduler::Error> {
         Ok(())
     }
 
-    async fn close(&self) -> Result<(), harbor::scheduler::Error> {
+    async fn close(&self) -> Result<(), halo::harbor::scheduler::Error> {
         self.calls.lock().unwrap().push("scheduler.close");
-        Err(harbor::scheduler::Error::Message(
+        Err(halo::harbor::scheduler::Error::Message(
             "scheduler close".to_string(),
         ))
     }
 
-    async fn push(&self, payload: payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn push(&self, payload: payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.push(payload).await
     }
 
     async fn trace(
         &self,
         trace_id: &str,
-    ) -> Result<Option<harbor::trace::Snapshot>, harbor::scheduler::Error> {
+    ) -> Result<Option<halo::harbor::trace::Snapshot>, halo::harbor::scheduler::Error> {
         self.inner.trace(trace_id).await
     }
 
     async fn next_requests(
         &self,
         limit: usize,
-    ) -> Result<Vec<net::Request>, harbor::scheduler::Error> {
+    ) -> Result<Vec<net::Request>, halo::harbor::scheduler::Error> {
         self.inner.next_requests(limit).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, harbor::scheduler::Error> {
+    async fn has_pending_requests(&self) -> Result<bool, halo::harbor::scheduler::Error> {
         self.inner.has_pending_requests().await
     }
 
-    async fn ack(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn ack(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn release(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
     async fn refresh_lease(
         &self,
         payload: &payload::Payload,
-    ) -> Result<(), harbor::scheduler::Error> {
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn success(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
+    async fn failure(&self, payload: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.failure(payload).await
     }
 }
@@ -2413,9 +2413,9 @@ impl Init for FailingCloseScheduler {
     async fn init(
         &self,
         trace_id: String,
-        snapshot: harbor::trace::Snapshot,
+        snapshot: halo::harbor::trace::Snapshot,
         requests: Vec<net::Request>,
-    ) -> Result<(), harbor::scheduler::Error> {
+    ) -> Result<(), halo::harbor::scheduler::Error> {
         self.inner.init(trace_id, snapshot, requests).await
     }
 }
@@ -2429,10 +2429,10 @@ impl TestSpider {
         "test"
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         if !response.url.contains("/ok") {
             let next = net::Request::follow("https://example.com/detail")
-                .map_err(|error| harbor::Error::Message(error.to_string()))?
+                .map_err(|error| halo::harbor::Error::Message(error.to_string()))?
                 .node(Self::detail);
             self.tx.request(vec![next]).await?;
         }
@@ -2441,7 +2441,7 @@ impl TestSpider {
         Ok(())
     }
 
-    async fn detail(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn detail(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         self.tx.item(vec![TestItem::new()]).await?;
         Ok(())
     }
@@ -2460,7 +2460,7 @@ impl StartSpider {
         vec!["https://example.com/ok".to_string()]
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         self.tx.item(vec![TestItem::new()]).await?;
         Ok(())
     }
@@ -2475,7 +2475,7 @@ impl EmptySpider {
         "empty"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -2489,9 +2489,9 @@ impl MiddlewareSpider {
         "middleware"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         let mut request = net::Request::follow("https://example.com/middleware")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?;
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?;
         request.middlewares = vec![lifecycle_spec("before_scheduler")];
         request.middlewares.push(lifecycle_spec("before_download"));
         request.middlewares.push(lifecycle_spec("after_download"));
@@ -2499,7 +2499,7 @@ impl MiddlewareSpider {
         self.tx.request(vec![request]).await
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         let item = TestItem::new().with_middlewares(vec![lifecycle_spec("before_item")]);
         self.tx.item(vec![item]).await
     }
@@ -2525,11 +2525,11 @@ impl StartItemSpider {
         "start_item"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         self.tx.item(vec![TestItem::new()]).await
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -2540,7 +2540,7 @@ impl FailingStartItemsSpider {
         "failing_start_items"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         let middleware = Spec::new("failing-error-item").hook("error_item");
         self.tx
             .item(vec![
@@ -2550,7 +2550,7 @@ impl FailingStartItemsSpider {
             .await
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -2564,11 +2564,11 @@ impl StartFailSpider {
         "start_fail"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
-        Err(harbor::Error::Message("start".to_string()))
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
+        Err(halo::harbor::Error::Message("start".to_string()))
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -2582,11 +2582,11 @@ impl PanicStartSpider {
         "panic-start"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         panic!("startup task panic")
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -2602,14 +2602,14 @@ impl StartEmitFailSpider {
         "start-emit-fail"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         let request = net::Request::follow("https://example.com/accepted")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?;
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?;
         self.tx.request(vec![request]).await?;
-        Err(harbor::Error::Message("start after output".to_string()))
+        Err(halo::harbor::Error::Message("start after output".to_string()))
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -2626,7 +2626,7 @@ impl CancelledOutputSpider {
         "cancelled-output"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         let tx = self.tx.clone();
         let task = tokio::spawn(async move {
             let request = net::Request::follow("https://example.com/cancelled").unwrap();
@@ -2636,7 +2636,7 @@ impl CancelledOutputSpider {
         Ok(())
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -2659,10 +2659,10 @@ impl EventSpider {
         "events"
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         if response.url.ends_with("/emit") || response.url.ends_with("/push-fail") {
             let emitted = net::Request::follow("https://example.com/emitted")
-                .map_err(|error| harbor::Error::Message(error.to_string()))?;
+                .map_err(|error| halo::harbor::Error::Message(error.to_string()))?;
             self.tx.request(vec![emitted]).await?;
         }
         if response.url.ends_with("/emit") || response.url.ends_with("/item-fail") {
@@ -2689,14 +2689,14 @@ impl LateEventSpider {
         "late-event"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         let request = net::Request::follow("https://example.com/source")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?;
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?;
         self.tx.request(vec![request]).await?;
         Ok(())
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         if response.url.ends_with("/source") {
             let tx = self.tx.clone();
             let _task = tokio::spawn(async move {
@@ -2716,13 +2716,13 @@ impl DetachedItemSpider {
         "detached-item"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         let request = net::Request::follow("https://example.com/source")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?;
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?;
         self.tx.request(vec![request]).await
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -2765,13 +2765,13 @@ impl StaleClaimSpider {
         "stale-claim"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         let request = net::Request::follow("https://example.com/source")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?;
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?;
         self.tx.request(vec![request]).await
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         if response.url.ends_with("/source") {
             let tx = self.tx.clone();
             let sync = self.sync.clone();
@@ -2796,7 +2796,7 @@ impl ArgsSpider {
         vec![self.args.start_url.clone()]
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         self.tx.item(vec![TestItem::new()]).await?;
         Ok(())
     }
@@ -2805,7 +2805,7 @@ impl ArgsSpider {
 #[derive(serde::Serialize)]
 struct TestItem {
     #[serde(skip)]
-    state: harbor::item::State,
+    state: halo::harbor::item::State,
     #[serde(skip)]
     middlewares: Vec<Spec>,
 }
@@ -2813,7 +2813,7 @@ struct TestItem {
 impl TestItem {
     fn new() -> Self {
         Self {
-            state: harbor::item::State::default(),
+            state: halo::harbor::item::State::default(),
             middlewares: Vec::new(),
         }
     }
@@ -2825,19 +2825,19 @@ impl TestItem {
 }
 
 impl Item for TestItem {
-    fn from_values(_values: harbor::item::Values) -> Result<Self, harbor::item::Error> {
+    fn from_values(_values: halo::harbor::item::Values) -> Result<Self, halo::harbor::item::Error> {
         Ok(Self::new())
     }
 
-    fn state(&self) -> &harbor::item::State {
+    fn state(&self) -> &halo::harbor::item::State {
         &self.state
     }
 
-    fn state_mut(&mut self) -> &mut harbor::item::State {
+    fn state_mut(&mut self) -> &mut halo::harbor::item::State {
         &mut self.state
     }
 
-    fn middlewares(&self) -> &[harbor::middleware::Spec] {
+    fn middlewares(&self) -> &[halo::harbor::middleware::Spec] {
         &self.middlewares
     }
 }
@@ -2894,7 +2894,7 @@ async fn engine_close_closes_downloader_store_and_scheduler() {
 async fn engine_close_attempts_every_component_when_cleanup_fails() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = FailingCloseScheduler {
-        inner: harbor::Memory::new(),
+        inner: halo::harbor::Memory::new(),
         calls: calls.clone(),
     };
     let downloader = FailingCloseDownload {
@@ -2954,7 +2954,7 @@ async fn engine_runs_request_response_and_item_middleware_hooks_in_order() {
         calls: calls.clone(),
     };
     let mut engine = engine::Builder::new()
-        .with_scheduler(harbor::Memory::new())
+        .with_scheduler(halo::harbor::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(MiddlewareSpider::new())
         .with_middleware("lifecycle", middleware)
@@ -3049,7 +3049,7 @@ async fn start_item_store_failure_keeps_store_error_and_closes_resources() {
 #[tokio::test]
 async fn engine_reports_start_task_panic_without_hanging() {
     let mut engine = engine::Builder::new()
-        .with_scheduler(harbor::Memory::new())
+        .with_scheduler(halo::harbor::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(PanicStartSpider::new())
         .build();
@@ -3066,7 +3066,7 @@ async fn engine_reports_start_task_panic_without_hanging() {
 async fn spider_start_error_submits_accepted_output_without_claiming_it() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
-        .with_scheduler(harbor::Memory::new())
+        .with_scheduler(halo::harbor::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(StartEmitFailSpider::new(calls.clone()))
         .build();
@@ -3196,7 +3196,7 @@ async fn engine_open_closes_prior_resources_when_store_open_fails() {
 
 #[tokio::test]
 async fn executor_completes_current_request() {
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
     init_run(&scheduler).await;
     let request = bound_request("https://example.com");
 
@@ -3222,7 +3222,7 @@ async fn executor_completes_current_request() {
 #[tokio::test]
 async fn engine_starts_until_scheduler_is_empty() {
     let spider = StartSpider::new();
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
 
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
@@ -3361,7 +3361,7 @@ async fn stale_empty_claim_is_rechecked_after_detached_output() {
 
 #[tokio::test]
 async fn detached_rules_output_keeps_only_the_trace_identity() {
-    let config = harbor::config::Config::from_yaml(
+    let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-late-event
@@ -3417,7 +3417,7 @@ graph:
 #[tokio::test]
 async fn engine_submits_start_items_to_store() {
     let spider = StartItemSpider::new();
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
     let items = Arc::new(Mutex::new(Vec::new()));
     let store = RecordingStore::new(items.clone());
 
@@ -3442,7 +3442,7 @@ async fn replacing_scheduler_does_not_change_store_submission() {
     let items = Arc::new(Mutex::new(Vec::new()));
 
     let mut memory = engine::Builder::new()
-        .with_scheduler(harbor::Memory::new())
+        .with_scheduler(halo::harbor::Memory::new())
         .with_store(RecordingStore::new(items.clone()))
         .with_downloader(TestDownload)
         .with_spider(StartItemSpider::new())
@@ -3480,7 +3480,7 @@ async fn spider_macro_keeps_user_business_fields_and_injects_tx() {
     let spider = ArgsSpider::new(Args {
         start_url: "https://example.com/ok".to_string(),
     });
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
 
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
@@ -3499,7 +3499,7 @@ async fn spider_macro_keeps_user_business_fields_and_injects_tx() {
 #[tokio::test]
 async fn engine_records_failed_request_and_continues_other_requests() {
     let spider = TestSpider::new();
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
     init_run(&scheduler).await;
     let failed = bound_request("https://example.com/fail");
     let ok = bound_request("https://example.com/ok");
@@ -3528,7 +3528,7 @@ async fn engine_records_failed_request_and_continues_other_requests() {
 #[tokio::test]
 async fn engine_concurrency_controls_concurrent_requests() {
     let spider = EmptySpider::new();
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
     init_run(&scheduler).await;
     let requests = vec![
         bound_request("https://example.com/1"),
@@ -3707,7 +3707,7 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
         .inner
         .init(
             "trace-7".to_string(),
-            harbor::trace::Snapshot::code("task-7"),
+            halo::harbor::trace::Snapshot::code("task-7"),
             Vec::new(),
         )
         .await
@@ -3880,7 +3880,7 @@ async fn rejected_items_only_fail_current_request_and_keep_consuming() {
 
 #[tokio::test]
 async fn independent_items_run_concurrently() {
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
     init_run(&scheduler).await;
     let requests = vec![
         bound_request("https://example.com/item-fail"),
@@ -3905,7 +3905,7 @@ async fn independent_items_run_concurrently() {
 #[tokio::test]
 async fn engine_retries_transient_success_error_without_reexecution() {
     let scheduler = FlakyScheduler {
-        inner: harbor::Memory::new(),
+        inner: halo::harbor::Memory::new(),
         fail_next: AtomicBool::new(true),
         fail_after_commit: AtomicBool::new(false),
         transient_after_commit: false,
@@ -3947,7 +3947,7 @@ async fn engine_retries_transient_success_error_without_reexecution() {
 async fn engine_retries_the_same_success_payload_after_a_lost_response() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = FlakyScheduler {
-        inner: harbor::Memory::new(),
+        inner: halo::harbor::Memory::new(),
         fail_next: AtomicBool::new(false),
         fail_after_commit: AtomicBool::new(true),
         transient_after_commit: true,
@@ -3989,7 +3989,7 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
     let downloads = Arc::new(Mutex::new(Vec::new()));
     let failure_attempts = Arc::new(Mutex::new(Vec::new()));
     let scheduler = FlakyScheduler {
-        inner: harbor::Memory::new(),
+        inner: halo::harbor::Memory::new(),
         fail_next: AtomicBool::new(false),
         fail_after_commit: AtomicBool::new(false),
         transient_after_commit: false,
@@ -4034,7 +4034,7 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
 #[tokio::test]
 async fn claim_returning_after_a_request_error_still_executes_its_request() {
     let scheduler = FlakyScheduler {
-        inner: harbor::Memory::new(),
+        inner: halo::harbor::Memory::new(),
         fail_next: AtomicBool::new(false),
         fail_after_commit: AtomicBool::new(true),
         transient_after_commit: false,

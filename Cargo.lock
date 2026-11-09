@@ -424,7 +424,7 @@ dependencies = [
  "bytes",
  "fastrace",
  "futures-util",
- "harbor",
+ "halo-harbor",
  "redis",
  "reqwest",
  "serde",
@@ -885,8 +885,8 @@ dependencies = [
 name = "examples"
 version = "0.1.0"
 dependencies = [
- "harbor",
- "macros",
+ "halo-harbor",
+ "halo-harbor-macros",
  "serde",
  "serde_json",
  "tokio",
@@ -1161,6 +1161,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "halo-harbor"
+version = "0.1.0"
+dependencies = [
+ "async-openai",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "cookie_store",
+ "encoding_rs",
+ "erased-serde",
+ "fastrace",
+ "fastrand",
+ "flate2",
+ "futures-util",
+ "halo-harbor-macros",
+ "halo-validator",
+ "http",
+ "indexmap",
+ "kameo",
+ "mime",
+ "psl",
+ "regex",
+ "reqwest",
+ "scrape-core",
+ "secrecy",
+ "selectors",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "serde_yaml_ng",
+ "sha2",
+ "strsim",
+ "thirtyfour",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "halo-harbor-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.118",
+]
+
+[[package]]
+name = "halo-harbor-worker"
+version = "0.1.0"
+dependencies = [
+ "contrib",
+ "halo-harbor",
+ "rustls",
+ "serde",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "halo-validator"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1187,60 +1252,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "harbor"
-version = "0.1.0"
-dependencies = [
- "async-openai",
- "bytes",
- "chrono",
- "chrono-tz",
- "cookie_store",
- "encoding_rs",
- "erased-serde",
- "fastrace",
- "fastrand",
- "flate2",
- "futures-util",
- "halo-validator",
- "http",
- "indexmap",
- "kameo",
- "macros",
- "mime",
- "psl",
- "regex",
- "reqwest",
- "scrape-core",
- "secrecy",
- "selectors",
- "serde",
- "serde_json",
- "serde_json_path",
- "serde_yaml_ng",
- "sha2",
- "strsim",
- "thirtyfour",
- "thiserror",
- "tokio",
- "tower",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "harbor-worker"
-version = "0.1.0"
-dependencies = [
- "contrib",
- "harbor",
- "rustls",
- "serde",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -1769,18 +1780,6 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
-
-[[package]]
-name = "macros"
-version = "0.1.0"
-dependencies = [
- "harbor",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn 2.0.118",
-]
 
 [[package]]
 name = "markup5ever"

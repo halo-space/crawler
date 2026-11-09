@@ -2,10 +2,15 @@ use std::sync::{Arc, OnceLock};
 
 use crate::{Error, error::harbor::Error as SpiderError, item, net};
 
+#[path = "tx/activity.rs"]
 mod activity;
+#[path = "tx/capacity.rs"]
 mod capacity;
+#[path = "tx/context.rs"]
 mod context;
+#[path = "tx/event.rs"]
 mod event;
+#[path = "tx/identity.rs"]
 mod identity;
 
 use activity::{Activity, Registration};

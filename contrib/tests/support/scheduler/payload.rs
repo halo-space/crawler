@@ -1,4 +1,4 @@
-use harbor::{net, payload};
+use halo::harbor::{net, payload};
 
 pub(super) const TASK_ID: &str = "conformance-task";
 pub(super) const TRACE_ID: &str = "conformance-trace";

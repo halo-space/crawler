@@ -21,12 +21,12 @@ impl SchemaKey {
 
 pub enum Output {
     Valid,
-    Invalid(Vec<halo::FieldError>),
+    Invalid(Vec<halo_validator::FieldError>),
 }
 
 #[derive(Default)]
 pub struct Store {
-    validators: RwLock<HashMap<SchemaKey, Arc<halo::Validator>>>,
+    validators: RwLock<HashMap<SchemaKey, Arc<halo_validator::Validator>>>,
 }
 
 impl Store {
@@ -39,9 +39,9 @@ impl Store {
         if self.read().contains_key(&key) {
             return Ok(key);
         }
-        let schema = halo::Schema::from_json(schema.to_string())
+        let schema = halo_validator::Schema::from_json(schema.to_string())
             .map_err(|error| crate::item::Error::Message(error.to_string()))?;
-        let validator = Arc::new(halo::Validator::with_schema(schema));
+        let validator = Arc::new(halo_validator::Validator::with_schema(schema));
         if let Err(error) = validator.validate_map(&serde_json::json!({}))
             && !error.is_failed()
         {
@@ -64,13 +64,13 @@ impl Store {
         }
     }
 
-    fn read(&self) -> RwLockReadGuard<'_, HashMap<SchemaKey, Arc<halo::Validator>>> {
+    fn read(&self) -> RwLockReadGuard<'_, HashMap<SchemaKey, Arc<halo_validator::Validator>>> {
         self.validators
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn write(&self) -> RwLockWriteGuard<'_, HashMap<SchemaKey, Arc<halo::Validator>>> {
+    fn write(&self) -> RwLockWriteGuard<'_, HashMap<SchemaKey, Arc<halo_validator::Validator>>> {
         self.validators
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

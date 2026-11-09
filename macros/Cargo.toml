@@ -1,5 +1,5 @@
 [package]
-name = "macros"
+name = "halo-harbor-macros"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,4 +19,3 @@ syn = { workspace = true }
 [dev-dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-harbor = { path = "..", version = "0.1.0" }

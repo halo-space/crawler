@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
-use harbor::{engine, net};
+use halo::harbor::{engine, net};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -12,7 +12,7 @@ static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 #[serde(deny_unknown_fields)]
 struct Book {
     #[serde(skip)]
-    state: harbor::item::State,
+    state: halo::harbor::item::State,
     title: String,
 }
 
@@ -30,7 +30,7 @@ impl RulesCookieSpider {
         "rules-cookie-acceptance"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 }
@@ -45,24 +45,24 @@ impl AcceptanceSpider {
         vec![self.start_url.clone()]
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         let detail = response
             .follow("/detail")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?
             .node(Self::detail);
         self.tx.request(vec![detail]).await
     }
 
-    async fn detail(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn detail(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         let soup = response.css()?;
         let title = soup
             .find("h1")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?
             .map(|node| node.text())
-            .ok_or_else(|| harbor::Error::Message("missing title".to_string()))?;
+            .ok_or_else(|| halo::harbor::Error::Message("missing title".to_string()))?;
         self.tx
             .item(vec![Book {
-                state: harbor::item::State::default(),
+                state: halo::harbor::item::State::default(),
                 title,
             }])
             .await
@@ -74,7 +74,7 @@ async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
     let (start_url, server) = serve_pages();
     let runtime_dir = temp_dir();
     let mut engine = engine::Builder::new()
-        .with_store(harbor::item::Jsonl::with_dir(&runtime_dir))
+        .with_store(halo::harbor::item::Jsonl::with_dir(&runtime_dir))
         .with_spider(AcceptanceSpider::new(start_url))
         .build()
         .with_concurrency(2);
@@ -134,7 +134,7 @@ graph:
         url: {from: $fields.link}
 "#
     .replace("START_URL", &start_url);
-    let config = harbor::config::Config::from_yaml(&rules).unwrap();
+    let config = halo::harbor::config::Config::from_yaml(&rules).unwrap();
     let mut engine = engine::Builder::new()
         .with_rules(config)
         .with_spider(RulesCookieSpider::new())

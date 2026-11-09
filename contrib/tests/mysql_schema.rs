@@ -1,7 +1,7 @@
 #[path = "mysql/server.rs"]
 mod server;
 
-use harbor::Scheduler as _;
+use halo::harbor::Scheduler as _;
 use sqlx::Row;
 
 #[tokio::test]

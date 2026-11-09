@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use harbor::{net, scheduler};
+use halo::harbor::{net, scheduler};
 
 use super::{client, state, wire};
 

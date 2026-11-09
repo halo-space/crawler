@@ -5,11 +5,11 @@ use std::thread;
 use std::time::Duration;
 
 use macros::harbor;
-use harbor::downloader::Download;
-use harbor::downloader::Downloader;
-use harbor::downloader::browser::Browser;
-use harbor::net::{Mode, Request, Response};
-use harbor::{Error, engine};
+use halo::harbor::downloader::Download;
+use halo::harbor::downloader::Downloader;
+use halo::harbor::downloader::browser::Browser;
+use halo::harbor::net::{Mode, Request, Response};
+use halo::harbor::{Error, engine};
 
 fn local_page() -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -277,7 +277,7 @@ async fn browser_returns_rendered_dom_when_enabled() {
         .unwrap_err();
     assert!(matches!(
         error,
-        harbor::downloader::Error::InvalidConfig(message) if message.contains("not open")
+        halo::harbor::downloader::Error::InvalidConfig(message) if message.contains("not open")
     ));
     server.join().unwrap();
 }
@@ -294,7 +294,7 @@ async fn engine_routes_http_and_browser_requests_together() {
         .with_idle_timeout(Duration::from_secs(30))
         .unwrap();
     let downloader = Downloader::new().with_browser(browser);
-    let scheduler = harbor::Memory::new().with_modes([Mode::Http, Mode::Browser]);
+    let scheduler = halo::harbor::Memory::new().with_modes([Mode::Http, Mode::Browser]);
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
@@ -404,7 +404,7 @@ async fn browser_does_not_forward_request_cookie_to_cross_origin_redirect() {
 
     assert!(matches!(
         error,
-        harbor::downloader::Error::InvalidConfig(message)
+        halo::harbor::downloader::Error::InvalidConfig(message)
             if message.contains("cross-origin redirect")
     ));
     let captured = captured.lock().unwrap().to_ascii_lowercase();

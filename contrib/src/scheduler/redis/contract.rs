@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use harbor::{net, payload, scheduler, trace};
+use halo::harbor::{net, payload, scheduler, trace};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 
 use super::error::{message, redis as redis_error, status};
@@ -327,8 +327,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use harbor::scheduler::Init as _;
-    use harbor::{Scheduler as _, net, payload, scheduler, trace};
+    use halo::harbor::scheduler::Init as _;
+    use halo::harbor::{Scheduler as _, net, payload, scheduler, trace};
     use tokio::sync::oneshot;
 
     use super::Redis;

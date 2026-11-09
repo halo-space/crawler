@@ -17,7 +17,7 @@ pub use fixture::Timing;
 /// lease-backed fixture should configure a short test lease so expiry recovery remains fast.
 pub async fn run<S, F>(create: F, initializes_run: bool, timing: Timing)
 where
-    S: harbor::Scheduler + harbor::scheduler::Init + 'static,
+    S: halo::harbor::Scheduler + halo::harbor::scheduler::Init + 'static,
     F: Fn() -> S,
 {
     initialization::lifecycle_and_trace(create(), initializes_run).await;
@@ -41,7 +41,7 @@ where
 /// Runs the lease-specific scenarios for a fixture that explicitly exposes a lease policy.
 pub async fn lease<S>(scheduler: S, single_worker: bool, timing: Timing)
 where
-    S: harbor::Scheduler + harbor::scheduler::Init,
+    S: halo::harbor::Scheduler + halo::harbor::scheduler::Init,
 {
     leases::contract(scheduler, single_worker, timing).await;
 }

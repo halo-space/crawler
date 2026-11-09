@@ -43,7 +43,7 @@ serde_yaml = "0.10"
 ### 2.1 最小代码
 
 ```rust
-use harbor::{engine, net};
+use halo::harbor::{engine, net};
 
 // #[macros::harbor] 为 Spider 注入框架需要的运行能力。
 #[macros::harbor]
@@ -62,14 +62,14 @@ impl ExampleSpider {
     }
 
     // index 是默认的页面处理入口。
-    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), halo::harbor::Error> {
         // 解析当前页面的 CSS 文档。
         let soup = response.css()?;
 
         // 读取页面标题；没有标题时使用当前 URL。
         let title = soup
             .find("h1")
-            .map_err(|error| harbor::Error::Message(error.to_string()))?
+            .map_err(|error| halo::harbor::Error::Message(error.to_string()))?
             .map(|node| node.text())
             .unwrap_or_else(|| response.url.clone());
 
@@ -87,7 +87,7 @@ struct ExampleItem {
 
     // state 是框架字段，不写入业务数据。
     #[serde(skip)]
-    state: harbor::item::State,
+    state: halo::harbor::item::State,
 }
 
 impl ExampleItem {
@@ -95,7 +95,7 @@ impl ExampleItem {
     fn new(title: String) -> Self {
         Self {
             title,
-            state: harbor::item::State::default(),
+            state: halo::harbor::item::State::default(),
         }
     }
 }
@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 2.2 提交下一条 Request
 
 ```rust
-use harbor::net::Request;
+use halo::harbor::net::Request;
 
 // 在当前页面解析详情链接。
 let detail_url = "https://example.com/detail/1";
@@ -151,7 +151,7 @@ let soup = response.css()?;
 let document: serde_json::Value = response.json()?;
 
 // 使用 JSONPath 读取 JSON 字段。
-let values = harbor::selector::json::select(&document, "$.data.items[*].id")?;
+let values = halo::harbor::selector::json::select(&document, "$.data.items[*].id")?;
 
 // 读取响应文本。
 let text = response.text()?;
@@ -179,7 +179,7 @@ item: {}
 ```rust
 use std::path::PathBuf;
 
-use harbor::{config, engine, net};
+use halo::harbor::{config, engine, net};
 
 #[derive(serde::Deserialize, serde::Serialize, macros::Item)]
 #[serde(deny_unknown_fields)]
@@ -191,7 +191,7 @@ struct Article {
 
     // state 是框架字段，不写入最终 Item。
     #[serde(skip)]
-    state: harbor::item::State,
+    state: halo::harbor::item::State,
 }
 
 #[macros::harbor(item = Article)]
@@ -205,13 +205,13 @@ impl ArticleSpider {
     }
 
     // Rules 每条 Request 仍会经过这个入口。
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 
     // Rules 的 Item edge 可以通过 fn: save 调用这个函数。
     #[item]
-    async fn save(&self, item: Article) -> Result<(), harbor::Error> {
+    async fn save(&self, item: Article) -> Result<(), halo::harbor::Error> {
         // Item 仍通过统一的 Tx 提交。
         self.tx.item(vec![item]).await
     }
@@ -794,7 +794,7 @@ Browser 第一版支持 GET 页面导航、渲染后的 DOM、Cookie Session 复
 默认使用 JSONL Store：
 
 ```rust
-use harbor::{engine, item};
+use halo::harbor::{engine, item};
 
 // 修改 Item 输出根目录。
 let store = item::Jsonl::with_dir("./crawler-data");
@@ -821,7 +821,7 @@ engine.start().await?;
 
 ```rust
 // 不配置 Scheduler 时，Engine 使用内存 Scheduler。
-let engine = harbor::engine::Engine::new()
+let engine = halo::harbor::engine::Engine::new()
     .with_spider(ExampleSpider::new())
     .build();
 ```
@@ -830,7 +830,7 @@ Redis、MySQL 和 Master API Scheduler 通过替换 Scheduler 装配；Spider、
 
 ```rust
 use contrib::scheduler::redis::Redis;
-use harbor::{engine, net};
+use halo::harbor::{engine, net};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

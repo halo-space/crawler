@@ -6,7 +6,7 @@ use bytes::Bytes;
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use harbor::scheduler;
+use halo::harbor::scheduler;
 
 use super::error::Error;
 

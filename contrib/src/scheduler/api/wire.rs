@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use harbor::{net, trace};
+use halo::harbor::{net, trace};
 
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct Context {
@@ -14,7 +14,7 @@ pub(super) struct Context {
 }
 
 impl Context {
-    pub(super) fn from_payload(payload: &harbor::payload::Payload) -> Self {
+    pub(super) fn from_payload(payload: &halo::harbor::payload::Payload) -> Self {
         Self {
             id: payload.id.clone(),
             task_id: payload.task_id.clone(),
@@ -97,7 +97,7 @@ impl Lease {
         }
     }
 
-    pub(super) fn from_payload(payload: &harbor::payload::Payload) -> Self {
+    pub(super) fn from_payload(payload: &halo::harbor::payload::Payload) -> Self {
         Self {
             id: payload.id.clone(),
             task_id: payload.task_id.clone(),

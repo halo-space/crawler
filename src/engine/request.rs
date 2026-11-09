@@ -157,15 +157,15 @@ where
 
         match parsing {
             Ok(()) => return Ok(()),
-            Err(crate::Error::Spider(harbor::Error::RequestRejected(message))) => {
+            Err(crate::Error::Spider(harbor::SpiderError::RequestRejected(message))) => {
                 return Err(crate::Error::Scheduler(scheduler::Error::Message(message)));
             }
-            Err(crate::Error::Spider(harbor::Error::ItemRejected(message))) => {
+            Err(crate::Error::Spider(harbor::SpiderError::ItemRejected(message))) => {
                 return Err(crate::Error::Item(crate::item::Error::Message(message)));
             }
-            Err(crate::Error::Spider(harbor::Error::EngineStopped)) => {
+            Err(crate::Error::Spider(harbor::SpiderError::EngineStopped)) => {
                 return Err(crate::Error::message(
-                    harbor::Error::EngineStopped.to_string(),
+                    harbor::SpiderError::EngineStopped.to_string(),
                 ));
             }
             Err(error) if is_parse_error(&error) => {
@@ -196,7 +196,7 @@ fn is_parse_error(error: &crate::Error) -> bool {
         crate::Error::Selector(_)
             | crate::Error::Graph(_)
             | crate::Error::Item(_)
-            | crate::Error::Spider(harbor::Error::Message(_))
+            | crate::Error::Spider(harbor::SpiderError::Message(_))
             | crate::Error::Message(_)
     )
 }

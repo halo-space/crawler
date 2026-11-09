@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use contrib::scheduler::redis::Redis;
-use harbor::scheduler::Lease;
+use halo::harbor::scheduler::Lease;
 
 use super::{conformance, server::Handle};
 
@@ -62,7 +62,7 @@ fn isolated(url: &str, namespaces: &Arc<Mutex<Vec<String>>>, lease: Lease) -> Re
         .unwrap()
         .with_worker_version("test")
         .unwrap()
-        .with_modes([harbor::net::Mode::Http, harbor::net::Mode::Browser])
+        .with_modes([halo::harbor::net::Mode::Http, halo::harbor::net::Mode::Browser])
         .unwrap()
         .with_lease(lease)
         .unwrap()

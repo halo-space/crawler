@@ -85,8 +85,8 @@ fn is_error(ty: &Type) -> bool {
     };
     let segments = &path.path.segments;
 
-    segments.len() == 1 && segments[0].ident == "Error"
-        || segments.len() == 2 && segments[0].ident == "harbor" && segments[1].ident == "Error"
+    segments.last().is_some_and(|segment| segment.ident == "Error")
+        && (segments.len() == 1 || segments.iter().any(|segment| segment.ident == "harbor"))
 }
 
 fn type_ends_with(ty: &Type, expected: &str) -> bool {
@@ -111,25 +111,25 @@ mod tests {
     #[test]
     fn recognizes_only_async_shared_response_result_handlers() {
         assert!(is_handler(&method(
-            "async fn detail(&self, response: harbor::Response) -> Result<(), harbor::Error> { Ok(()) }"
+            "async fn detail(&self, response: halo::harbor::Response) -> Result<(), halo::harbor::Error> { Ok(()) }"
         )));
         assert!(!is_handler(&method(
-            "fn detail(&self, response: harbor::Response) -> Result<(), harbor::Error> { Ok(()) }"
+            "fn detail(&self, response: halo::harbor::Response) -> Result<(), halo::harbor::Error> { Ok(()) }"
         )));
         assert!(!is_handler(&method(
-            "async fn detail(&mut self, response: harbor::Response) -> Result<(), harbor::Error> { Ok(()) }"
+            "async fn detail(&mut self, response: halo::harbor::Response) -> Result<(), halo::harbor::Error> { Ok(()) }"
         )));
         assert!(!is_handler(&method(
-            "async fn detail(&self, url: String) -> Result<(), harbor::Error> { Ok(()) }"
+            "async fn detail(&self, url: String) -> Result<(), halo::harbor::Error> { Ok(()) }"
         )));
         assert!(!is_handler(&method(
-            "async fn detail(&self, response: harbor::Response) { let _ = response; }"
+            "async fn detail(&self, response: halo::harbor::Response) { let _ = response; }"
         )));
         assert!(!is_handler(&method(
-            "async fn detail(&self, response: harbor::Response) -> Result<String, harbor::Error> { Ok(response.url) }"
+            "async fn detail(&self, response: halo::harbor::Response) -> Result<String, halo::harbor::Error> { Ok(response.url) }"
         )));
         assert!(!is_handler(&method(
-            "async fn detail(&self, response: harbor::Response) -> Result<(), std::io::Error> { let _ = response; Ok(()) }"
+            "async fn detail(&self, response: halo::harbor::Response) -> Result<(), std::io::Error> { let _ = response; Ok(()) }"
         )));
     }
 }

@@ -74,28 +74,28 @@ fn try_expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let (impl_generics, _, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
-        impl #impl_generics ::harbor::item::Item for #ident #type_generics #where_clause {
+        impl #impl_generics ::halo::harbor::item::Item for #ident #type_generics #where_clause {
             fn from_values(
-                values: ::harbor::item::Values,
-            ) -> ::std::result::Result<Self, ::harbor::item::Error> {
-                ::harbor::item::deserialize(values)
+                values: ::halo::harbor::item::Values,
+            ) -> ::std::result::Result<Self, ::halo::harbor::item::Error> {
+                ::halo::harbor::item::deserialize(values)
             }
 
-            fn state(&self) -> &::harbor::item::State {
+            fn state(&self) -> &::halo::harbor::item::State {
                 &self.state
             }
 
-            fn state_mut(&mut self) -> &mut ::harbor::item::State {
+            fn state_mut(&mut self) -> &mut ::halo::harbor::item::State {
                 &mut self.state
             }
 
             fn values(
                 &self,
-            ) -> ::std::result::Result<::harbor::item::Values, ::harbor::item::Error> {
+            ) -> ::std::result::Result<::halo::harbor::item::Values, ::halo::harbor::item::Error> {
                 let value = ::serde_json::to_value(self)
-                    .map_err(::harbor::item::Error::Serialize)?;
+                    .map_err(::halo::harbor::item::Error::Serialize)?;
                 let ::serde_json::Value::Object(values) = value else {
-                    return Err(::harbor::item::Error::Message(
+                    return Err(::halo::harbor::item::Error::Message(
                         "Item serialization must produce an object".to_string(),
                     ));
                 };
@@ -104,10 +104,10 @@ fn try_expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
             fn replace_values(
                 &mut self,
-                values: ::harbor::item::Values,
-            ) -> ::std::result::Result<(), ::harbor::item::Error> {
+                values: ::halo::harbor::item::Values,
+            ) -> ::std::result::Result<(), ::halo::harbor::item::Error> {
                 let state = self.state.clone();
-                let mut replacement: Self = ::harbor::item::deserialize(values)?;
+                let mut replacement: Self = ::halo::harbor::item::deserialize(values)?;
                 replacement.state = state;
                 *self = replacement;
                 Ok(())
@@ -163,7 +163,7 @@ mod tests {
             struct Article<T> {
                 title: T,
                 #[serde(skip)]
-                state: harbor::item::State,
+                state: halo::harbor::item::State,
             }
             "#,
         );
@@ -180,7 +180,7 @@ mod tests {
             r#"
             struct Article {
                 #[serde(skip)]
-                state: harbor::item::State,
+                state: halo::harbor::item::State,
             }
             "#,
         );
@@ -197,7 +197,7 @@ mod tests {
             r#"
             #[serde(deny_unknown_fields)]
             struct Article {
-                state: harbor::item::State,
+                state: halo::harbor::item::State,
             }
             "#,
         );
@@ -233,7 +233,7 @@ mod tests {
                 #[serde(flatten)]
                 extra: std::collections::HashMap<String, serde_json::Value>,
                 #[serde(skip)]
-                state: harbor::item::State,
+                state: halo::harbor::item::State,
             }
             "#,
         );

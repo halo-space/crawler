@@ -2,7 +2,7 @@ mod claim;
 mod init;
 mod trace;
 
-use harbor::{net, payload, scheduler};
+use halo::harbor::{net, payload, scheduler};
 
 use super::{Api, wire};
 

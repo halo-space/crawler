@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use fastrace::collector::SpanRecord;
-use harbor::{downloader, engine, item, middleware, net, payload};
+use halo::harbor::{downloader, engine, item, middleware, net, payload};
 
 const SECRET: &str = "runtime-secret-marker";
 
@@ -107,7 +107,7 @@ impl TraceSpider {
         ]
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         let retry = middleware::Spec::new("retry")
             .hook("error_item")
             .args(serde_json::json!({"count": 1, "backoff": [0]}));
@@ -132,7 +132,7 @@ async fn traces_complete_request_lifecycles_without_leaking_content() {
         .with_spider(TraceSpider::new())
         .build()
         .with_concurrency(2)
-        .with_tracing(harbor::trace::Tracing::all());
+        .with_tracing(halo::harbor::trace::Tracing::all());
     tokio::spawn(async move { runtime.start_until_idle().await })
         .await
         .unwrap()

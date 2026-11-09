@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
-use harbor::scheduler::{Init, Scheduler};
-use harbor::{downloader, engine, net, payload};
+use halo::harbor::scheduler::{Init, Scheduler};
+use halo::harbor::{downloader, engine, net, payload};
 
 struct Download;
 
@@ -34,25 +34,25 @@ impl RecoverySpider {
         "code-recovery"
     }
 
-    async fn start(&self) -> Result<(), harbor::Error> {
+    async fn start(&self) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         Ok(())
     }
 
-    async fn detail(&self, _response: net::Response) -> Result<(), harbor::Error> {
+    async fn detail(&self, _response: net::Response) -> Result<(), halo::harbor::Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
-async fn traced_request(scheduler: &harbor::Memory, node: &str) -> net::Request {
+async fn traced_request(scheduler: &halo::harbor::Memory, node: &str) -> net::Request {
     scheduler
         .init(
             "trace-existing".to_string(),
-            harbor::trace::Snapshot::code("task-existing"),
+            halo::harbor::trace::Snapshot::code("task-existing"),
             Vec::new(),
         )
         .await
@@ -70,7 +70,7 @@ async fn traced_request(scheduler: &harbor::Memory, node: &str) -> net::Request 
 
 #[tokio::test]
 async fn released_code_request_resolves_its_stable_node_again() {
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
     traced_request(&scheduler, "detail").await;
     let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     let mut release = payload::Payload::for_request(&claimed, claimed.leased_by.clone());
@@ -91,7 +91,7 @@ async fn released_code_request_resolves_its_stable_node_again() {
 
 #[tokio::test]
 async fn missing_code_node_uses_request_failure_settlement() {
-    let scheduler = harbor::Memory::new();
+    let scheduler = halo::harbor::Memory::new();
     traced_request(&scheduler, "missing").await;
     let mut runtime = engine::Builder::new()
         .with_scheduler(scheduler)

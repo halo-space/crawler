@@ -38,7 +38,7 @@ HARBOR_MASTER_URL=https://master.example.com/ \
 HARBOR_TOKEN=... \
 HARBOR_WORKER_ID=worker-01 \
 HARBOR_WORKER_LIMIT=5 \
-cargo run -p harbor-worker
+cargo run -p halo-harbor-worker
 ```
 
 Worker 通过 Master API 领取 Request，并从每个 Trace Snapshot 恢复 Rules 图；它不会直接访问
@@ -65,7 +65,7 @@ engine.start().await?;
 | `spider` | 核心运行时、Engine、Scheduler 合同、HTTP 下载、Rules、Selector 与 Item Store |
 | `macros` | Spider、处理函数与 Item 派生宏 |
 | `contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式中间件实现 |
-| `harbor-worker` | 独立 Worker 服务，连接 Master API，运行共享 Engine，并通过 Worker 自己的 Store 写入 Item |
+| `halo-harbor-worker` | 独立 Worker 服务，连接 Master API，运行共享 Engine，并通过 Worker 自己的 Store 写入 Item |
 | `examples` | 可直接运行的代码模式与 Rules 模式示例 |
 
 ## 文档

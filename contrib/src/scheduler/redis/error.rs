@@ -1,4 +1,4 @@
-use harbor::scheduler;
+use halo::harbor::scheduler;
 
 pub(super) fn redis(error: redis::RedisError) -> scheduler::Error {
     use redis::{ErrorKind, ServerErrorKind};

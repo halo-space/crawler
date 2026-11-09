@@ -1,5 +1,5 @@
 use contrib::scheduler::redis::Redis;
-use harbor::{Scheduler, net, payload};
+use halo::harbor::{Scheduler, net, payload};
 
 use super::{key, request, server, settlement, worker};
 
