@@ -64,7 +64,7 @@ engine.start().await?;
 | --- | --- |
 | `halo-harbor` | 核心运行时、Engine、Scheduler 合同、HTTP 下载、Rules、Selector 与 Item Store |
 | `halo-harbor-macros` | Spider、处理函数与 Item 派生宏 |
-| `contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式中间件实现 |
+| `halo-harbor-contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式中间件实现 |
 | `halo-harbor-worker` | 独立 Worker 服务，装配选中的 Scheduler，运行共享 Engine，并通过 Worker 自己的 Store 写入 Item |
 | `examples` | 可直接运行的代码模式与 Rules 模式示例 |
 

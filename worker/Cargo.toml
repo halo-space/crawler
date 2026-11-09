@@ -10,7 +10,7 @@ name = "halo-harbor-worker"
 path = "src/main.rs"
 
 [dependencies]
-contrib = { path = "../contrib", version = "0.1.0" }
+halo_harbor_contrib = { package = "halo-harbor-contrib", path = "../contrib", version = "0.1.0" }
 serde = { workspace = true }
 halo = { package = "halo-harbor", path = "..", version = "0.1.0" }
 thiserror = { workspace = true }

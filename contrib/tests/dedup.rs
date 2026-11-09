@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use base64::Engine as _;
-use contrib::middleware::dedup::{Options, Redis as Dedup};
 use halo::harbor::middleware::{Middleware as _, Next, Spec};
 use halo::harbor::net::Request;
+use halo_harbor_contrib::middleware::dedup::{Options, Redis as Dedup};
 
 const DEFAULT_URL: &str = "redis://127.0.0.1:6379";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);

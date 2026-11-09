@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use contrib::scheduler::{api::Api, mysql::MySql, redis::Redis};
 use halo::harbor::downloader::{self, Downloader};
 use halo::harbor::item::{Jsonl, Map};
 use halo::harbor::net::{self, Mode};
 use halo::harbor::scheduler::{Init, Scheduler};
-use halo::harbor::{Error as SpiderError, Memory, Spider, SpiderFactory, Tx, engine};
+use halo::harbor::{Error as HarborError, Memory, Spider, SpiderFactory, Tx, engine};
+use halo_harbor_contrib::scheduler::{api::Api, mysql::MySql, redis::Redis};
 
 /// Selects the Scheduler used by the Worker process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,7 +35,7 @@ pub struct Config {
     pub worker_version: String,
     pub modes: Vec<Mode>,
     pub concurrency: usize,
-    pub limit: usize,
+    pub claim_limit: usize,
     pub heartbeat_interval: Duration,
     pub heartbeat_timeout: Duration,
     pub store_dir: PathBuf,
@@ -57,7 +57,7 @@ impl Config {
             .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
         let modes = parse_modes(optional("HARBOR_WORKER_MODES").as_deref().unwrap_or("http"))?;
         let concurrency = parse_positive("HARBOR_WORKER_CONCURRENCY", 5)?;
-        let limit = parse_positive("HARBOR_WORKER_LIMIT", 5)?;
+        let claim_limit = parse_positive("HARBOR_WORKER_LIMIT", 5)?;
         let heartbeat_interval = parse_duration("HARBOR_HEARTBEAT_INTERVAL_MS", 10_000)?;
         let heartbeat_timeout = parse_duration("HARBOR_HEARTBEAT_TIMEOUT_MS", 30_000)?;
         if heartbeat_timeout <= heartbeat_interval {
@@ -77,7 +77,7 @@ impl Config {
             worker_version,
             modes,
             concurrency,
-            limit,
+            claim_limit,
             heartbeat_interval,
             heartbeat_timeout,
             store_dir,
@@ -195,7 +195,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
                 .map_err(config_error)?
                 .with_modes(config.modes.clone())
                 .map_err(config_error)?
-                .with_limit(config.limit)
+                .with_claim_limit(config.claim_limit)
                 .map_err(config_error)?;
             config.with_scheduler(scheduler).run().await
         }
@@ -235,7 +235,7 @@ where
             .with_store(store)
             .build()
             .with_concurrency(self.config.concurrency)
-            .with_claim_limit(self.config.limit);
+            .with_claim_limit(self.config.claim_limit);
 
         runtime.start().await.map_err(Error::Runtime)
     }
@@ -279,7 +279,7 @@ impl Spider for RulesWorker {
         &self.tx
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), SpiderError> {
+    async fn index(&self, _response: net::Response) -> Result<(), HarborError> {
         Ok(())
     }
 }
@@ -299,7 +299,7 @@ pub enum Error {
     #[error("worker configuration error: {0}")]
     Config(String),
     #[error("worker runtime failed: {0}")]
-    Runtime(SpiderError),
+    Runtime(HarborError),
 }
 
 fn required(name: &str) -> Result<String, Error> {

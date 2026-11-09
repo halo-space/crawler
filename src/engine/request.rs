@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use crate::engine::contract::Execute;
+use crate::error::spider::Error as SpiderError;
 use crate::harbor::tx;
-use crate::{downloader, harbor, middleware, net, scheduler, stats};
+use crate::{downloader, middleware, net, scheduler, stats};
 
 pub(super) mod task;
 
@@ -157,15 +158,15 @@ where
 
         match parsing {
             Ok(()) => return Ok(()),
-            Err(crate::Error::Spider(harbor::SpiderError::RequestRejected(message))) => {
+            Err(crate::Error::Spider(SpiderError::RequestRejected(message))) => {
                 return Err(crate::Error::Scheduler(scheduler::Error::Message(message)));
             }
-            Err(crate::Error::Spider(harbor::SpiderError::ItemRejected(message))) => {
+            Err(crate::Error::Spider(SpiderError::ItemRejected(message))) => {
                 return Err(crate::Error::Item(crate::item::Error::Message(message)));
             }
-            Err(crate::Error::Spider(harbor::SpiderError::EngineStopped)) => {
+            Err(crate::Error::Spider(SpiderError::EngineStopped)) => {
                 return Err(crate::Error::message(
-                    harbor::SpiderError::EngineStopped.to_string(),
+                    SpiderError::EngineStopped.to_string(),
                 ));
             }
             Err(error) if is_parse_error(&error) => {
@@ -196,7 +197,7 @@ fn is_parse_error(error: &crate::Error) -> bool {
         crate::Error::Selector(_)
             | crate::Error::Graph(_)
             | crate::Error::Item(_)
-            | crate::Error::Spider(harbor::SpiderError::Message(_))
+            | crate::Error::Spider(SpiderError::Message(_))
             | crate::Error::Message(_)
     )
 }

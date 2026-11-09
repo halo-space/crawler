@@ -13,7 +13,7 @@ pub(super) struct Config {
     host: Option<String>,
     version: Option<String>,
     modes: Vec<net::Mode>,
-    limit: Option<usize>,
+    claim_limit: Option<usize>,
 }
 
 impl Default for Config {
@@ -23,7 +23,7 @@ impl Default for Config {
             host: None,
             version: None,
             modes: vec![net::Mode::Http],
-            limit: None,
+            claim_limit: None,
         }
     }
 }
@@ -45,13 +45,13 @@ impl Config {
         self.modes = canonical_modes(modes);
     }
 
-    pub(super) fn set_limit(&mut self, limit: usize) -> Result<(), scheduler::Error> {
-        if limit == 0 {
+    pub(super) fn set_claim_limit(&mut self, claim_limit: usize) -> Result<(), scheduler::Error> {
+        if claim_limit == 0 {
             return Err(scheduler::Error::Message(
                 "worker claim limit must be positive".to_string(),
             ));
         }
-        self.limit = Some(limit);
+        self.claim_limit = Some(claim_limit);
         Ok(())
     }
 
@@ -87,12 +87,12 @@ impl Config {
             host: required("worker_host", self.host.as_deref())?.to_string(),
             version: required("worker_version", self.version.as_deref())?.to_string(),
             modes: self.modes.clone(),
-            limit: self.limit.unwrap_or(concurrency),
+            limit: self.claim_limit.unwrap_or(concurrency),
         })
     }
 
-    pub(super) fn limit(&self, concurrency: usize) -> usize {
-        self.limit.unwrap_or(concurrency)
+    pub(super) fn claim_limit(&self, concurrency: usize) -> usize {
+        self.claim_limit.unwrap_or(concurrency)
     }
 }
 

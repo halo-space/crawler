@@ -1,6 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
-use crate::{Error, error::harbor::Error as SpiderError, item, net};
+use crate::{Error, error::spider::Error as SpiderError, item, net};
 
 #[path = "tx/activity.rs"]
 mod activity;

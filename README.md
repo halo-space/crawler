@@ -70,7 +70,7 @@ replaceable.
 | --- | --- |
 | `halo-harbor` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
 | `halo-harbor-macros` | Spider, handler, and Item derive macros |
-| `contrib` | Redis/MySQL Schedulers, the Worker-side API Scheduler adapter, and distributed middleware implementations |
+| `halo-harbor-contrib` | Redis/MySQL Schedulers, the Worker-side API Scheduler adapter, and distributed middleware implementations |
 | `halo-harbor-worker` | Standalone Worker service that assembles a selected Scheduler, runs the shared Engine, and writes Items through a Worker-owned Store |
 | `examples` | Executable code-mode and Rules-mode examples |
 

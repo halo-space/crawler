@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use contrib::scheduler::redis::Redis;
 use halo::harbor::scheduler::Lease;
+use halo_harbor_contrib::scheduler::redis::Redis;
 
 use super::{conformance, server::Handle};
 

@@ -115,10 +115,10 @@ impl Api {
         Ok(self)
     }
 
-    pub fn with_limit(mut self, limit: usize) -> Result<Self, Error> {
+    pub fn with_claim_limit(mut self, claim_limit: usize) -> Result<Self, Error> {
         self.require_configurable()?;
         self.worker
-            .set_limit(limit)
+            .set_claim_limit(claim_limit)
             .map_err(|error| Error::Config(error.to_string()))?;
         Ok(self)
     }
@@ -243,7 +243,8 @@ impl scheduler::Scheduler for Api {
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
         self.runtime.set_token(token.clone());
-        self.runtime.set_claim_limit(self.worker.limit(concurrency));
+        self.runtime
+            .set_claim_limit(self.worker.claim_limit(concurrency));
         self.runtime.can_claim.store(true, Ordering::Release);
         self.runtime.opened.store(true, Ordering::Release);
         self.runtime.set_heartbeat(worker::start_heartbeat(

@@ -417,28 +417,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "contrib"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "fastrace",
- "futures-util",
- "halo-harbor",
- "redis",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "thiserror",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1203,6 +1181,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "halo-harbor-contrib"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "fastrace",
+ "futures-util",
+ "halo-harbor",
+ "redis",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "halo-harbor-macros"
 version = "0.1.0"
 dependencies = [
@@ -1217,8 +1217,8 @@ dependencies = [
 name = "halo-harbor-worker"
 version = "0.1.0"
 dependencies = [
- "contrib",
  "halo-harbor",
+ "halo-harbor-contrib",
  "rustls",
  "serde",
  "thiserror",

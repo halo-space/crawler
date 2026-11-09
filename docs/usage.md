@@ -4,7 +4,7 @@
 
 `Harbor` is a Rust crawler runtime. Its default single-process topology uses the in-memory
 Scheduler, HTTP downloader, middleware hooks, async Spider handlers, CSS healing, explicit AI
-selectors, and local JSONL item output. `contrib` provides Redis/MySQL Schedulers and distributed
+selectors, and local JSONL item output. `halo-harbor-contrib` provides Redis/MySQL Schedulers and distributed
 middleware while preserving the same Engine contract. The runtime includes Task/Trace run seeds,
 capability-aware Scheduler claims, and deterministic response charset decoding.
 
@@ -56,11 +56,11 @@ use the normal admission path before `Scheduler::push`.
 
 ## Redis Scheduler
 
-`contrib::scheduler::redis::Redis` is a complete implementation of the core `Scheduler` and `Init`
+`halo_harbor_contrib::scheduler::redis::Redis` is a complete implementation of the core `Scheduler` and `Init`
 contracts. It is assembled exactly like Memory; Engine has no Redis-specific path:
 
 ```rust
-use contrib::scheduler::redis::Redis;
+use halo_harbor_contrib::scheduler::redis::Redis;
 use halo::harbor::{engine, net};
 
 let scheduler = Redis::new("redis://127.0.0.1:6379")?
@@ -133,12 +133,12 @@ example, `always` versus `everysec`).
 
 ## MySQL Scheduler
 
-`contrib::scheduler::mysql::MySql` targets MySQL 9 and completely implements the same `Scheduler`
+`halo_harbor_contrib::scheduler::mysql::MySql` targets MySQL 9 and completely implements the same `Scheduler`
 and `Init` contracts as Memory and Redis. Isolation comes directly from the database selected by the
 DSN; there is no additional namespace:
 
 ```rust
-use contrib::scheduler::mysql::MySql;
+use halo_harbor_contrib::scheduler::mysql::MySql;
 use halo::harbor::{engine, net};
 
 let scheduler = MySql::new("mysql://crawler:secret@127.0.0.1:3306/crawler")?
@@ -182,7 +182,7 @@ The API Scheduler owns the same Worker configuration and lifecycle while using i
 transport, namespace, and authentication:
 
 ```rust
-use contrib::scheduler::api::Api;
+use halo_harbor_contrib::scheduler::api::Api;
 use halo::harbor::net;
 
 let scheduler = Api::new("https://master.example.com", api_key)?
@@ -462,7 +462,7 @@ The default `middleware::dedup::Memory` implementation records one exact members
 Omitted TTL or `-1` lasts for the process lifetime, `0` bypasses lookup and storage, and a positive
 integer expires after that many milliseconds. Runtime Tx Request output is observed before
 `Scheduler::push`; Rules run seeds bypass admission and therefore never consume Dedup membership.
-`contrib::middleware::dedup::Redis` uses RedisBloom with explicit `capacity / error_rate` options,
+`halo_harbor_contrib::middleware::dedup::Redis` uses RedisBloom with explicit `capacity / error_rate` options,
 accepts Bloom false positives, has no configurable namespace, and rejects positive finite TTL rather
 than emulating member expiry with Sets or rotating buckets. The first Worker that creates a
 `task_id + node` filter fixes its actual options; every Worker sharing that bucket must use equivalent
@@ -511,7 +511,7 @@ must use the Request cookie API.
 Each `rate_limit` group fixes its interval while active. Reusing the group with a conflicting QPS is
 invalid configuration; an inactive group is removed lazily only after its next permitted instant has
 passed. The default `middleware::rate_limit::Memory` is Worker-local.
-`contrib::middleware::rate_limit::Redis` uses Redis server time to reserve one shared schedule per
+`halo_harbor_contrib::middleware::rate_limit::Redis` uses Redis server time to reserve one shared schedule per
 group across Workers; it derives the key only from the explicit group or, when omitted, the Request
 URL host, never from `task_id` or Worker identity.
 
@@ -541,13 +541,13 @@ fastrace = { version = "0.7.18", default-features = false, features = ["enable"]
 spider = { path = "..", features = ["runtime-tracing"] }
 ```
 
-When using the API Scheduler, enable `contrib/runtime-tracing` instead. It also enables
+When using the API Scheduler, enable `halo_harbor_contrib/runtime-tracing` instead. It also enables
 `spider/runtime-tracing` and allows the API Scheduler to propagate tracing context to a trusted
 Master:
 
 ```toml
 [dependencies]
-contrib = { path = "../contrib", features = ["runtime-tracing"] }
+halo_harbor_contrib = { package = "halo-harbor-contrib", path = "../contrib", features = ["runtime-tracing"] }
 fastrace = { version = "0.7.18", default-features = false, features = ["enable"] }
 ```
 
@@ -691,7 +691,7 @@ Request/Item Events privately carry the current span context in process so async
 in the Request trace that produced it. This context is not a public or persisted contract.
 
 In distributed operation, W3C `traceparent` is injected only when a Worker uses
-`contrib::scheduler::api::Api` to call its trusted Master. The framework does not send that header to
+`halo_harbor_contrib::scheduler::api::Api` to call its trusted Master. The framework does not send that header to
 crawl targets, redirect targets, AI providers, or Redis. An API Scheduler call outside an active
 Request context does not synthesize a `traceparent`. Transport retries for one API operation keep the
 same header. Whether Master accepts and exports the context belongs to the separate Master project.
@@ -707,7 +707,7 @@ fastrace spans only; application logs need their own redaction policy.
 
 Check these conditions in order:
 
-1. The executable was compiled with `spider/runtime-tracing` or `contrib/runtime-tracing`.
+1. The executable was compiled with `halo/runtime-tracing` or `halo_harbor_contrib/runtime-tracing`.
 2. `fastrace::set_reporter(...)` ran before Engine startup. Spans created before Reporter setup are ignored.
 3. The Runtime uses `with_tracing(Tracing::all())` or a nonzero `Tracing::sample(...)` ratio.
 4. Scheduler actually claimed and executed a Request; an empty queue and idle polling produce no `crawler.request`.
@@ -731,7 +731,7 @@ Each Scheduler owns its Worker identity and supported download modes; Engine sup
 concurrency to `open(concurrency)` and a batch size to `next_requests(limit)`. Capability filtering
 must remain atomic with claim. Redis and MySQL are the available
 persistent Scheduler implementations and are covered by the shared Scheduler conformance suite.
-The Worker-side `contrib::scheduler::api::Api` adapter is also implemented. Its corresponding Master
+The Worker-side `halo_harbor_contrib::scheduler::api::Api` adapter is also implemented. Its corresponding Master
 service is not part of this workspace. This repository maintains only the Worker-side adapter and its
 client-side HTTP contract; a separate project owns the Master service, server-side protocol, database,
 Cron, Control API, frontend, and their design.
@@ -769,7 +769,7 @@ spider:
 
 All non-empty `selector`, `url`, and `cookie` checks must pass. `value` accepts a literal or `env:NAME`.
 Cookies are reused in Worker memory by `login_key + origin`; inject
-`contrib::browser::RedisCookieStore` explicitly when Workers must share them. `ttl` and `refresh_after` are milliseconds.
+`halo_harbor_contrib::browser::RedisCookieStore` explicitly when Workers must share them. `ttl` and `refresh_after` are milliseconds.
 Login failures use the existing `error_download.retry`. Browser is headless by default; manual QR or challenge
 flows require a visible remote WebDriver or `Browser::with_headless(false)`.
 Memory uses the internal identity `local`, defaults to HTTP mode, and can replace its capability set
