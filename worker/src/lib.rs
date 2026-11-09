@@ -144,7 +144,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
     match config.scheduler.clone() {
         SchedulerConfig::Memory => {
             let scheduler = Memory::new().with_modes(config.modes.clone());
-            run_with_scheduler(config, scheduler).await
+            config.with_scheduler(scheduler).run().await
         }
         SchedulerConfig::Redis { url, namespace } => {
             let scheduler = Redis::new(url)
@@ -161,7 +161,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
                 .map_err(config_error)?
                 .with_heartbeat(config.heartbeat_interval, config.heartbeat_timeout)
                 .map_err(config_error)?;
-            run_with_scheduler(config, scheduler).await
+            config.with_scheduler(scheduler).run().await
         }
         SchedulerConfig::MySql { dsn } => {
             let scheduler = MySql::new(dsn)
@@ -176,7 +176,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
                 .map_err(config_error)?
                 .with_heartbeat(config.heartbeat_interval, config.heartbeat_timeout)
                 .map_err(config_error)?;
-            run_with_scheduler(config, scheduler).await
+            config.with_scheduler(scheduler).run().await
         }
         SchedulerConfig::MasterApi {
             url,
@@ -197,31 +197,48 @@ pub async fn run(config: Config) -> Result<(), Error> {
                 .map_err(config_error)?
                 .with_limit(config.limit)
                 .map_err(config_error)?;
-            run_with_scheduler(config, scheduler).await
+            config.with_scheduler(scheduler).run().await
         }
     }
 }
 
-/// Runs the common Worker lifecycle with any Scheduler implementation.
-///
-/// Built-in environment selection is provided by [`run`]. Custom Scheduler implementations call
-/// this function directly and do not need to modify the Worker crate.
-pub async fn run_with_scheduler<S>(config: Config, scheduler: S) -> Result<(), Error>
+/// A Worker lifecycle bound to one Scheduler implementation.
+pub struct Worker<S> {
+    config: Config,
+    scheduler: S,
+}
+
+impl Config {
+    /// Binds a Scheduler implementation to this Worker configuration.
+    ///
+    /// Custom Scheduler implementations use this entry point and do not need to modify the
+    /// Worker crate.
+    pub fn with_scheduler<S>(self, scheduler: S) -> Worker<S> {
+        Worker {
+            config: self,
+            scheduler,
+        }
+    }
+}
+
+impl<S> Worker<S>
 where
     S: Scheduler + Init + 'static,
 {
-    let downloader = build_downloader(&config);
-    let store = Jsonl::with_dir(config.store_dir);
-    let mut runtime = engine::Engine::new()
-        .with_scheduler(scheduler)
-        .with_downloader(downloader)
-        .with_spider(RulesWorkerFactory)
-        .with_store(store)
-        .build()
-        .with_concurrency(config.concurrency)
-        .with_claim_limit(config.limit);
+    pub async fn run(self) -> Result<(), Error> {
+        let downloader = build_downloader(&self.config);
+        let store = Jsonl::with_dir(self.config.store_dir);
+        let mut runtime = engine::Engine::new()
+            .with_scheduler(self.scheduler)
+            .with_downloader(downloader)
+            .with_spider(RulesWorkerFactory)
+            .with_store(store)
+            .build()
+            .with_concurrency(self.config.concurrency)
+            .with_claim_limit(self.config.limit);
 
-    runtime.start().await.map_err(Error::Runtime)
+        runtime.start().await.map_err(Error::Runtime)
+    }
 }
 
 fn config_error(error: impl std::fmt::Display) -> Error {
