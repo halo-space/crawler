@@ -6,9 +6,7 @@ use halo::harbor::downloader::{self, Downloader};
 use halo::harbor::item::{Jsonl, Map};
 use halo::harbor::net::{self, Mode};
 use halo::harbor::scheduler::{Init, Scheduler};
-use halo::harbor::{
-    Error as SpiderError, Memory, Spider, SpiderFactory, Tx, engine, payload, trace,
-};
+use halo::harbor::{Error as SpiderError, Memory, Spider, SpiderFactory, Tx, engine};
 
 /// Selects the Scheduler used by the Worker process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,11 +141,72 @@ impl BrowserConfig {
 
 /// Starts a Worker with the Scheduler selected by [`Config::scheduler`].
 pub async fn run(config: Config) -> Result<(), Error> {
-    let scheduler = SchedulerBackend::from_config(&config)?;
-    run_with_scheduler(config, scheduler).await
+    match config.scheduler.clone() {
+        SchedulerConfig::Memory => {
+            let scheduler = Memory::new().with_modes(config.modes.clone());
+            run_with_scheduler(config, scheduler).await
+        }
+        SchedulerConfig::Redis { url, namespace } => {
+            let scheduler = Redis::new(url)
+                .map_err(config_error)?
+                .with_namespace(namespace)
+                .map_err(config_error)?
+                .with_worker_id(&config.worker_id)
+                .map_err(config_error)?
+                .with_worker_host(&config.worker_host)
+                .map_err(config_error)?
+                .with_worker_version(&config.worker_version)
+                .map_err(config_error)?
+                .with_modes(config.modes.clone())
+                .map_err(config_error)?
+                .with_heartbeat(config.heartbeat_interval, config.heartbeat_timeout)
+                .map_err(config_error)?;
+            run_with_scheduler(config, scheduler).await
+        }
+        SchedulerConfig::MySql { dsn } => {
+            let scheduler = MySql::new(dsn)
+                .map_err(config_error)?
+                .with_worker_id(&config.worker_id)
+                .map_err(config_error)?
+                .with_worker_host(&config.worker_host)
+                .map_err(config_error)?
+                .with_worker_version(&config.worker_version)
+                .map_err(config_error)?
+                .with_modes(config.modes.clone())
+                .map_err(config_error)?
+                .with_heartbeat(config.heartbeat_interval, config.heartbeat_timeout)
+                .map_err(config_error)?;
+            run_with_scheduler(config, scheduler).await
+        }
+        SchedulerConfig::MasterApi {
+            url,
+            token,
+            namespace,
+        } => {
+            let scheduler = Api::new(url, token)
+                .map_err(config_error)?
+                .with_namespace(namespace)
+                .map_err(config_error)?
+                .with_worker_id(&config.worker_id)
+                .map_err(config_error)?
+                .with_worker_host(&config.worker_host)
+                .map_err(config_error)?
+                .with_worker_version(&config.worker_version)
+                .map_err(config_error)?
+                .with_modes(config.modes.clone())
+                .map_err(config_error)?
+                .with_limit(config.limit)
+                .map_err(config_error)?;
+            run_with_scheduler(config, scheduler).await
+        }
+    }
 }
 
-async fn run_with_scheduler<S>(config: Config, scheduler: S) -> Result<(), Error>
+/// Runs the common Worker lifecycle with any Scheduler implementation.
+///
+/// Built-in environment selection is provided by [`run`]. Custom Scheduler implementations call
+/// this function directly and do not need to modify the Worker crate.
+pub async fn run_with_scheduler<S>(config: Config, scheduler: S) -> Result<(), Error>
 where
     S: Scheduler + Init + 'static,
 {
@@ -165,241 +224,8 @@ where
     runtime.start().await.map_err(Error::Runtime)
 }
 
-/// The built-in Scheduler implementations available to the Worker service.
-pub enum SchedulerBackend {
-    Memory(Memory),
-    Redis(Redis),
-    MySql(MySql),
-    MasterApi(Api),
-}
-
-impl SchedulerBackend {
-    fn from_config(config: &Config) -> Result<Self, Error> {
-        match &config.scheduler {
-            SchedulerConfig::Memory => {
-                Ok(Self::Memory(Memory::new().with_modes(config.modes.clone())))
-            }
-            SchedulerConfig::Redis { url, namespace } => {
-                let scheduler = Redis::new(url)
-                    .map_err(config_error)?
-                    .with_namespace(namespace)
-                    .map_err(config_error)?
-                    .with_worker_id(&config.worker_id)
-                    .map_err(config_error)?
-                    .with_worker_host(&config.worker_host)
-                    .map_err(config_error)?
-                    .with_worker_version(&config.worker_version)
-                    .map_err(config_error)?
-                    .with_modes(config.modes.clone())
-                    .map_err(config_error)?
-                    .with_heartbeat(config.heartbeat_interval, config.heartbeat_timeout)
-                    .map_err(config_error)?;
-                Ok(Self::Redis(scheduler))
-            }
-            SchedulerConfig::MySql { dsn } => {
-                let scheduler = MySql::new(dsn)
-                    .map_err(config_error)?
-                    .with_worker_id(&config.worker_id)
-                    .map_err(config_error)?
-                    .with_worker_host(&config.worker_host)
-                    .map_err(config_error)?
-                    .with_worker_version(&config.worker_version)
-                    .map_err(config_error)?
-                    .with_modes(config.modes.clone())
-                    .map_err(config_error)?
-                    .with_heartbeat(config.heartbeat_interval, config.heartbeat_timeout)
-                    .map_err(config_error)?;
-                Ok(Self::MySql(scheduler))
-            }
-            SchedulerConfig::MasterApi {
-                url,
-                token,
-                namespace,
-            } => {
-                let scheduler = Api::new(url, token.clone())
-                    .map_err(config_error)?
-                    .with_namespace(namespace)
-                    .map_err(config_error)?
-                    .with_worker_id(&config.worker_id)
-                    .map_err(config_error)?
-                    .with_worker_host(&config.worker_host)
-                    .map_err(config_error)?
-                    .with_worker_version(&config.worker_version)
-                    .map_err(config_error)?
-                    .with_modes(config.modes.clone())
-                    .map_err(config_error)?
-                    .with_limit(config.limit)
-                    .map_err(config_error)?;
-                Ok(Self::MasterApi(scheduler))
-            }
-        }
-    }
-}
-
 fn config_error(error: impl std::fmt::Display) -> Error {
     Error::Config(error.to_string())
-}
-
-impl Scheduler for SchedulerBackend {
-    fn lease(&self) -> Option<halo::harbor::scheduler::Lease> {
-        match self {
-            Self::Memory(value) => value.lease(),
-            Self::Redis(value) => value.lease(),
-            Self::MySql(value) => value.lease(),
-            Self::MasterApi(value) => value.lease(),
-        }
-    }
-
-    fn claim_limit(&self, configured: usize) -> usize {
-        match self {
-            Self::Memory(value) => value.claim_limit(configured),
-            Self::Redis(value) => value.claim_limit(configured),
-            Self::MySql(value) => value.claim_limit(configured),
-            Self::MasterApi(value) => value.claim_limit(configured),
-        }
-    }
-
-    async fn open(&self, concurrency: usize) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(value) => value.open(concurrency).await,
-            Self::Redis(value) => value.open(concurrency).await,
-            Self::MySql(value) => value.open(concurrency).await,
-            Self::MasterApi(value) => value.open(concurrency).await,
-        }
-    }
-
-    async fn close(&self) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(value) => value.close().await,
-            Self::Redis(value) => value.close().await,
-            Self::MySql(value) => value.close().await,
-            Self::MasterApi(value) => value.close().await,
-        }
-    }
-
-    async fn push(&self, value: payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(scheduler) => scheduler.push(value).await,
-            Self::Redis(scheduler) => scheduler.push(value).await,
-            Self::MySql(scheduler) => scheduler.push(value).await,
-            Self::MasterApi(scheduler) => scheduler.push(value).await,
-        }
-    }
-
-    async fn trace(
-        &self,
-        trace_id: &str,
-    ) -> Result<Option<trace::Snapshot>, halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(value) => value.trace(trace_id).await,
-            Self::Redis(value) => value.trace(trace_id).await,
-            Self::MySql(value) => value.trace(trace_id).await,
-            Self::MasterApi(value) => value.trace(trace_id).await,
-        }
-    }
-
-    async fn next_requests(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<net::Request>, halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(value) => value.next_requests(limit).await,
-            Self::Redis(value) => value.next_requests(limit).await,
-            Self::MySql(value) => value.next_requests(limit).await,
-            Self::MasterApi(value) => value.next_requests(limit).await,
-        }
-    }
-
-    async fn has_pending_requests(&self) -> Result<bool, halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(value) => value.has_pending_requests().await,
-            Self::Redis(value) => value.has_pending_requests().await,
-            Self::MySql(value) => value.has_pending_requests().await,
-            Self::MasterApi(value) => value.has_pending_requests().await,
-        }
-    }
-
-    async fn ack(&self, value: &payload::Payload) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(scheduler) => scheduler.ack(value).await,
-            Self::Redis(scheduler) => scheduler.ack(value).await,
-            Self::MySql(scheduler) => scheduler.ack(value).await,
-            Self::MasterApi(scheduler) => scheduler.ack(value).await,
-        }
-    }
-
-    async fn release(
-        &self,
-        value: &payload::Payload,
-    ) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(scheduler) => scheduler.release(value).await,
-            Self::Redis(scheduler) => scheduler.release(value).await,
-            Self::MySql(scheduler) => scheduler.release(value).await,
-            Self::MasterApi(scheduler) => scheduler.release(value).await,
-        }
-    }
-
-    async fn refresh_lease(
-        &self,
-        value: &payload::Payload,
-    ) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(scheduler) => scheduler.refresh_lease(value).await,
-            Self::Redis(scheduler) => scheduler.refresh_lease(value).await,
-            Self::MySql(scheduler) => scheduler.refresh_lease(value).await,
-            Self::MasterApi(scheduler) => scheduler.refresh_lease(value).await,
-        }
-    }
-
-    async fn success(
-        &self,
-        value: &payload::Payload,
-    ) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(scheduler) => scheduler.success(value).await,
-            Self::Redis(scheduler) => scheduler.success(value).await,
-            Self::MySql(scheduler) => scheduler.success(value).await,
-            Self::MasterApi(scheduler) => scheduler.success(value).await,
-        }
-    }
-
-    async fn failure(
-        &self,
-        value: &payload::Payload,
-    ) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(scheduler) => scheduler.failure(value).await,
-            Self::Redis(scheduler) => scheduler.failure(value).await,
-            Self::MySql(scheduler) => scheduler.failure(value).await,
-            Self::MasterApi(scheduler) => scheduler.failure(value).await,
-        }
-    }
-}
-
-impl Init for SchedulerBackend {
-    async fn init(
-        &self,
-        trace_id: String,
-        snapshot: trace::Snapshot,
-        requests: Vec<net::Request>,
-    ) -> Result<(), halo::harbor::scheduler::Error> {
-        match self {
-            Self::Memory(value) => value.init(trace_id, snapshot, requests).await,
-            Self::Redis(value) => value.init(trace_id, snapshot, requests).await,
-            Self::MySql(value) => value.init(trace_id, snapshot, requests).await,
-            Self::MasterApi(value) => value.init(trace_id, snapshot, requests).await,
-        }
-    }
-
-    fn initializes_run(&self) -> bool {
-        match self {
-            Self::Memory(value) => value.initializes_run(),
-            Self::Redis(value) => value.initializes_run(),
-            Self::MySql(value) => value.initializes_run(),
-            Self::MasterApi(value) => value.initializes_run(),
-        }
-    }
 }
 
 fn build_downloader(config: &Config) -> Downloader {
