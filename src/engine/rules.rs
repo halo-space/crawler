@@ -122,10 +122,10 @@ where
     O: crate::item::Store + 'static,
 {
     pub fn build(self) -> Runtime<S, D, F, O> {
-        validate_ai(&self.config, self.ai.as_deref());
         let (tx, events) = tx::channel(MAX_EVENTS);
         let spider = self.spider_factory.build(tx);
-        validate_item_functions(&spider, &self.config);
+        let validation_error = validate_ai(&self.config, self.ai.as_deref())
+            .or_else(|| validate_item_functions(&spider, &self.config));
         let config = Arc::new(self.config);
         let schemas = self.schemas;
         let executor = super::executor::Executor::new(Arc::new(spider), schemas.clone(), self.ai);
@@ -140,11 +140,11 @@ where
             registry: self.registry,
             middlewares: self.middlewares,
         })
-        .with_init(Init::new(config, trace_id, schemas))
+        .with_init(Init::new(config, trace_id, schemas, validation_error))
     }
 }
 
-fn validate_ai(config: &config::Config, openai: Option<&crate::ai::OpenAI>) {
+fn validate_ai(config: &config::Config, openai: Option<&crate::ai::OpenAI>) -> Option<String> {
     let uses_ai = config.graph.nodes.values().any(|node| {
         node.fields.values().any(|field| {
             field
@@ -153,13 +153,11 @@ fn validate_ai(config: &config::Config, openai: Option<&crate::ai::OpenAI>) {
                 .any(|extractor| matches!(extractor, crate::graph::rules::Extractor::Ai { .. }))
         })
     });
-    assert!(
-        !uses_ai || openai.is_some(),
-        "Rules config uses an AI extractor but Engine has no AI provider"
-    );
+    (uses_ai && openai.is_none())
+        .then_some("Rules config uses an AI extractor but Engine has no AI provider".to_string())
 }
 
-fn validate_item_functions<P>(spider: &P, config: &config::Config)
+fn validate_item_functions<P>(spider: &P, config: &config::Config) -> Option<String>
 where
     P: spider::Spider,
 {
@@ -168,13 +166,15 @@ where
             continue;
         }
         let name = edge.function.as_deref().unwrap_or("item");
-        assert!(
-            spider.item_fn(name).is_some(),
-            "Rules item function is not registered: spider={}, node={}, fn={name}",
-            spider.name(),
-            edge.from,
-        );
+        if spider.item_fn(name).is_none() {
+            return Some(format!(
+                "Rules item function is not registered: spider={}, node={}, fn={name}",
+                spider.name(),
+                edge.from,
+            ));
+        }
     }
+    None
 }
 
 #[doc(hidden)]
@@ -182,6 +182,7 @@ pub struct Init {
     config: Arc<config::Config>,
     trace_id: String,
     schemas: Arc<crate::item::schema::Store>,
+    validation_error: Option<String>,
 }
 
 impl Init {
@@ -189,11 +190,13 @@ impl Init {
         config: Arc<config::Config>,
         trace_id: String,
         schemas: Arc<crate::item::schema::Store>,
+        validation_error: Option<String>,
     ) -> Self {
         Self {
             config,
             trace_id,
             schemas,
+            validation_error,
         }
     }
 }
@@ -203,6 +206,9 @@ where
     S: scheduler::Scheduler + scheduler::Init + 'static,
 {
     async fn init(&self, scheduler: Arc<S>) -> Result<super::init::Output, crate::Error> {
+        if let Some(error) = &self.validation_error {
+            return Err(crate::Error::message(error.clone()));
+        }
         if let Some(item) = &self.config.item {
             self.schemas
                 .register(&item.schema)

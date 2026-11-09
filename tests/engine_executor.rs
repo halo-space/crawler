@@ -483,13 +483,18 @@ fn ai_test_lease() -> spider::scheduler::Lease {
     .unwrap()
 }
 
-#[test]
-#[should_panic(expected = "Rules config uses an AI extractor but Engine has no AI provider")]
-fn rules_ai_without_a_provider_panics_during_build() {
-    let _engine = engine::Builder::new()
+#[tokio::test]
+async fn rules_ai_without_a_provider_returns_a_startup_error() {
+    let mut engine = engine::Builder::new()
         .with_rules(ai_rules())
         .with_spider(RulesSpider::new())
         .build();
+    let error = engine.start_until_idle().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Rules config uses an AI extractor but Engine has no AI provider")
+    );
 }
 
 #[test]
@@ -963,9 +968,8 @@ item:
     assert_eq!(engine.scheduler().inner.done_len(), 2);
 }
 
-#[test]
-#[should_panic(expected = "Rules item function is not registered")]
-fn rules_builder_rejects_an_unregistered_item_function() {
+#[tokio::test]
+async fn rules_builder_rejects_an_unregistered_item_function() {
     let config = spider::config::Config::from_yaml(
         r#"
 spider:
@@ -987,10 +991,16 @@ item:
     )
     .unwrap();
 
-    let _engine = engine::Builder::new()
+    let mut engine = engine::Builder::new()
         .with_rules(config)
         .with_spider(TypedRulesSpider::new(Arc::new(AtomicBool::new(false))))
         .build();
+    let error = engine.start_until_idle().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Rules item function is not registered")
+    );
 }
 
 struct MediaDownload;

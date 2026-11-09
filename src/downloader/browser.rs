@@ -21,11 +21,6 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_SESSIONS: usize = 64;
 const SELECTOR_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_STATUS: u16 = 200;
-const DEFAULT_USER_AGENTS: &[&str] = &[
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-];
 
 struct Session {
     driver: Arc<WebDriver>,
@@ -417,16 +412,55 @@ impl<C: CookieStore> Browser<C> {
                 .await
                 .map_err(driver_error)?;
 
-            let headers = browser_headers(&request);
+            let user_agent = if request.headers.get(http::header::USER_AGENT).is_none() {
+                Some(
+                    fetch_driver
+                        .execute("return navigator.userAgent", Vec::new())
+                        .await
+                        .map_err(driver_error)?
+                        .json()
+                        .as_str()
+                        .ok_or_else(|| {
+                            downloader::Error::InvalidConfig(
+                                "Browser could not read navigator.userAgent".to_string(),
+                            )
+                        })?
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            let headers = browser_headers(&request, user_agent.as_deref());
             cdp.network()
                 .set_extra_http_headers(headers)
                 .await
                 .map_err(driver_error)?;
 
-            fetch_driver
-                .goto(request.url.clone())
-                .await
-                .map_err(driver_error)?;
+            let mut status = DEFAULT_STATUS;
+            let mut response_headers = net::Headers::new();
+            let mut redirects = Vec::new();
+            let mut navigation = Box::pin(fetch_driver.goto(request.url.clone()));
+            loop {
+                tokio::select! {
+                    result = &mut navigation => {
+                        result.map_err(driver_error)?;
+                        break;
+                    }
+                    event = responses.next() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        record_response_event(
+                            event,
+                            &request,
+                            &url,
+                            &mut status,
+                            &mut response_headers,
+                            &mut redirects,
+                        )?;
+                    }
+                }
+            }
 
             if !request.wait_selector.is_empty() {
                 fetch_driver
@@ -448,47 +482,17 @@ impl<C: CookieStore> Browser<C> {
             if !request.allows(&final_url) {
                 return Err(downloader::Error::DisallowedRedirect(final_url.to_string()));
             }
-            let mut status = DEFAULT_STATUS;
-            let mut response_headers = net::Headers::new();
-            let mut redirects = Vec::new();
             while let Ok(Some(event)) =
-                tokio::time::timeout(Duration::from_millis(10), responses.next()).await
+                tokio::time::timeout(Duration::from_millis(50), responses.next()).await
             {
-                if event.r#type != thirtyfour::cdp::domains::network::ResourceType::Document {
-                    continue;
-                }
-                if let Some(value) = event
-                    .response
-                    .get("url")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    let response_url = Url::parse(value)
-                        .map_err(|error| downloader::Error::InvalidRedirect(error.to_string()))?;
-                    if !request.allows(&response_url) {
-                        return Err(downloader::Error::DisallowedRedirect(value.to_string()));
-                    }
-                    if response_url != url {
-                        redirects.push(value.to_string());
-                    }
-                }
-                if let Some(value) = event
-                    .response
-                    .get("status")
-                    .and_then(serde_json::Value::as_u64)
-                {
-                    status = u16::try_from(value).unwrap_or(DEFAULT_STATUS);
-                }
-                if let Some(headers) = event
-                    .response
-                    .get("headers")
-                    .and_then(serde_json::Value::as_object)
-                {
-                    for (name, value) in headers {
-                        if let Some(value) = value.as_str() {
-                            let _ = response_headers.try_set(name, value);
-                        }
-                    }
-                }
+                record_response_event(
+                    event,
+                    &request,
+                    &url,
+                    &mut status,
+                    &mut response_headers,
+                    &mut redirects,
+                )?;
             }
 
             let mut cookies = net::Cookies::new();
@@ -847,11 +851,10 @@ fn reject_sensitive_headers(request: &net::Request) -> Result<(), downloader::Er
     Ok(())
 }
 
-fn random_user_agent() -> &'static str {
-    DEFAULT_USER_AGENTS[fastrand::usize(..DEFAULT_USER_AGENTS.len())]
-}
-
-fn browser_headers(request: &net::Request) -> HashMap<String, String> {
+fn browser_headers(
+    request: &net::Request,
+    actual_user_agent: Option<&str>,
+) -> HashMap<String, String> {
     let mut headers = request
         .headers
         .iter()
@@ -863,9 +866,83 @@ fn browser_headers(request: &net::Request) -> HashMap<String, String> {
         })
         .collect::<HashMap<_, _>>();
     if !headers.contains_key("user-agent") {
-        headers.insert("user-agent".to_string(), random_user_agent().to_string());
+        let user_agent = actual_user_agent
+            .map(randomized_user_agent)
+            .unwrap_or_else(|| "Mozilla/5.0".to_string());
+        headers.insert("user-agent".to_string(), user_agent);
     }
     headers
+}
+
+fn record_response_event(
+    event: ResponseReceived,
+    request: &net::Request,
+    initial_url: &Url,
+    status: &mut u16,
+    response_headers: &mut net::Headers,
+    redirects: &mut Vec<String>,
+) -> Result<(), downloader::Error> {
+    if event.r#type != thirtyfour::cdp::domains::network::ResourceType::Document {
+        return Ok(());
+    }
+    if let Some(value) = event
+        .response
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+    {
+        let response_url = Url::parse(value)
+            .map_err(|error| downloader::Error::InvalidRedirect(error.to_string()))?;
+        if !request.allows(&response_url) {
+            return Err(downloader::Error::DisallowedRedirect(value.to_string()));
+        }
+        if response_url != *initial_url {
+            redirects.push(value.to_string());
+        }
+    }
+    if let Some(value) = event
+        .response
+        .get("status")
+        .and_then(serde_json::Value::as_u64)
+    {
+        *status = u16::try_from(value).unwrap_or(DEFAULT_STATUS);
+    }
+    if let Some(headers) = event
+        .response
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, value) in headers {
+            if let Some(value) = value.as_str() {
+                let _ = response_headers.try_set(name, value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn randomized_user_agent(actual: &str) -> String {
+    for marker in ["HeadlessChrome/", "Chrome/"] {
+        let Some(start) = actual.find(marker) else {
+            continue;
+        };
+        let version_start = start + marker.len();
+        let version_end = actual[version_start..]
+            .find(|character: char| character.is_ascii_whitespace())
+            .map_or(actual.len(), |offset| version_start + offset);
+        let version = &actual[version_start..version_end];
+        let Some(major) = version.split('.').next().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let build = fastrand::u32(1000..10000);
+        return format!(
+            "{}{}.0.{}.0{}",
+            &actual[..version_start],
+            major,
+            build,
+            &actual[version_end..]
+        );
+    }
+    actual.to_string()
 }
 
 async fn restore_browser_cookies(
@@ -921,15 +998,17 @@ mod tests {
     #[test]
     fn browser_uses_a_default_user_agent_only_when_request_does_not_specify_one() {
         let request = net::Request::follow("https://example.com").unwrap();
-        let headers = browser_headers(&request);
-        assert!(DEFAULT_USER_AGENTS.contains(&headers["user-agent"].as_str()));
+        let actual = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.8103.38 Safari/537.36";
+        let headers = browser_headers(&request, Some(actual));
+        assert!(headers["user-agent"].contains("HeadlessChrome/157.0."));
+        assert!(headers["user-agent"].contains("Macintosh"));
 
         let mut request = request;
         request
             .headers
             .try_set("User-Agent", "custom-agent")
             .unwrap();
-        let headers = browser_headers(&request);
+        let headers = browser_headers(&request, Some(actual));
         assert_eq!(headers["user-agent"], "custom-agent");
     }
 
