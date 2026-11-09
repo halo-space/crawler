@@ -13,6 +13,7 @@ pub(super) struct Config {
     host: Option<String>,
     version: Option<String>,
     modes: Vec<net::Mode>,
+    limit: Option<usize>,
 }
 
 impl Default for Config {
@@ -22,6 +23,7 @@ impl Default for Config {
             host: None,
             version: None,
             modes: vec![net::Mode::Http],
+            limit: None,
         }
     }
 }
@@ -41,6 +43,16 @@ impl Config {
 
     pub(super) fn set_modes(&mut self, modes: impl IntoIterator<Item = net::Mode>) {
         self.modes = canonical_modes(modes);
+    }
+
+    pub(super) fn set_limit(&mut self, limit: usize) -> Result<(), scheduler::Error> {
+        if limit == 0 {
+            return Err(scheduler::Error::Message(
+                "worker claim limit must be positive".to_string(),
+            ));
+        }
+        self.limit = Some(limit);
+        Ok(())
     }
 
     pub(super) fn validate(&self, concurrency: usize) -> Result<(), scheduler::Error> {
@@ -75,8 +87,12 @@ impl Config {
             host: required("worker_host", self.host.as_deref())?.to_string(),
             version: required("worker_version", self.version.as_deref())?.to_string(),
             modes: self.modes.clone(),
-            concurrency,
+            limit: self.limit.unwrap_or(concurrency),
         })
+    }
+
+    pub(super) fn limit(&self, concurrency: usize) -> usize {
+        self.limit.unwrap_or(concurrency)
     }
 }
 
@@ -92,13 +108,13 @@ pub(super) async fn register(
         .await?;
     success("register", &response)?;
     response
-        .data
+        .items
         .as_str()
         .filter(|token| !token.trim().is_empty())
         .map(str::to_string)
         .ok_or_else(|| {
             scheduler::Error::Message(
-                "Worker register response data must be a non-empty token".to_string(),
+                "Worker register response items must be a non-empty token".to_string(),
             )
         })
 }
@@ -138,7 +154,22 @@ pub(super) fn start_heartbeat(
             let result = client
                 .post_once::<_, wire::WorkerResponse>("v1/worker/heartbeat", &body)
                 .await
-                .and_then(|response| success("heartbeat", &response));
+                .and_then(|response| {
+                    success("heartbeat", &response)?;
+                    let limit = response
+                        .items
+                        .get("limit")
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|limit| *limit > 0)
+                        .ok_or_else(|| {
+                            scheduler::Error::Message(
+                                "heartbeat response items.limit must be a positive integer"
+                                    .to_string(),
+                            )
+                        })?;
+                    runtime.set_claim_limit(limit as usize);
+                    Ok(())
+                });
             if !runtime.is_open(epoch) {
                 return;
             }

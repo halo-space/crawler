@@ -1,18 +1,19 @@
-# crawler 架构与功能说明
+# Harbor 架构与功能说明
 
 本文描述当前源码已经实现的功能、核心运行模型和扩展边界。它是一份可以独立阅读的架构总览。
 
 ## 1. 定位与当前范围
 
-`crawler` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 提供 Redis 7 单实例与 MySQL 9 Scheduler，用于持久化多 Worker 队列。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
+`Harbor` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 提供 Redis 7 单实例与 MySQL 9 Scheduler，用于持久化多 Worker 队列，`harbor-worker` 提供独立 Worker 服务入口。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
 
-当前 workspace 包含四个 crate：
+当前 workspace 包含五个 crate：
 
 | crate | 职责 |
 | --- | --- |
 | `spider` | 核心运行时、公共数据对象、扩展合同，以及默认 Memory Scheduler 和 HTTP Downloader |
 | `macros` | `#[spider]` 过程宏；生成代码模式 Spider 的构造、node 注册和分发连接代码 |
 | `contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式 Middleware 实现 |
+| `harbor-worker` | 独立 Worker 服务，装配 API Scheduler、共享 Engine、Downloader 和 Worker 自己的 Item Store |
 | `examples` | 可运行的代码模式和 Rules 模式示例 |
 
 ### 1.1 能力状态
@@ -32,20 +33,21 @@
 | AI Selector | 已实现 | 独立的 OpenAI-compatible JSON 对象提取，不属于 CSS Healing fallback |
 | AI 运行时配置 | 已实现 | 通过 `Engine::with_ai` 注入一个 Worker 本地可复用的 `ai::OpenAI` provider；provider 配置不进入 Rules 或 Trace Snapshot |
 | Middleware | 已实现 | 生命周期 Registry、Worker 本地 Memory 实现，以及可选 RedisBloom Dedup 和共享 Redis RateLimit |
-| Item Store | 已实现 | 独立的 `open / close / submit(&Payload)` 持久化合同；默认 JSONL 输出与 Jsonl 自管失败快照；附件下载计划在 v5 实现 |
+| Item Store | 已实现 | 独立的 `open / close / submit(&Payload)` 持久化合同；默认 JSONL 输出与 Jsonl 自管失败快照 |
 | Worker 能力领取 | 已实现 | 每个 Scheduler 自己持有冻结的 Request modes，能力筛选与后端领取保持原子 |
 | Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；完整实现 namespace Scheduler/Init、Worker 注册/心跳与 Lua 原子转换 |
 | MySQL Scheduler | 已实现 | MySQL 9；使用 DSN 数据库隔离、显式建表脚本、事务领取/结算与 Worker 注册/心跳 |
 | API Scheduler 适配器 | 已实现 | 通过外部 Master API 完成注册/心跳的 Worker 侧 Scheduler；Master 服务属于独立项目 |
+| 独立 Worker 服务 | 已实现 | `harbor-worker` 从环境变量读取 Worker 配置，通过 Master API 领取 Request，从 Trace Snapshot 恢复 Rules，并写入本地 JSONL Item |
 | 运行期链路追踪 | 已实现 | 可选的逐 Request `fastrace` 根链路与有界生命周期 span；不等于业务 `trace_id` |
 
 XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护不完整的 XPath 子集。
 Healing 不是通用 selector 阶段。目前只有 CSS 提供 Healing；Regex 与 JSON 保持各自的精确选择
 语义，XML selector 当前也没有实现。
 
-crawler workspace 不包含、也不实现 Master 服务，只负责 Worker 侧 API Scheduler 适配器及其客户端
-HTTP 合同。Master 服务、服务端协议、数据库、Migration、Cron、Control API、管理前端及其设计均由
-独立项目负责。
+Harbor workspace 不包含、也不实现 Master 服务，只负责 Worker 侧 API Scheduler 适配器、客户端
+HTTP 合同和消费该合同的 `harbor-worker` 进程。Master 服务、服务端协议、数据库、Migration、
+Cron、Control API、管理前端及其设计均由独立项目负责。
 Item 持久化严格属于 Worker：默认使用 `item::Jsonl`，`.with_store(...)` 只用于替换为 Worker
 自己的业务存储后端。一次 Engine 运行只能在启动时绑定一个 Store；运行时不在多个 Store 之间
 路由 Item，也不维护 Store 注册表。Master 不参与 Item 持久化，本 workspace 及其路线图也不定义
@@ -469,6 +471,10 @@ API Scheduler 使用现有认证客户端调用 `GET /v1/worker/policy` 以及 `
 三种分布式实现都只用心跳在线状态控制后续领取。它与 Request 执行权明确分离：Worker 离线不会取消已经由
 `next_requests` 返回的 Request，Request 续租成功也不能证明 Worker 仍处于注册在线状态。
 
+API 心跳响应同时返回 Master 当前管理的领取 `limit`。API Scheduler 收到后立即更新本地运行状态，
+后续每次领取取该 limit 与 Engine 提供的批量上限中的较小值。它只影响后续批量大小，不改变已经领取的
+Request，也不改变 Engine 并发数。Worker 只接受严格的 `code / message / items` 响应结构，不支持旧响应字段。
+
 API 的 claim 和 release 在结果未确认时保留各自的 `Idempotency-Key`。传输错误、超时或成功响应无法
 解码时，相同领取参数的下一次 claim 或相同租约身份的下一次 release 会复用原 key；尚有未确认 claim
 时，不同领取参数会被拒绝。收到成功结果或确定性失败后清除对应 key。claim 调用会串行执行，避免同一
@@ -574,6 +580,8 @@ Worker 本地临时状态，不进入 Request Snapshot，也不作为跨 Worker 
 JavaScript 执行后的渲染 DOM；主文档状态码和 headers 通过 CDP Network 事件读取，可选的
 `Request.wait_selector` 使用 CSS selector 等待页面节点。浏览器断连、导航失败、等待超时或读取页面失败
 会销毁当前 Session，随后由 `error_download.retry` 负责退避重试。
+Browser Request 只允许非凭据类的缓存和内容协商 headers；Cookie 单独由浏览器 Cookie 状态处理，其他
+headers 在导航前直接拒绝，避免跨 redirect 泄漏。
 
 Spider 可以在 `spider.login` 中声明 Browser 登录配置。Spider 配置创建 Trace 时，`login` 随完整 DSL
 写入 `traces.snapshot.dsl.spider.login`；Worker 不在执行期间重新读取 `spiders` 表，也不增加登录专用
@@ -674,6 +682,8 @@ Rust `index` 是每条 Rules Request 固定经过的共享业务代码入口。�
 策略，Request 创建后不再从目标 node 补 transport。URL 数组按稳定顺序展开，在 transport 模板渲染前
 写入从 `1` 开始的保留 `vals.idx`，每层新展开重新计数。Request 与 bind 模板共用一个解析器；渲染只
 遍历一次解析后的源字符串，动态值中包含的花括号保持为普通数据，不会成为第二层模板表达式。
+如果 bind template 变量解析为数组，就按数组元素逐项渲染并返回数组；多个数组变量必须长度一致，标量变量
+广播到每一项。列表页向多个详情页分发因此仍然使用现有的批量 Request edge，不增加另一套流程概念。
 
 Rules 不会编译成另一套 Request 或 Item 类型。parse/bind 先提供基础字段，Item edge 的 `vals` 只有
 非空结果才覆盖同名值；null、空字符串、空数组和空对象保留基础值，`0` 与 `false` 仍是有效覆盖。
@@ -883,63 +893,63 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 
 | 路径 | 单一职责 |
 | --- | --- |
-| `spider/src/engine/actor.rs` | 持有 Engine Actor 状态及统一推进和退出判断 |
-| `spider/src/engine/actor/start.rs` | 启动 Executor 工作并处理完成消息 |
-| `spider/src/engine/actor/claim.rs` | 领取 Scheduler 工作并处理完成消息 |
-| `spider/src/engine/actor/request.rs` | 登记一条 Request 任务并处理完成消息 |
-| `spider/src/engine/actor/output.rs` | 接受 Tx Event、委托应答并跟踪输出完成 |
-| `spider/src/engine/actor/wait.rs` | 安排轮询与 producer 空闲通知 |
-| `spider/src/engine/actor/shutdown.rs` | 收到进程关闭信号后停止新领取并排空已接受工作 |
-| `spider/src/engine/actor/task.rs` | 持有并终止任务句柄，把任务 panic 转为 Engine 错误 |
-| `spider/src/engine/builder.rs` | 装配组件并持有所有执行模式共用的 Schema Store |
-| `spider/src/engine/runtime.rs` | 组件生命周期、启动参数和 Actor 装配 |
-| `spider/src/engine/request/task.rs` | 单条 Request 的 ack、租约维护和最终结算 |
-| `spider/src/engine/admission.rs` | Request 输出进入 Scheduler 前统一执行 `before_scheduler` 准入 |
-| `spider/src/engine/request.rs` | 单条已领取 Request 的下载、Middleware、Worker 本地重试与解析生命周期 |
-| `spider/src/trace/tracing.rs` | 运行期追踪配置、确定性采样、有界 span helper 与错误分类 |
-| `spider/src/engine/event/request.rs` | 处理 Tx 产生的 Request 输出 |
-| `spider/src/engine/event/item.rs` | 执行 Item Middleware、Store 重试与 `error_item` 编排 |
-| `spider/src/spider/tx/identity.rs` | 为当前 Request 输出派生可重放的稳定 ID |
-| `spider/src/engine/executor.rs` | 根据 Trace Snapshot 选择 Code/Rules 并调用共享 Spider |
-| `spider/src/engine/code.rs` | 代码模式本地运行种子初始化 |
-| `spider/src/engine/rules.rs` | Rules 模式装配与运行种子初始化 |
-| `spider/src/engine/rules/executor.rs` | 协调一次 Rules node 执行并发送产物 |
-| `spider/src/engine/rules/executor/field.rs` | 从当前 Response 提取声明字段 |
-| `spider/src/engine/rules/executor/value.rs` | 从当前 Rules 上下文解析类型化值引用 |
-| `spider/src/engine/rules/executor/bind.rs` | 执行有序 bind pipeline、transform 和 template |
-| `spider/src/engine/rules/executor/condition.rs` | 判断一条 edge 条件 |
-| `spider/src/engine/rules/executor/build.rs` | 从已启用 edge 构造 Request 与 Item 值 |
-| `spider/src/middleware/registry.rs` | 注册 Middleware 实现、解析并排序有效 Spec、执行各阶段 hook 及生成重试策略 |
-| `spider/src/downloader/http.rs` | 执行 HTTP 请求、redirect、headers、cookies 与 Response 转换 |
-| `spider/src/downloader/http/pool.rs` | 按 proxy/TLS 键管理 Client 复用、过期与关闭 |
-| `spider/src/net/request/contract.rs` | Request、mode、state、proxy 与 TLS 公共合同 |
-| `spider/src/payload/contract.rs` | 统一传输 Payload 与各操作的结构校验 |
-| `spider/src/item/store.rs` | Item 持久化公共合同 |
-| `spider/src/item/jsonl.rs` | 默认 Jsonl Store 生命周期与提交流程 |
-| `spider/src/item/jsonl/output.rs` | 小时 JSONL 文件、有界句柄缓存、串行追加、刷新与错误日志 |
-| `spider/src/item/jsonl/snapshot.rs` | 进程内失败快照投影、有序发布与清理 |
-| `spider/src/scheduler/contract.rs` | Scheduler 公共合同 |
-| `spider/src/scheduler/init.rs` | 运行种子初始化合同 |
-| `spider/src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |
-| `spider/src/net/request/hash.rs` | 计算初始 Request Snapshot 的规范 hash，供 Memory、Redis 与 MySQL 共用重放比较 |
-| `spider/src/scheduler/memory/claim.rs` | 协调一次按能力领取，从排队 Snapshot 生成 processing Request |
-| `spider/src/scheduler/memory/queue.rs` | ready/delayed 排队顺序 |
-| `spider/src/scheduler/memory/reclaim.rs` | 回收已 ack 与未 ack 的过期租约 |
-| `spider/src/scheduler/memory/restore.rs` | 恢复已领取 Request Snapshot，并处理恢复重试 |
-| `spider/src/scheduler/memory/settle.rs` | 身份校验、成功/失败和队列重试 |
-| `spider/src/scheduler/memory/state.rs` | Memory 运行状态数据结构 |
-| `spider/src/scheduler/memory/validate.rs` | 校验新 Request 及其 Trace 归属 |
-| `spider/src/selector/css/healing.rs` | Healing 配置与总体流程 |
-| `spider/src/selector/css/healing/reference.rs` | CSS AST 到评分参考结构 |
-| `spider/src/selector/css/healing/score.rs` | DOM 候选遍历、关系判断与评分 |
-| `spider/src/selector/json.rs` | Response 完整反序列化与公共 RFC 9535 JSONPath 选择 |
-| `spider/src/ai.rs` | AI 运行时公共入口并导出 `OpenAI` |
-| `spider/src/ai/openai.rs` | 校验 provider 配置、持有可复用实例并执行模型调用 |
-| `spider/src/ai/transport.rs` | 执行单次 provider 请求，并在依赖缓冲前限制 HTTP 解码后的正文 |
-| `spider/src/error/ai.rs` | AI provider 构造与调用错误 |
-| `spider/src/selector/ai.rs` | 从 Response 构造 prompt，并执行 JSON 对象提取合同 |
-| `spider/src/middleware/dedup/{config,fingerprint,memory}.rs` | 解析扁平 Dedup 配置、生成规范桶/成员并维护 Worker 本地精确成员 |
-| `spider/src/middleware/rate_limit/{config,memory}.rs` | 解析 group/QPS 配置并维护 Worker 本地调度 |
+| `src/engine/actor.rs` | 持有 Engine Actor 状态及统一推进和退出判断 |
+| `src/engine/actor/start.rs` | 启动 Executor 工作并处理完成消息 |
+| `src/engine/actor/claim.rs` | 领取 Scheduler 工作并处理完成消息 |
+| `src/engine/actor/request.rs` | 登记一条 Request 任务并处理完成消息 |
+| `src/engine/actor/output.rs` | 接受 Tx Event、委托应答并跟踪输出完成 |
+| `src/engine/actor/wait.rs` | 安排轮询与 producer 空闲通知 |
+| `src/engine/actor/shutdown.rs` | 收到进程关闭信号后停止新领取并排空已接受工作 |
+| `src/engine/actor/task.rs` | 持有并终止任务句柄，把任务 panic 转为 Engine 错误 |
+| `src/engine/builder.rs` | 装配组件并持有所有执行模式共用的 Schema Store |
+| `src/engine/runtime.rs` | 组件生命周期、启动参数和 Actor 装配 |
+| `src/engine/request/task.rs` | 单条 Request 的 ack、租约维护和最终结算 |
+| `src/engine/admission.rs` | Request 输出进入 Scheduler 前统一执行 `before_scheduler` 准入 |
+| `src/engine/request.rs` | 单条已领取 Request 的下载、Middleware、Worker 本地重试与解析生命周期 |
+| `src/trace/tracing.rs` | 运行期追踪配置、确定性采样、有界 span helper 与错误分类 |
+| `src/engine/event/request.rs` | 处理 Tx 产生的 Request 输出 |
+| `src/engine/event/item.rs` | 执行 Item Middleware、Store 重试与 `error_item` 编排 |
+| `src/spider/tx/identity.rs` | 为当前 Request 输出派生可重放的稳定 ID |
+| `src/engine/executor.rs` | 根据 Trace Snapshot 选择 Code/Rules 并调用共享 Spider |
+| `src/engine/code.rs` | 代码模式本地运行种子初始化 |
+| `src/engine/rules.rs` | Rules 模式装配与运行种子初始化 |
+| `src/engine/rules/executor.rs` | 协调一次 Rules node 执行并发送产物 |
+| `src/engine/rules/executor/field.rs` | 从当前 Response 提取声明字段 |
+| `src/engine/rules/executor/value.rs` | 从当前 Rules 上下文解析类型化值引用 |
+| `src/engine/rules/executor/bind.rs` | 执行有序 bind pipeline、transform 和 template |
+| `src/engine/rules/executor/condition.rs` | 判断一条 edge 条件 |
+| `src/engine/rules/executor/build.rs` | 从已启用 edge 构造 Request 与 Item 值 |
+| `src/middleware/registry.rs` | 注册 Middleware 实现、解析并排序有效 Spec、执行各阶段 hook 及生成重试策略 |
+| `src/downloader/http.rs` | 执行 HTTP 请求、redirect、headers、cookies 与 Response 转换 |
+| `src/downloader/http/pool.rs` | 按 proxy/TLS 键管理 Client 复用、过期与关闭 |
+| `src/net/request/contract.rs` | Request、mode、state、proxy 与 TLS 公共合同 |
+| `src/payload/contract.rs` | 统一传输 Payload 与各操作的结构校验 |
+| `src/item/store.rs` | Item 持久化公共合同 |
+| `src/item/jsonl.rs` | 默认 Jsonl Store 生命周期与提交流程 |
+| `src/item/jsonl/output.rs` | 小时 JSONL 文件、有界句柄缓存、串行追加、刷新与错误日志 |
+| `src/item/jsonl/snapshot.rs` | 进程内失败快照投影、有序发布与清理 |
+| `src/scheduler/contract.rs` | Scheduler 公共合同 |
+| `src/scheduler/init.rs` | 运行种子初始化合同 |
+| `src/scheduler/memory.rs` | Memory 对外实现与子模块编排 |
+| `src/net/request/hash.rs` | 计算初始 Request Snapshot 的规范 hash，供 Memory、Redis 与 MySQL 共用重放比较 |
+| `src/scheduler/memory/claim.rs` | 协调一次按能力领取，从排队 Snapshot 生成 processing Request |
+| `src/scheduler/memory/queue.rs` | ready/delayed 排队顺序 |
+| `src/scheduler/memory/reclaim.rs` | 回收已 ack 与未 ack 的过期租约 |
+| `src/scheduler/memory/restore.rs` | 恢复已领取 Request Snapshot，并处理恢复重试 |
+| `src/scheduler/memory/settle.rs` | 身份校验、成功/失败和队列重试 |
+| `src/scheduler/memory/state.rs` | Memory 运行状态数据结构 |
+| `src/scheduler/memory/validate.rs` | 校验新 Request 及其 Trace 归属 |
+| `src/selector/css/healing.rs` | Healing 配置与总体流程 |
+| `src/selector/css/healing/reference.rs` | CSS AST 到评分参考结构 |
+| `src/selector/css/healing/score.rs` | DOM 候选遍历、关系判断与评分 |
+| `src/selector/json.rs` | Response 完整反序列化与公共 RFC 9535 JSONPath 选择 |
+| `src/ai.rs` | AI 运行时公共入口并导出 `OpenAI` |
+| `src/ai/openai.rs` | 校验 provider 配置、持有可复用实例并执行模型调用 |
+| `src/ai/transport.rs` | 执行单次 provider 请求，并在依赖缓冲前限制 HTTP 解码后的正文 |
+| `src/error/ai.rs` | AI provider 构造与调用错误 |
+| `src/selector/ai.rs` | 从 Response 构造 prompt，并执行 JSON 对象提取合同 |
+| `src/middleware/dedup/{config,fingerprint,memory}.rs` | 解析扁平 Dedup 配置、生成规范桶/成员并维护 Worker 本地精确成员 |
+| `src/middleware/rate_limit/{config,memory}.rs` | 解析 group/QPS 配置并维护 Worker 本地调度 |
 | `macros/src/spider/expand.rs` | 将用户 Spider 结构展开为工厂实现 |
 | `macros/src/spider/check.rs` | 宏输入约束校验 |
 | `macros/src/spider/bind.rs` | 生成 node 注册与 handler 绑定代码 |
@@ -990,7 +1000,6 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 - 不让 Item ID 承担业务去重；
 - Redis 单实例 Scheduler 不支持 Redis Cluster；Cluster 需要独立的 Scheduler 设计；
 - Browser 模式第一版只支持 GET 页面导航，不承担通用 HTTP API 请求；
-- 不下载 Item 附件；该能力尚未实现，已分配到独立的 v5 变更；
 - 不让核心 `spider` crate 依赖 `contrib`。
 
 ## 14. 架构不变量

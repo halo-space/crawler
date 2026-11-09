@@ -56,12 +56,11 @@ fn bound_request(url: impl Into<String>) -> net::Request {
 fn unavailable(message: &str) -> Response {
     Response::json(
         "503 Service Unavailable",
-        json!({"error": {
-            "code": "unavailable",
-            "id": null,
-            "field": null,
-            "message": message
-        }}),
+        json!({
+            "code": 1000,
+            "message": message,
+            "items": {"kind": "unavailable", "id": null, "field": null}
+        }),
     )
 }
 
@@ -69,17 +68,21 @@ fn policy() -> Response {
     Response::json(
         "200 OK",
         json!({
-            "lease_timeout_ms": 30000,
-            "lease_interval_ms": 10000,
-            "heartbeat_interval_ms": 10000,
+            "code": 200,
+            "message": "success",
+            "items": {
+                "lease_timeout_ms": 30000,
+                "lease_interval_ms": 10000,
+                "heartbeat_interval_ms": 10000,
+            }
         }),
     )
 }
 
-fn worker_ok(data: serde_json::Value) -> Response {
+fn worker_ok(items: serde_json::Value) -> Response {
     Response::json(
         "200 OK",
-        json!({"code": 200, "message": "success", "data": data}),
+        json!({"code": 200, "message": "success", "items": items}),
     )
 }
 
@@ -138,10 +141,15 @@ impl Response {
         }
     }
 
-    fn empty(status: &'static str) -> Self {
+    fn empty(_status: &'static str) -> Self {
         Self {
-            status,
-            body: Vec::new(),
+            status: "200 OK",
+            body: serde_json::to_vec(&json!({
+                "code": 200,
+                "message": "success",
+                "items": {}
+            }))
+            .unwrap(),
             wait: None,
         }
     }

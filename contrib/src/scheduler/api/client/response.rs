@@ -28,12 +28,13 @@ where
 }
 
 pub(super) fn empty(bytes: Vec<u8>) -> Result<(), scheduler::Error> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    match serde_json::from_slice::<Value>(&bytes) {
-        Ok(Value::Object(values)) if values.is_empty() => Ok(()),
-        Ok(_) => Err(ambiguous("Master returned a non-empty mutation response")),
+    match serde_json::from_slice::<wire::ApiResponse<Value>>(&bytes) {
+        Ok(response)
+            if response.code == 200 && response.items == Value::Object(Default::default()) =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(ambiguous("Master returned an invalid mutation response")),
         Err(error) => Err(ambiguous(&format!(
             "Master returned an invalid mutation response: {error}"
         ))),
@@ -55,18 +56,25 @@ pub(super) async fn read(response: reqwest::Response) -> Result<Vec<u8>, String>
 }
 
 pub(in crate::scheduler::api) fn map_error(status: StatusCode, body: &[u8]) -> scheduler::Error {
-    let Ok(envelope) = serde_json::from_slice::<wire::ErrorEnvelope>(body) else {
+    let Ok(envelope) = serde_json::from_slice::<wire::ApiResponse<Value>>(body) else {
         return scheduler::Error::Message(message(status, body));
     };
-    let wire::ErrorBody {
-        code,
-        id,
-        field,
-        message,
-    } = envelope.error;
+    let code = envelope
+        .items
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let id = envelope
+        .items
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let field = envelope.items.get("field").and_then(Value::as_str);
+    let message = envelope.message;
     let id = id.filter(|id| !id.is_empty());
     match code.as_str() {
-        "identity_mismatch" => match (id, field.as_deref()) {
+        "identity_mismatch" => match (id, field) {
             (Some(id), Some("task_id")) => scheduler::Error::IdentityMismatch {
                 id,
                 field: "task_id",
@@ -126,8 +134,8 @@ fn protocol_error(code: &str, message: String) -> scheduler::Error {
 }
 
 pub(super) fn message(status: StatusCode, body: &[u8]) -> String {
-    if let Ok(envelope) = serde_json::from_slice::<wire::ErrorEnvelope>(body) {
-        return envelope.error.message;
+    if let Ok(envelope) = serde_json::from_slice::<wire::ApiResponse<Value>>(body) {
+        return envelope.message;
     }
     let detail = std::str::from_utf8(body)
         .ok()
@@ -144,8 +152,8 @@ mod tests {
 
     #[test]
     fn mutation_success_requires_an_empty_response() {
-        assert!(empty(Vec::new()).is_ok());
-        assert!(empty(b"{}".to_vec()).is_ok());
+        assert!(empty(br#"{"code":200,"message":"success","items":{}}"#.to_vec()).is_ok());
+        assert!(empty(b"{}".to_vec()).is_err());
         assert!(matches!(
             empty(b"null".to_vec()),
             Err(scheduler::Error::Unavailable(_))

@@ -6,9 +6,13 @@ async fn identical_init_bodies_share_a_key_across_tasks() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),
@@ -59,9 +63,13 @@ async fn different_init_bodies_use_different_keys() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),

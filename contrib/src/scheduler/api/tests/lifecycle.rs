@@ -100,15 +100,23 @@ async fn close_waits_for_an_in_flight_trace_and_clears_its_cache() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),
         Response::held_json(
             "200 OK",
-            serde_json::to_value(trace::Snapshot::code("task-1")).unwrap(),
+            json!({
+                "code": 200,
+                "message": "success",
+                "items": serde_json::to_value(trace::Snapshot::code("task-1")).unwrap()
+            }),
             reached,
             continued,
         ),
@@ -153,15 +161,19 @@ async fn close_waits_for_an_in_flight_claim_and_blocks_later_claims() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),
         Response::held_json(
             "200 OK",
-            json!({"requests": [claimed(snapshot)]}),
+            json!({"code": 200, "message": "success", "items": [claimed(snapshot)]}),
             reached,
             continued,
         ),
@@ -200,15 +212,19 @@ async fn close_waits_for_an_in_flight_heartbeat_before_offline() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 50,
+            }
             }),
         ),
         registered(),
         Response::held_json(
             "200 OK",
-            json!({"code": 200, "message": "success", "data": null}),
+            json!({"code": 200, "message": "success", "items": null}),
             reached,
             heartbeat_continued,
         ),
@@ -244,7 +260,7 @@ async fn cancelled_close_keeps_the_token_for_another_offline_attempt() {
         registered(),
         Response::held_json(
             "200 OK",
-            json!({"code": 200, "message": "success", "data": null}),
+            json!({"code": 200, "message": "success", "items": null}),
             reached,
             offline_continued,
         ),
@@ -286,15 +302,19 @@ async fn cancelled_close_during_heartbeat_cannot_reenable_claims() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 50,
+            }
             }),
         ),
         registered(),
         Response::held_json(
             "200 OK",
-            json!({"code": 200, "message": "success", "data": null}),
+            json!({"code": 200, "message": "success", "items": null}),
             reached,
             heartbeat_continued,
         ),

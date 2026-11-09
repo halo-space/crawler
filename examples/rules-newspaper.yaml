@@ -11,14 +11,13 @@ spider:
 graph:
   nodes:
     index:
-      parse:
-        fields:
+      fields:
           page_links:
             required: true
             extractors:
               - kind: css
                 expr: ul[class~="conRList"] a::attr(href)
-      bind:
+      binds:
         page_urls:
           kind: pipeline
           from: $fields.page_links
@@ -27,14 +26,13 @@ graph:
               base_url: $response.url
 
     page:
-      parse:
-        fields:
+      fields:
           article_links:
             required: true
             extractors:
               - kind: css
                 expr: ul[class~="conMItemList"] a::attr(href)
-      bind:
+      binds:
         article_urls:
           kind: pipeline
           from: $fields.article_links
@@ -43,8 +41,7 @@ graph:
               base_url: $response.url
 
     detail:
-      parse:
-        fields:
+      fields:
           title:
             required: true
             extractors:
@@ -58,7 +55,7 @@ graph:
             extractors:
               - kind: css
                 expr: .detail-text::text
-      bind:
+      binds:
         title:
           kind: pipeline
           from: $fields.title
@@ -76,7 +73,7 @@ graph:
       request:
         node: page
         url:
-          from: $bind.page_urls
+          from: $binds.page_urls
         method: GET
         timeout: 30000
 
@@ -85,7 +82,7 @@ graph:
       request:
         node: detail
         url:
-          from: $bind.article_urls
+          from: $binds.article_urls
         method: GET
         timeout: 30000
         vals:
@@ -97,9 +94,9 @@ graph:
       fn: save
       vals:
         title:
-          from: $bind.title
+          from: $binds.title
         content:
-          from: $bind.content
+          from: $binds.content
         url:
           from: $response.url
         page_url:

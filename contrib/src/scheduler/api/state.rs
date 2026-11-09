@@ -21,6 +21,7 @@ pub(super) struct Runtime {
     releases: std::sync::Mutex<HashMap<wire::Lease, PendingRelease>>,
     pub(super) token: std::sync::Mutex<Option<String>>,
     pub(super) can_claim: AtomicBool,
+    pub(super) claim_limit: AtomicU64,
     pub(super) traces: Mutex<TraceCache>,
 }
 
@@ -61,12 +62,22 @@ impl Runtime {
             releases: std::sync::Mutex::new(HashMap::new()),
             token: std::sync::Mutex::new(None),
             can_claim: AtomicBool::new(false),
+            claim_limit: AtomicU64::new(0),
             traces: Mutex::new(TraceCache::new(trace_cache_capacity, trace_cache_bytes)),
         }
     }
 
     pub(super) fn is_open(&self, epoch: u64) -> bool {
         self.opened.load(Ordering::Acquire) && self.epoch.load(Ordering::Acquire) == epoch
+    }
+
+    pub(super) fn set_claim_limit(&self, limit: usize) {
+        self.claim_limit.store(limit as u64, Ordering::Release);
+    }
+
+    pub(super) fn claim_limit(&self) -> Option<usize> {
+        let limit = self.claim_limit.load(Ordering::Acquire);
+        (limit > 0).then_some(limit as usize)
     }
 
     pub(super) fn set_token(&self, token: String) {

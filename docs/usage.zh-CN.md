@@ -1,8 +1,8 @@
-# Crawler 使用手册
+# Harbor 使用手册
 
 [项目 README](../README.zh-CN.md) | 简体中文 | [English](usage.md)
 
-`crawler` 是一个使用 Rust 编写的爬虫运行时。默认单进程形态提供内存调度器、HTTP 下载器、中间件
+`Harbor` 是一个使用 Rust 编写的爬虫运行时。默认单进程形态提供内存调度器、HTTP 下载器、中间件
 生命周期、异步 Spider 处理器、规则模式、CSS Healing、AI Selector 和本地 JSONL 数据输出；`contrib`
 提供 Redis/MySQL Scheduler 和分布式中间件，并保持同一套 Engine 合同。运行时已完成 Task/Trace 运行种子、
 按 Worker 能力领取 Request，以及确定性的响应字符集解码。
@@ -30,6 +30,17 @@ Engine 的完整定义。运行命令：
 
 ```bash
 cargo run -p examples --bin basic
+```
+
+独立 Worker 服务位于 `harbor-worker` crate。它连接 Master API，消费已经发布的 Request，
+从 Trace Snapshot 恢复 Rules，并通过 Worker 自己的 Store 写入 Item：
+
+```bash
+HARBOR_MASTER_URL=https://master.example.com/ \
+HARBOR_TOKEN=... \
+HARBOR_WORKER_ID=worker-01 \
+HARBOR_WORKER_LIMIT=5 \
+cargo run -p harbor-worker
 ```
 
 代码模式使用默认 Memory Scheduler 时，每次启动都以唯一的 `Spider.name` 创建一份运行种子：新的
@@ -195,7 +206,7 @@ Trace。Trace 读取、缺失、解码、校验和 task/node 绑定错误只调�
 
 Rules 模式中，extractor 表达式直接决定结果数量：零个匹配为 `null`，一个匹配为标量或节点对象，
 多个匹配为数组，不再提供额外的 `select`。媒体字段通过
-`item.fields.<name>.kind = image | video | audio` 声明，crawler 在 validator 处理
+`node.fields.<name>.kind = image | video | audio` 声明，crawler 在 validator 处理
 `item.schema` 前将其规范化为固定 media object 数组。
 
 代码模式通过 `response.css()?` 获得原生 `scrape_core::Soup`，业务代码继续直接使用 Soup 和
@@ -229,21 +240,20 @@ spider:
 graph:
   nodes:
     index:
-      parse:
-        fields:
-          quotes:
-            required: true
-            extractors:
-              - kind: json
-                expr: $.data.diff[*]
-          stock_codes:
-            extractors:
-              - kind: json
-                expr: $.data.diff[*].f12
-          total:
-            extractors:
-              - kind: json
-                expr: $.data.total
+      fields:
+        quotes:
+          required: true
+          extractors:
+            - kind: json
+              expr: $.data.diff[*]
+        stock_codes:
+          extractors:
+            - kind: json
+              expr: $.data.diff[*].f12
+        total:
+          extractors:
+            - kind: json
+              expr: $.data.total
   edges:
     - from: index
       kind: item
@@ -344,6 +354,8 @@ URL、transport、priority 和 vals。URL 数组展开会在模板渲染前写�
 SchemaKey，再调用默认 `item` 或 edge 的 `fn` 业务函数。规则模式与代码模式共用 Engine、
 Scheduler、Downloader、Middleware、Request、Response、Item 和 Payload，不维护第二套运行时模型。
 Request 与 bind 模板只解析一次源字符串；动态值中带入的花括号只作为数据，不会再次解释为模板表达式。
+当 bind template 变量解析为数组时，模板会按数组元素逐项渲染并返回 URL 数组；多个数组变量必须长度一致，
+标量变量会广播到每一项。这就是一个列表页按每行生成多个详情页 Request 的批量写法。
 每条 Rules Request 都由统一 Executor 先调用 Rust Spider 的 `index(response.clone())` 业务入口，
 然后再根据 `Request.node` 解释对应 DSL node；这里不存在 Code/Rules Executor 替换。
 每个具体 Item 同时 derive `serde::Serialize`、`serde::Deserialize` 和 `macros::Item`，启用 serde
@@ -488,7 +500,7 @@ v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符
 ```toml
 [dependencies]
 fastrace = { version = "0.7.18", default-features = false, features = ["enable"] }
-spider = { path = "../spider", features = ["runtime-tracing"] }
+spider = { path = "..", features = ["runtime-tracing"] }
 ```
 
 使用 API Scheduler 时，改为开启 `contrib/runtime-tracing`；该 feature 会同时开启
@@ -713,8 +725,10 @@ Memory 使用内部身份 `local`，默认支持 HTTP，可通过 `Memory::with_
 也不发送心跳。Redis、MySQL 和 API 要求在 Scheduler 上配置稳定的 Worker ID、host 和 version，
 `with_modes(...)` 冻结其下载能力。缺少元数据或 mode 集合为空会在 Scheduler 配置/open 时被拒绝。
 
-媒体对象规范化不会下载文件。Item 附件下载规划为独立的 v5 变更；它与 Browser Downloader 并列，
-但不依赖 Browser 实现。
+媒体对象规范化本身不会下载文件。需要下载的媒体字段设置
+`node.fields.<name>.download: true`，在 `before_item.download` 阶段执行。Spider 级
+`spider.attachment` 选择默认本地实现或注册的 `AttachmentDownloader`；附件下载重试耗尽后只记录日志，
+不让当前 Request 失败。默认单个附件超时 60 秒，响应体上限为 64 MiB。
 
 后端或 API 在保存配置前，可以通过 `Config::validate()` 校验完整规则，也可以通过
 `middleware::check(&spec)` 单独校验一条中间件配置。

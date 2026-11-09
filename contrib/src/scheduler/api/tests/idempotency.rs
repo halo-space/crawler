@@ -8,7 +8,7 @@ async fn cancelled_open_reuses_the_pending_registration_key() {
         policy(),
         Response::held_json(
             "200 OK",
-            json!({"code": 200, "message": "success", "data": "worker-token"}),
+            json!({"code": 200, "message": "success", "items": "worker-token"}),
             reached,
             registration_continued,
         ),
@@ -97,9 +97,13 @@ async fn claim_reuses_a_key_until_a_response_is_confirmed() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),
@@ -107,15 +111,13 @@ async fn claim_reuses_a_key_until_a_response_is_confirmed() {
     responses.extend((0..3).map(|_| {
         Response::json(
             "503 Service Unavailable",
-            json!({"error": {
-                "code": "unavailable",
-                "id": null,
-                "field": null,
-                "message": "offline"
-            }}),
+            json!({"code": 1000, "message": "offline", "items": {"kind": "unavailable", "id": null, "field": null}}),
         )
     }));
-    responses.push(Response::json("200 OK", json!({"requests": []})));
+    responses.push(Response::json(
+        "200 OK",
+        json!({"code": 200, "message": "success", "items": []}),
+    ));
     responses.push(offline());
     let (base_url, received, server) = server(responses);
     let api = api(base_url, "token");
@@ -153,7 +155,10 @@ async fn invalid_claim_response_reuses_the_key_until_the_response_is_decoded() {
             body: b"not-json".to_vec(),
             wait: None,
         },
-        Response::json("200 OK", json!({"requests": []})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": []}),
+        ),
         offline(),
     ]);
     let api = api(base_url, "token");
@@ -180,8 +185,16 @@ async fn cancelled_claim_reuses_the_key_on_the_next_call() {
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::held_json("200 OK", json!({"requests": []}), reached, claim_continued),
-        Response::json("200 OK", json!({"requests": []})),
+        Response::held_json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": []}),
+            reached,
+            claim_continued,
+        ),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": []}),
+        ),
         offline(),
     ]);
     let api = Arc::new(api(base_url, "token"));
@@ -217,11 +230,11 @@ async fn concurrent_claims_complete_in_order_with_independent_keys() {
         registered(),
         Response::json(
             "200 OK",
-            json!({"requests": [claimed(net::request::Snapshot::try_from(first).unwrap())]}),
+            json!({"code": 200, "message": "success", "items": [claimed(net::request::Snapshot::try_from(first).unwrap())]}),
         ),
         Response::json(
             "200 OK",
-            json!({"requests": [claimed(net::request::Snapshot::try_from(second).unwrap())]}),
+            json!({"code": 200, "message": "success", "items": [claimed(net::request::Snapshot::try_from(second).unwrap())]}),
         ),
         offline(),
     ]);
@@ -254,9 +267,13 @@ async fn init_retry_reuses_the_deterministic_body_key() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),
@@ -304,9 +321,13 @@ async fn independent_release_invocations_use_fresh_keys() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),
@@ -384,7 +405,7 @@ async fn cancelled_release_reuses_the_key_on_the_next_call() {
         registered(),
         Response::held_json(
             "204 No Content",
-            serde_json::Value::Null,
+            json!({"code": 200, "message": "success", "items": {}}),
             reached,
             release_continued,
         ),

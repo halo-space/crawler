@@ -44,7 +44,7 @@ pub(super) struct Register {
     pub host: String,
     pub version: String,
     pub modes: Vec<net::Mode>,
-    pub concurrency: usize,
+    pub limit: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,17 +135,15 @@ pub(super) struct Policy {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct WorkerResponse {
+pub(super) struct ApiResponse<T> {
     pub code: i32,
     pub message: String,
-    pub data: Value,
+    pub items: T,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ClaimResponse {
-    pub requests: Vec<Claimed>,
-}
+pub(super) type WorkerResponse = ApiResponse<Value>;
+pub(super) type ClaimResponse = ApiResponse<Vec<Claimed>>;
+pub(super) type PendingResponse = ApiResponse<bool>;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -165,27 +163,6 @@ pub(super) struct Execution {
     pub lease_time: i64,
     pub retry_count: i32,
     pub failed_workers: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PendingResponse {
-    pub pending: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ErrorEnvelope {
-    pub error: ErrorBody,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ErrorBody {
-    pub code: String,
-    pub id: Option<String>,
-    pub field: Option<String>,
-    pub message: String,
 }
 
 pub(super) fn canonical_digest<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {

@@ -1,5 +1,6 @@
 use base64::Engine as _;
 
+use spider::Item;
 use spider::middleware::dedup::{Config, Ttl};
 use spider::middleware::{BoxFuture, Middleware, Next, Spec};
 use spider::net::Request;
@@ -77,8 +78,8 @@ impl Redis {
 }
 
 impl Middleware for Redis {
-    fn order(&self, _hook: &str) -> i32 {
-        400
+    fn order(&self, hook: &str) -> i32 {
+        if hook == "before_item" { 100 } else { 400 }
     }
 
     fn before_scheduler<'a>(
@@ -107,6 +108,29 @@ impl Middleware for Redis {
                 Ok(Next::Skip)
             } else {
                 Ok(Next::Continue(request))
+            }
+        })
+    }
+
+    fn before_item<'a>(
+        &'a self,
+        item: Box<dyn Item>,
+        spec: &'a Spec,
+    ) -> BoxFuture<'a, Next<Box<dyn Item>>> {
+        Box::pin(async move {
+            let config = Config::from_spec(spec)?;
+            if !matches!(config.ttl(), Ttl::Permanent) {
+                return Err(invalid(
+                    "Redis Bloom does not support finite Item Dedup ttl; use -1 for permanent",
+                ));
+            }
+            let fingerprint = config
+                .fingerprint_item(item.as_ref())?
+                .expect("permanent Dedup configuration always produces an Item fingerprint");
+            if self.contains_or_insert(&fingerprint).await? {
+                Ok(Next::Skip)
+            } else {
+                Ok(Next::Continue(item))
             }
         })
     }

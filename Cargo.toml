@@ -1,5 +1,12 @@
+[package]
+name = "spider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
 [workspace]
-members = ["spider", "contrib", "examples", "macros"]
+members = ["contrib", "examples", "macros", "worker"]
 resolver = "3"
 
 [workspace.package]
@@ -40,6 +47,7 @@ url = "2"
 uuid = { version = "1", features = ["v7"] }
 validator = { git = "https://github.com/halo-space/validator.git", rev = "2b3128a" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "brotli", "deflate", "stream"] }
+rustls = { version = "0.23", features = ["ring"] }
 secrecy = "0.10"
 cookie_store = { version = "0.22.1", default-features = false, features = ["serde"] }
 psl = "2.1.219"
@@ -49,3 +57,46 @@ strsim = "0.11"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "visit-mut"] }
+
+[features]
+default = []
+runtime-tracing = ["dep:fastrace", "fastrace/enable"]
+
+[dependencies]
+async-openai = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+cookie_store = { workspace = true }
+encoding_rs = { workspace = true }
+erased-serde = { workspace = true }
+fastrace = { workspace = true, optional = true }
+futures-util = { workspace = true }
+http = { workspace = true }
+indexmap = { workspace = true }
+kameo = { workspace = true }
+mime = { workspace = true }
+psl = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+scrape-core = { workspace = true }
+secrecy = { workspace = true }
+selectors = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_path = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+thirtyfour = { workspace = true }
+strsim = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tower = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+validator = { workspace = true }
+
+[dev-dependencies]
+flate2 = { workspace = true }
+macros = { path = "macros" }

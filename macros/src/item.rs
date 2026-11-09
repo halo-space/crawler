@@ -88,6 +88,30 @@ fn try_expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             fn state_mut(&mut self) -> &mut ::spider::item::State {
                 &mut self.state
             }
+
+            fn values(
+                &self,
+            ) -> ::std::result::Result<::spider::item::Values, ::spider::item::Error> {
+                let value = ::serde_json::to_value(self)
+                    .map_err(::spider::item::Error::Serialize)?;
+                let ::serde_json::Value::Object(values) = value else {
+                    return Err(::spider::item::Error::Message(
+                        "Item serialization must produce an object".to_string(),
+                    ));
+                };
+                Ok(values.into_iter().collect())
+            }
+
+            fn replace_values(
+                &mut self,
+                values: ::spider::item::Values,
+            ) -> ::std::result::Result<(), ::spider::item::Error> {
+                let state = self.state.clone();
+                let mut replacement: Self = ::spider::item::deserialize(values)?;
+                replacement.state = state;
+                *self = replacement;
+                Ok(())
+            }
         }
     })
 }

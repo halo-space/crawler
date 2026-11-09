@@ -1,8 +1,8 @@
-# crawler
+# Harbor
 
 [简体中文](README.zh-CN.md) | English
 
-`crawler` is a Rust crawler runtime for code-driven and YAML Rules-driven workloads. The same Engine
+`Harbor` is a Rust crawler runtime for code-driven and YAML Rules-driven workloads. The same Engine
 contract supports local execution and durable Redis or MySQL 9 scheduling.
 
 ## Highlights
@@ -35,6 +35,19 @@ Run the Rules example:
 cargo run -p examples --bin rules
 ```
 
+Run the standalone Worker service after configuring its Master API connection:
+
+```bash
+HARBOR_MASTER_URL=https://master.example.com/ \
+HARBOR_TOKEN=... \
+HARBOR_WORKER_ID=worker-01 \
+HARBOR_WORKER_LIMIT=5 \
+cargo run -p harbor-worker
+```
+
+The Worker receives Requests from the Master API and restores the Rules graph from each Trace
+Snapshot. It does not read the Master database directly. `HARBOR_WORKER_LIMIT` is the initial single-claim batch size; the Master heartbeat can change the runtime value for later claims.
+
 The smallest Engine assembly is:
 
 ```rust
@@ -57,6 +70,7 @@ replaceable.
 | `spider` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
 | `macros` | Spider, handler, and Item derive macros |
 | `contrib` | Redis/MySQL Schedulers, the Worker-side API Scheduler adapter, and distributed middleware implementations |
+| `harbor-worker` | Standalone Worker service that connects to Master API, runs the shared Engine, and writes Items through a Worker-owned Store |
 | `examples` | Executable code-mode and Rules-mode examples |
 
 ## Documentation

@@ -1,8 +1,8 @@
-# Crawler Usage Guide
+# Harbor Usage Guide
 
 [Project README](../README.md) | [简体中文](usage.zh-CN.md) | English
 
-`crawler` is a Rust crawler runtime. Its default single-process topology uses the in-memory
+`Harbor` is a Rust crawler runtime. Its default single-process topology uses the in-memory
 Scheduler, HTTP downloader, middleware hooks, async Spider handlers, CSS healing, explicit AI
 selectors, and local JSONL item output. `contrib` provides Redis/MySQL Schedulers and distributed
 middleware while preserving the same Engine contract. The runtime includes Task/Trace run seeds,
@@ -18,6 +18,18 @@ defines a Spider with the `#[spider]` macro, extracts an Item, and runs an Engin
 
 ```bash
 cargo run -p examples --bin basic
+```
+
+The standalone Worker service is in the `harbor-worker` crate. It connects to the Master API,
+consumes already-published Requests, restores Rules from Trace Snapshots, and writes Items through
+the Worker-owned Store:
+
+```bash
+HARBOR_MASTER_URL=https://master.example.com/ \
+HARBOR_TOKEN=... \
+HARBOR_WORKER_ID=worker-01 \
+HARBOR_WORKER_LIMIT=5 \
+cargo run -p harbor-worker
 ```
 
 The macro supplies the internal event sender, so application code only defines Spider fields and
@@ -212,7 +224,7 @@ from being returned.
 In rules mode, extractor expressions determine result cardinality directly: zero matches produce
 `null`, one match produces a scalar or element object, and multiple matches produce an array.
 There is no separate `select` option. Media fields are declared with
-`item.fields.<name>.kind = image | video | audio`; crawler normalizes them into fixed media objects
+`node.fields.<name>.kind = image | video | audio`; crawler normalizes them into fixed media objects
 before validator processes `item.schema`.
 
 Code mode parses HTML through `response.css()?` and uses the native `scrape_core::Soup` and `Tag`
@@ -249,21 +261,20 @@ spider:
 graph:
   nodes:
     index:
-      parse:
-        fields:
-          quotes:
-            required: true
-            extractors:
-              - kind: json
-                expr: $.data.diff[*]
-          stock_codes:
-            extractors:
-              - kind: json
-                expr: $.data.diff[*].f12
-          total:
-            extractors:
-              - kind: json
-                expr: $.data.total
+      fields:
+        quotes:
+          required: true
+          extractors:
+            - kind: json
+              expr: $.data.diff[*]
+        stock_codes:
+          extractors:
+            - kind: json
+              expr: $.data.diff[*].f12
+        total:
+          extractors:
+            - kind: json
+              expr: $.data.total
   edges:
     - from: index
       kind: item
@@ -355,6 +366,10 @@ non-empty Item-edge `vals` value overrides the same field. It then constructs th
 the derived `Item::from_values`, assigns its SchemaKey, and calls the default `item` function or the edge's `fn`.
 Request and bind templates parse their source once; braces introduced by a resolved value remain data
 and are never interpreted as another template expression.
+When a bind-template variable resolves to an array, the template renders once per array element and
+returns a URL array; multiple array variables must have the same length, while scalar variables are
+broadcast to every rendered value. This is the batching form used when one list page fans out to
+several detail-page requests per row.
 For every Rules Request, the shared Executor first calls the Rust Spider's `index(response.clone())`
 business entry and then interprets the DSL node selected by `Request.node`; this is one Executor path,
 not a Code/Rules Executor swap.
@@ -520,7 +535,7 @@ install a Reporter:
 ```toml
 [dependencies]
 fastrace = { version = "0.7.18", default-features = false, features = ["enable"] }
-spider = { path = "../spider", features = ["runtime-tracing"] }
+spider = { path = "..", features = ["runtime-tracing"] }
 ```
 
 When using the API Scheduler, enable `contrib/runtime-tracing` instead. It also enables
@@ -756,8 +771,11 @@ with `Memory::with_modes(...)`; it does not register or heartbeat. Redis, MySQL,
 ID, host, and version values on the Scheduler, while `with_modes(...)` freezes their download
 capabilities. Missing metadata or an empty mode set is rejected during Scheduler configuration/open.
 
-Media normalization does not download files. Item attachment downloading is planned as an
-independent v5 change alongside, but not dependent on, the Browser Downloader.
+Media normalization does not download files by itself. Set `node.fields.<name>.download: true` for
+the media fields that should be downloaded during `before_item.download`. The Spider-level
+`spider.attachment` configuration selects the local default or a registered custom
+`AttachmentDownloader`; its default per-file timeout is 60 seconds and body limit is 64 MiB.
+Exhausted attachment retries are logged and do not fail the current Request.
 
 Backend and API integrations can validate a complete rules document with `Config::validate()` or
 validate one middleware declaration with `middleware::check(&spec)` before saving it.

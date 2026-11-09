@@ -4,7 +4,7 @@ use super::*;
 fn missing_error_id_is_a_protocol_error_not_a_fake_request_id() {
     let error = client::map_error(
         reqwest::StatusCode::CONFLICT,
-        br#"{"error":{"code":"version_mismatch","id":null,"field":null,"message":"stale"}}"#,
+        br#"{"code":1000,"message":"stale","items":{"kind":"version_mismatch","id":null,"field":null}}"#,
     );
     assert!(
         matches!(error, scheduler::Error::Message(message) if message.contains("omitted a required request id"))
@@ -14,7 +14,7 @@ fn missing_error_id_is_a_protocol_error_not_a_fake_request_id() {
 fn machine_error_code_keeps_the_master_request_id() {
     let error = client::map_error(
         reqwest::StatusCode::CONFLICT,
-        br#"{"error":{"code":"version_mismatch","id":"request-1","field":null,"message":"stale"}}"#,
+        br#"{"code":1000,"message":"stale","items":{"kind":"version_mismatch","id":"request-1","field":null}}"#,
     );
     assert!(matches!(error, scheduler::Error::VersionMismatch(id) if id == "request-1"));
 }
@@ -23,7 +23,7 @@ fn machine_error_code_keeps_the_master_request_id() {
 fn generic_invalid_request_is_not_a_protocol_error() {
     let error = client::map_error(
         reqwest::StatusCode::BAD_REQUEST,
-        br#"{"error":{"code":"invalid_request","id":null,"field":null,"message":"request payload is invalid"}}"#,
+        br#"{"code":1000,"message":"request payload is invalid","items":{"kind":"invalid_request","id":null,"field":null}}"#,
     );
 
     assert!(
@@ -72,13 +72,20 @@ async fn propagates_one_traceparent_across_api_retries() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),
-        Response::json("200 OK", json!(null)),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": null}),
+        ),
         offline(),
     ]);
     let api = api(base_url, "token");
@@ -122,13 +129,20 @@ async fn trace_id_uses_one_escaped_path_segment() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 10000,
+            }
             }),
         ),
         registered(),
-        Response::json("200 OK", json!(null)),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": null}),
+        ),
         offline(),
     ]);
     let api = api(base_url, "token");
@@ -151,8 +165,14 @@ async fn open_registers_once_and_requests_use_the_frozen_worker() {
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::json("200 OK", json!({"requests": []})),
-        Response::json("200 OK", json!({"pending": true})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": []}),
+        ),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": true}),
+        ),
         offline(),
     ]);
     let api = api(base_url, "token");
@@ -179,7 +199,7 @@ async fn open_registers_once_and_requests_use_the_frozen_worker() {
             "host": WORKER_HOST,
             "version": WORKER_VERSION,
             "modes": ["http"],
-            "concurrency": CONCURRENCY
+            "limit": CONCURRENCY
         })
     );
     let claim = serde_json::from_slice::<serde_json::Value>(&requests[2].body).unwrap();
@@ -202,7 +222,7 @@ async fn worker_conflict_fails_open_without_starting_a_lifecycle() {
         policy(),
         Response::json(
             "200 OK",
-            json!({"code": 100, "message": "worker_id is already online", "data": null}),
+            json!({"code": 1000, "message": "worker_id is already online", "items": {"kind": "worker_conflict", "id": WORKER_ID}}),
         ),
     ]);
     let api = api(base_url, "token");
@@ -264,15 +284,22 @@ async fn heartbeat_failure_pauses_claim_and_recovery_resumes_it() {
         Response::json(
             "200 OK",
             json!({
+            "code": 200,
+            "message": "success",
+            "items": {
                 "lease_timeout_ms": 30000,
                 "lease_interval_ms": 10000,
                 "heartbeat_interval_ms": 200,
+            }
             }),
         ),
         registered(),
         unavailable("heartbeat unavailable"),
-        worker_ok(json!(null)),
-        Response::json("200 OK", json!({"requests": []})),
+        worker_ok(json!({"limit": 2})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": []}),
+        ),
         offline(),
     ]);
     let api = api(base_url, "token");
@@ -289,7 +316,7 @@ async fn heartbeat_failure_pauses_claim_and_recovery_resumes_it() {
     })
     .await
     .unwrap();
-    assert!(api.next_requests(1).await.unwrap().is_empty());
+    assert!(api.next_requests(CONCURRENCY).await.unwrap().is_empty());
 
     tokio::time::timeout(Duration::from_secs(2), async {
         while !api
@@ -302,7 +329,7 @@ async fn heartbeat_failure_pauses_claim_and_recovery_resumes_it() {
     })
     .await
     .unwrap();
-    assert!(api.next_requests(1).await.unwrap().is_empty());
+    assert!(api.next_requests(CONCURRENCY).await.unwrap().is_empty());
     api.close().await.unwrap();
 
     let requests = received.recv().unwrap();
@@ -335,5 +362,13 @@ async fn heartbeat_failure_pauses_claim_and_recovery_resumes_it() {
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&heartbeat.body).unwrap(),
         json!({"worker_id": WORKER_ID, "token": "worker-token"})
+    );
+    let claim = requests
+        .iter()
+        .find(|request| request.path.ends_with("/requests/claim"))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&claim.body).unwrap(),
+        json!({"limit": 2, "worker_id": WORKER_ID, "modes": ["http"]})
     );
 }

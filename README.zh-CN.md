@@ -1,8 +1,8 @@
-# crawler
+# Harbor
 
 简体中文 | [English](README.md)
 
-`crawler` 是一个同时支持代码模式与 YAML Rules 模式的 Rust 爬虫运行时。同一套 Engine 合同可以运行在
+`Harbor` 是一个同时支持代码模式与 YAML Rules 模式的 Rust 爬虫运行时。同一套 Engine 合同可以运行在
 本地内存调度、Redis 持久化调度与 MySQL 9 持久化调度中。
 
 ## 核心能力
@@ -31,6 +31,19 @@ cargo run -p examples --bin basic
 cargo run -p examples --bin rules
 ```
 
+运行独立 Worker 服务前，先配置 Master API 连接：
+
+```bash
+HARBOR_MASTER_URL=https://master.example.com/ \
+HARBOR_TOKEN=... \
+HARBOR_WORKER_ID=worker-01 \
+HARBOR_WORKER_LIMIT=5 \
+cargo run -p harbor-worker
+```
+
+Worker 通过 Master API 领取 Request，并从每个 Trace Snapshot 恢复 Rules 图；它不会直接访问
+Master 数据库。`HARBOR_WORKER_LIMIT` 是首次注册时的单次领取上限，后续心跳可以动态更新后续领取的数量。
+
 最小 Engine 装配方式：
 
 ```rust
@@ -52,6 +65,7 @@ engine.start().await?;
 | `spider` | 核心运行时、Engine、Scheduler 合同、HTTP 下载、Rules、Selector 与 Item Store |
 | `macros` | Spider、处理函数与 Item 派生宏 |
 | `contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式中间件实现 |
+| `harbor-worker` | 独立 Worker 服务，连接 Master API，运行共享 Engine，并通过 Worker 自己的 Store 写入 Item |
 | `examples` | 可直接运行的代码模式与 Rules 模式示例 |
 
 ## 文档

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use spider::{scheduler, trace};
-
 use super::super::Api;
+use spider::{scheduler, trace};
 
 impl Api {
     pub(in crate::scheduler::api) async fn load_trace(
@@ -20,11 +19,19 @@ impl Api {
         }
 
         validate_id(trace_id)?;
-        let snapshot = self
+        let response = self
             .client
-            .get_segments::<Option<trace::Snapshot>>(&["v1", "worker", "traces", trace_id])
+            .get_segments::<super::super::wire::ApiResponse<Option<trace::Snapshot>>>(&[
+                "v1", "worker", "traces", trace_id,
+            ])
             .await?;
-        let Some(snapshot) = snapshot else {
+        if response.code != 200 {
+            return Err(scheduler::Error::Message(format!(
+                "Master trace failed with code {}: {}",
+                response.code, response.message
+            )));
+        }
+        let Some(snapshot) = response.items else {
             return Ok(None);
         };
         snapshot

@@ -21,7 +21,7 @@ async fn damaged_snapshots_are_failed_without_withholding_valid_claims() {
         registered(),
         Response::json(
             "200 OK",
-            json!({"requests": [valid, damaged_request, damaged_trace]}),
+            json!({"code": 200, "message": "success", "items": [valid, damaged_request, damaged_trace]}),
         ),
         Response::empty("204 No Content"),
         Response::empty("204 No Content"),
@@ -70,7 +70,7 @@ async fn damaged_execution_state_is_failed_instead_of_released() {
         registered(),
         Response::json(
             "200 OK",
-            json!({"requests": [damaged_retry, damaged_workers]}),
+            json!({"code": 200, "message": "success", "items": [damaged_retry, damaged_workers]}),
         ),
         Response::empty("204 No Content"),
         Response::empty("204 No Content"),
@@ -101,7 +101,7 @@ async fn a_duplicate_claimed_request_is_rejected_and_released_once() {
         registered(),
         Response::json(
             "200 OK",
-            json!({"requests": [claimed(snapshot.clone()), claimed(snapshot)]}),
+            json!({"code": 200, "message": "success", "items": [claimed(snapshot.clone()), claimed(snapshot)]}),
         ),
         Response::empty("204 No Content"),
         offline(),
@@ -130,7 +130,7 @@ async fn an_over_limit_claim_is_fully_released_before_the_protocol_error() {
         registered(),
         Response::json(
             "200 OK",
-            json!({"requests": [
+            json!({"code": 200, "message": "success", "items": [
                 claimed(net::request::Snapshot::try_from(first).unwrap()),
                 claimed(net::request::Snapshot::try_from(second).unwrap())
             ]}),
@@ -166,7 +166,10 @@ async fn recovery_settlement_retries_are_bounded_without_withholding_a_valid_cla
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::json("200 OK", json!({"requests": [valid, damaged]})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": [valid, damaged]}),
+        ),
         Response::empty("204 No Content"),
         unavailable("failure unavailable"),
         unavailable("failure unavailable"),
@@ -197,7 +200,10 @@ async fn a_recovery_settlement_error_is_returned_when_nothing_is_executable() {
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::json("200 OK", json!({"requests": [damaged]})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": [damaged]}),
+        ),
         Response::empty("204 No Content"),
         unavailable("failure unavailable"),
         unavailable("failure unavailable"),
@@ -229,7 +235,10 @@ async fn a_temporary_trace_read_releases_without_consuming_request_retry() {
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::json("200 OK", json!({"requests": [request]})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": [request]}),
+        ),
         unavailable("Trace store unavailable"),
         unavailable("Trace store unavailable"),
         unavailable("Trace store unavailable"),
@@ -261,7 +270,10 @@ async fn a_failed_temporary_trace_release_still_does_not_fail_the_request() {
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::json("200 OK", json!({"requests": [request]})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": [request]}),
+        ),
         unavailable("Trace store unavailable"),
         unavailable("Trace store unavailable"),
         unavailable("Trace store unavailable"),
@@ -294,8 +306,14 @@ async fn a_missing_trace_is_released_without_failing_the_request() {
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::json("200 OK", json!({"requests": [request]})),
-        Response::json("200 OK", serde_json::Value::Null),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": [request]}),
+        ),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": null}),
+        ),
         Response::empty("204 No Content"),
         offline(),
     ]);
@@ -323,7 +341,10 @@ async fn an_incompatible_claim_is_released_without_failing_the_request() {
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::json("200 OK", json!({"requests": [request]})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": [request]}),
+        ),
         Response::empty("204 No Content"),
         offline(),
     ]);
@@ -355,10 +376,17 @@ async fn requests_with_the_same_cold_trace_share_one_read() {
     let (base_url, received, server) = server(vec![
         policy(),
         registered(),
-        Response::json("200 OK", json!({"requests": [first, second]})),
         Response::json(
             "200 OK",
-            serde_json::to_value(Some(trace::Snapshot::code("task-1"))).unwrap(),
+            json!({"code": 200, "message": "success", "items": [first, second]}),
+        ),
+        Response::json(
+            "200 OK",
+            json!({
+                "code": 200,
+                "message": "success",
+                "items": serde_json::to_value(Some(trace::Snapshot::code("task-1"))).unwrap()
+            }),
         ),
         offline(),
     ]);
@@ -391,7 +419,7 @@ async fn a_later_inline_trace_restores_an_earlier_cold_claim_without_remote_load
     cold["trace"] = serde_json::Value::Null;
 
     let (base_url, received, server) = trace_unavailable_server(json!({
-        "requests": [cold, inline]
+        "code": 200, "message": "success", "items": [cold, inline]
     }));
     let api = api(base_url, "token");
     api.open(CONCURRENCY).await.unwrap();
@@ -433,16 +461,27 @@ async fn different_cold_traces_load_concurrently_within_the_handoff_budget() {
     let custom_policy = Response::json(
         "200 OK",
         json!({
+        "code": 200,
+        "message": "success",
+        "items": {
             "lease_timeout_ms": 3000,
             "lease_interval_ms": 1000,
             "heartbeat_interval_ms": 10000,
+        }
         }),
     );
-    let trace = serde_json::to_value(Some(trace::Snapshot::code("task-1"))).unwrap();
+    let trace = json!({
+        "code": 200,
+        "message": "success",
+        "items": serde_json::to_value(Some(trace::Snapshot::code("task-1"))).unwrap()
+    });
     let (base_url, received, server) = concurrent_server(vec![
         custom_policy,
         registered(),
-        Response::json("200 OK", json!({"requests": [first, second]})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": [first, second]}),
+        ),
         Response::held_json("200 OK", trace.clone(), first_reached_tx, first_resume_rx),
         Response::held_json("200 OK", trace, second_reached_tx, second_resume_rx),
         offline(),
@@ -492,19 +531,26 @@ async fn a_slow_recovery_failure_does_not_withhold_a_valid_peer() {
     let custom_policy = Response::json(
         "200 OK",
         json!({
+        "code": 200,
+        "message": "success",
+        "items": {
             "lease_timeout_ms": 300,
             "lease_interval_ms": 200,
             "heartbeat_interval_ms": 10000,
+        }
         }),
     );
     let (base_url, received, server) = concurrent_server(vec![
         custom_policy,
         registered(),
-        Response::json("200 OK", json!({"requests": [valid, damaged]})),
+        Response::json(
+            "200 OK",
+            json!({"code": 200, "message": "success", "items": [valid, damaged]}),
+        ),
         Response::empty("204 No Content"),
         Response::held_json(
             "204 No Content",
-            serde_json::Value::Null,
+            json!({"code": 200, "message": "success", "items": {}}),
             failure_reached_tx,
             failure_resume_rx,
         ),

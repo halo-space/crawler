@@ -115,6 +115,14 @@ impl Api {
         Ok(self)
     }
 
+    pub fn with_limit(mut self, limit: usize) -> Result<Self, Error> {
+        self.require_configurable()?;
+        self.worker
+            .set_limit(limit)
+            .map_err(|error| Error::Config(error.to_string()))?;
+        Ok(self)
+    }
+
     fn require_configurable(&self) -> Result<(), Error> {
         if !self.runtime.is_configurable() {
             Err(Error::Config(
@@ -189,10 +197,17 @@ impl scheduler::Scheduler for Api {
             .check_concurrency(concurrency)
             .map_err(scheduler::Error::Message)?;
 
-        let policy = self
+        let policy_response = self
             .client
-            .get::<super::wire::Policy>("v1/worker/policy")
+            .get::<super::wire::ApiResponse<super::wire::Policy>>("v1/worker/policy")
             .await?;
+        if policy_response.code != 200 {
+            return Err(scheduler::Error::Message(format!(
+                "Master policy failed with code {}: {}",
+                policy_response.code, policy_response.message
+            )));
+        }
+        let policy = policy_response.items;
         let remote = scheduler::Lease::new(
             Duration::from_millis(policy.lease_timeout_ms),
             Duration::from_millis(policy.lease_interval_ms),
@@ -224,6 +239,7 @@ impl scheduler::Scheduler for Api {
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
         self.runtime.set_token(token.clone());
+        self.runtime.set_claim_limit(self.worker.limit(concurrency));
         self.runtime.can_claim.store(true, Ordering::Release);
         self.runtime.opened.store(true, Ordering::Release);
         self.runtime.set_heartbeat(worker::start_heartbeat(
@@ -280,6 +296,10 @@ impl scheduler::Scheduler for Api {
         if !self.runtime.can_claim.load(Ordering::Acquire) {
             return Ok(Vec::new());
         }
+        let limit = self
+            .runtime
+            .claim_limit()
+            .map_or(limit, |remote| limit.min(remote));
         self.claim(limit).await
     }
 

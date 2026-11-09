@@ -37,35 +37,42 @@ impl Api {
             self.runtime.confirm_claim(&key);
         }
         let response = result?;
-        if response.requests.len() > limit {
+        if response.code != 200 {
+            return Err(scheduler::Error::Message(format!(
+                "Master claim failed with code {}: {}",
+                response.code, response.message
+            )));
+        }
+        let claimed_requests = response.items;
+        if claimed_requests.len() > limit {
             let error = scheduler::Error::Message(format!(
                 "Master returned {} Requests for claim limit {limit}",
-                response.requests.len()
+                claimed_requests.len()
             ));
             return self
-                .release_after_protocol_error(&response.requests, error, lease_deadline)
+                .release_after_protocol_error(&claimed_requests, error, lease_deadline)
                 .await;
         }
 
-        let mut ids = HashSet::with_capacity(response.requests.len());
-        for claimed in &response.requests {
+        let mut ids = HashSet::with_capacity(claimed_requests.len());
+        for claimed in &claimed_requests {
             if !ids.insert(claimed.identity.id.as_str()) {
                 let error = scheduler::Error::InvalidRequest {
                     id: claimed.identity.id.clone(),
                     message: "Master returned a duplicate Request in one claim".to_string(),
                 };
                 return self
-                    .release_after_protocol_error(&response.requests, error, lease_deadline)
+                    .release_after_protocol_error(&claimed_requests, error, lease_deadline)
                     .await;
             }
         }
 
         let traces = self
-            .prepare_traces(&response.requests, handoff_deadline)
+            .prepare_traces(&claimed_requests, handoff_deadline)
             .await;
-        let mut requests = Vec::with_capacity(response.requests.len());
+        let mut requests = Vec::with_capacity(claimed_requests.len());
         let mut recoveries = Vec::new();
-        for claimed in &response.requests {
+        for claimed in &claimed_requests {
             let restored = self
                 .restore_prepared(claimed, worker_id, &body.modes, &traces)
                 .await;
@@ -261,7 +268,15 @@ impl Api {
         self.client
             .post::<_, wire::PendingResponse>("v1/worker/requests/pending", &body, None)
             .await
-            .map(|response| response.pending)
+            .and_then(|response| {
+                if response.code != 200 {
+                    return Err(scheduler::Error::Message(format!(
+                        "Master pending failed with code {}: {}",
+                        response.code, response.message
+                    )));
+                }
+                Ok(response.items)
+            })
     }
 
     #[cfg(test)]

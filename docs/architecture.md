@@ -1,18 +1,19 @@
-# crawler Architecture and Feature Overview
+# Harbor Architecture and Feature Overview
 
 This document describes the features implemented by the current source tree, the core runtime model, and the extension boundaries. It is a standalone architecture overview.
 
 ## 1. Positioning and Current Scope
 
-`crawler` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` provides Redis 7 standalone and MySQL 9 Schedulers for durable multi-Worker queues. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
+`Harbor` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` provides Redis 7 standalone and MySQL 9 Schedulers for durable multi-Worker queues, and `harbor-worker` provides the standalone Worker service entrypoint. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
 
-The workspace contains four crates:
+The workspace contains five crates:
 
 | Crate | Responsibility |
 | --- | --- |
 | `spider` | Core runtime, public data objects, extension contracts, default Memory Scheduler, and HTTP Downloader |
 | `macros` | The `#[spider]` procedural macro, including code-mode construction, node registration, and dispatch bindings |
 | `contrib` | Replaceable Redis/MySQL Schedulers, Worker-side API Scheduler adapter, and distributed Middleware implementations |
+| `harbor-worker` | Standalone Worker service that assembles the API Scheduler, shared Engine, Downloader, and Worker-owned Item Store |
 | `examples` | Runnable code-mode and Rules-mode examples |
 
 ### 1.1 Capability Status
@@ -32,19 +33,21 @@ The workspace contains four crates:
 | AI Selector | Implemented | Explicit OpenAI-compatible JSON-object extraction, independent of CSS Healing |
 | AI runtime configuration | Implemented | One reusable Worker-local `ai::OpenAI` provider is injected with `Engine::with_ai`; provider configuration does not enter Rules or Trace snapshots |
 | Middleware | Implemented | Lifecycle Registry, Worker-local Memory implementations, and optional RedisBloom Dedup/shared Redis RateLimit implementations |
-| Item Store | Implemented | Independent `open / close / submit(&Payload)` persistence contract; default JSONL output and Jsonl-owned failure snapshots; attachment download is planned for v5 |
+| Item Store | Implemented | Independent `open / close / submit(&Payload)` persistence contract; default JSONL output and Jsonl-owned failure snapshots |
 | Capability-aware claiming | Implemented | Each Scheduler owns frozen Request modes; claim filtering remains backend-atomic |
 | Redis Scheduler | Implemented | Redis 7+ standalone only; complete namespaced Scheduler/Init contract, Worker registration/heartbeat, and Lua-atomic transitions |
 | MySQL Scheduler | Implemented | MySQL 9; DSN-database isolation, operator-installed schema, transactional claim/settlement, and Worker registration/heartbeat |
 | API Scheduler adapter | Implemented | Worker-side Scheduler with registration/heartbeat over an external Master API; the Master service belongs to a separate project |
+| Standalone Worker service | Implemented | `harbor-worker` reads Worker configuration from environment variables, consumes Master API Requests, restores Rules from Trace Snapshots, and writes local JSONL Items |
 | Runtime tracing | Implemented | Optional per-Request `fastrace` roots and bounded lifecycle spans; distinct from business `trace_id` |
 
 XPath has been removed from the roadmap. CSS is the sole HTML selector path; the project does not maintain a partial XPath implementation.
 Healing is not a generic selector stage. Only CSS exposes Healing; Regex and JSON keep their exact
 selection semantics, and XML selection is not currently implemented.
 
-The crawler workspace does not contain or implement the Master service. It owns only the Worker-side
-API Scheduler adapter and its client-side HTTP contract. The Master service, server-side protocol,
+The Harbor workspace does not contain or implement the Master service. It owns the Worker-side
+API Scheduler adapter, its client-side HTTP contract, and the `harbor-worker` process that consumes
+that contract. The Master service, server-side protocol,
 database, migrations, Cron, Control API, frontend, and their design belong to a separate project.
 Item persistence remains strictly inside the Worker: `item::Jsonl` is the default and
 `.with_store(...)` may replace it with a Worker-owned business backend. One Engine run has exactly one
@@ -532,6 +535,12 @@ future claims. It is deliberately separate from Request execution ownership: goi
 cancels a Request already returned by `next_requests`, and Request lease refresh never proves that the
 Worker process is registered online.
 
+The API heartbeat response also returns the current Master-managed claim `limit`. The API Scheduler
+updates its local runtime limit immediately; each later claim uses the smaller of that limit and the
+Engine-provided batch limit. This changes only future batch sizes and never changes active Request
+execution or Engine concurrency. The Worker accepts only the strict `code / message / items` response
+envelope; legacy response fields are not supported.
+
 API claim and release operations retain their `Idempotency-Key` while the result is uncertain. A
 transport error, timeout, or successful response that cannot be decoded reuses the same key on the
 next claim with identical parameters or release with the same lease identity. A different claim is
@@ -649,7 +658,9 @@ Session cookies, LocalStorage, and SessionStorage are Worker-local temporary sta
 Snapshot and are not a cross-Worker recovery source. Browser `Response.body` is the DOM rendered after JavaScript
 execution. Main-document status and headers come from CDP Network events, and optional `Request.wait_selector`
 waits for a CSS selector. Browser disconnects, navigation failures, wait timeouts, and page-read failures destroy
-the Session; `error_download.retry` supplies the backoff and retry policy.
+the Session; `error_download.retry` supplies the backoff and retry policy. Browser Request headers are restricted
+to non-credential cache and negotiation headers; Cookie state is handled separately, and unsupported headers are
+rejected before navigation so they cannot leak across a redirect.
 
 A Spider may declare Browser login under `spider.login`. When a Spider configuration creates a Trace, the login
 configuration is frozen with the complete DSL at `traces.snapshot.dsl.spider.login`. The Worker does not reread the
@@ -764,6 +775,9 @@ domain policy only; they never fill transport fields after a Request has been cr
 stable, writes a reserved one-based `vals.idx` before transport templates render, and resets the index for each
 new expansion. Request and bind templates share one parser. Rendering walks the parsed source once, so braces
 inside a resolved dynamic value remain literal data instead of becoming a second template expression.
+If a bind-template variable resolves to an array, rendering is element-wise and returns an array;
+array variables must have equal lengths and scalar variables are broadcast. This keeps list-to-detail
+fan-out in the existing batched Request edge instead of adding a separate flow concept.
 
 Rules does not compile into a second Request or Item model. Parse/bind provides each base field and only a
 non-empty Item-edge `vals` result overrides it; null, empty strings, arrays, and objects preserve the base while
@@ -986,63 +1000,63 @@ the Store contract.
 
 | Path | Single responsibility |
 | --- | --- |
-| `spider/src/engine/actor.rs` | Own Engine Actor state and the shared transition/termination decision |
-| `spider/src/engine/actor/start.rs` | Start Executor work and handle its completion message |
-| `spider/src/engine/actor/claim.rs` | Claim Scheduler work and handle its completion message |
-| `spider/src/engine/actor/request.rs` | Register one Request task and handle its completion message |
-| `spider/src/engine/actor/output.rs` | Accept Tx Events, delegate replies, and track output completion |
-| `spider/src/engine/actor/wait.rs` | Schedule poll and producer-idle notifications |
-| `spider/src/engine/actor/shutdown.rs` | Stop new claims after a process shutdown signal and drain accepted work |
-| `spider/src/engine/actor/task.rs` | Own and abort task handles, and convert task panic into Engine errors |
-| `spider/src/engine/builder.rs` | Assemble components and own the Schema Store used by all execution modes |
-| `spider/src/engine/runtime.rs` | Component lifecycle, startup settings, and Actor assembly |
-| `spider/src/engine/request/task.rs` | Ack, lease maintenance, and final settlement for one Request |
-| `spider/src/engine/admission.rs` | Apply `before_scheduler` to Request output before it enters the Scheduler |
-| `spider/src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse lifecycle for one claimed Request |
-| `spider/src/trace/tracing.rs` | Runtime tracing configuration, deterministic sampling, bounded span helpers, and error classes |
-| `spider/src/engine/event/request.rs` | Handle Request output emitted by Tx |
-| `spider/src/engine/event/item.rs` | Run Item middleware, Store retries, and `error_item` orchestration |
-| `spider/src/spider/tx/identity.rs` | Derive replay-stable IDs for current-Request output |
-| `spider/src/engine/executor.rs` | Select Code/Rules from Trace Snapshot and invoke the shared Spider |
-| `spider/src/engine/code.rs` | Code-mode local run-seed initialization |
-| `spider/src/engine/rules.rs` | Rules-mode assembly and run-seed initialization |
-| `spider/src/engine/rules/executor.rs` | Coordinate one Rules node execution and emit its outputs |
-| `spider/src/engine/rules/executor/field.rs` | Extract declared fields from the current Response |
-| `spider/src/engine/rules/executor/value.rs` | Resolve typed value references from the current Rules context |
-| `spider/src/engine/rules/executor/bind.rs` | Evaluate ordered bind pipelines, transforms, and templates |
-| `spider/src/engine/rules/executor/condition.rs` | Evaluate one edge condition |
-| `spider/src/engine/rules/executor/build.rs` | Construct Request and Item values from an enabled edge |
-| `spider/src/middleware/registry.rs` | Register Middleware implementations, resolve and order effective Specs, execute hooks, and derive retry policies |
-| `spider/src/downloader/http.rs` | Execute HTTP requests, redirects, headers, cookies, and response conversion |
-| `spider/src/downloader/http/pool.rs` | Key, reuse, expire, and close proxy/TLS-specific HTTP clients |
-| `spider/src/net/request/contract.rs` | Public Request, mode, state, proxy, and TLS contract |
-| `spider/src/payload/contract.rs` | Unified transport Payload and operation-specific structural validation |
-| `spider/src/item/store.rs` | Public Item persistence contract |
-| `spider/src/item/jsonl.rs` | Default Jsonl Store lifecycle and submission flow |
-| `spider/src/item/jsonl/output.rs` | Hourly JSONL files, bounded handle cache, serialized appends, flush, and error logging |
-| `spider/src/item/jsonl/snapshot.rs` | Process-local failure-snapshot projection, ordered publication, and cleanup |
-| `spider/src/scheduler/contract.rs` | Public Scheduler contract |
-| `spider/src/scheduler/init.rs` | Run-seed initialization contract |
-| `spider/src/scheduler/memory.rs` | Public Memory implementation and submodule composition |
-| `spider/src/net/request/hash.rs` | Calculate canonical initial Request Snapshot hashes for replay comparison; shared by Memory, Redis, and MySQL |
-| `spider/src/scheduler/memory/claim.rs` | Coordinate one capability-aware claim from queued Snapshot to processing Request |
-| `spider/src/scheduler/memory/queue.rs` | Ready/delayed queue ordering |
-| `spider/src/scheduler/memory/reclaim.rs` | Recover expired acknowledged and unacknowledged leases |
-| `spider/src/scheduler/memory/restore.rs` | Restore claimed Request Snapshots and handle restoration retries |
-| `spider/src/scheduler/memory/settle.rs` | Identity checks, settlement, and queue retry |
-| `spider/src/scheduler/memory/state.rs` | Memory runtime state structures |
-| `spider/src/scheduler/memory/validate.rs` | Validate new Requests and their Trace ownership |
-| `spider/src/selector/css/healing.rs` | Healing configuration and orchestration |
-| `spider/src/selector/css/healing/reference.rs` | CSS AST to scoring reference model |
-| `spider/src/selector/css/healing/score.rs` | DOM candidate traversal, relationships, and scoring |
-| `spider/src/selector/json.rs` | Full Response deserialization and shared RFC 9535 JSONPath selection |
-| `spider/src/ai.rs` | Public AI runtime entry and `OpenAI` export |
-| `spider/src/ai/openai.rs` | Validate provider configuration, own the reusable provider and execute model calls |
-| `spider/src/ai/transport.rs` | Execute one provider request and bound its HTTP-decoded body before dependency buffering |
-| `spider/src/error/ai.rs` | AI provider construction and call errors |
-| `spider/src/selector/ai.rs` | Build prompts from Responses and enforce the JSON-object extraction contract |
-| `spider/src/middleware/dedup/{config,fingerprint,memory}.rs` | Parse flat Dedup configuration, derive canonical bucket/items, and maintain exact Worker-local membership |
-| `spider/src/middleware/rate_limit/{config,memory}.rs` | Parse group/QPS configuration and maintain Worker-local schedules |
+| `src/engine/actor.rs` | Own Engine Actor state and the shared transition/termination decision |
+| `src/engine/actor/start.rs` | Start Executor work and handle its completion message |
+| `src/engine/actor/claim.rs` | Claim Scheduler work and handle its completion message |
+| `src/engine/actor/request.rs` | Register one Request task and handle its completion message |
+| `src/engine/actor/output.rs` | Accept Tx Events, delegate replies, and track output completion |
+| `src/engine/actor/wait.rs` | Schedule poll and producer-idle notifications |
+| `src/engine/actor/shutdown.rs` | Stop new claims after a process shutdown signal and drain accepted work |
+| `src/engine/actor/task.rs` | Own and abort task handles, and convert task panic into Engine errors |
+| `src/engine/builder.rs` | Assemble components and own the Schema Store used by all execution modes |
+| `src/engine/runtime.rs` | Component lifecycle, startup settings, and Actor assembly |
+| `src/engine/request/task.rs` | Ack, lease maintenance, and final settlement for one Request |
+| `src/engine/admission.rs` | Apply `before_scheduler` to Request output before it enters the Scheduler |
+| `src/engine/request.rs` | Download, Middleware, Worker-local retry, and parse lifecycle for one claimed Request |
+| `src/trace/tracing.rs` | Runtime tracing configuration, deterministic sampling, bounded span helpers, and error classes |
+| `src/engine/event/request.rs` | Handle Request output emitted by Tx |
+| `src/engine/event/item.rs` | Run Item middleware, Store retries, and `error_item` orchestration |
+| `src/spider/tx/identity.rs` | Derive replay-stable IDs for current-Request output |
+| `src/engine/executor.rs` | Select Code/Rules from Trace Snapshot and invoke the shared Spider |
+| `src/engine/code.rs` | Code-mode local run-seed initialization |
+| `src/engine/rules.rs` | Rules-mode assembly and run-seed initialization |
+| `src/engine/rules/executor.rs` | Coordinate one Rules node execution and emit its outputs |
+| `src/engine/rules/executor/field.rs` | Extract declared fields from the current Response |
+| `src/engine/rules/executor/value.rs` | Resolve typed value references from the current Rules context |
+| `src/engine/rules/executor/bind.rs` | Evaluate ordered bind pipelines, transforms, and templates |
+| `src/engine/rules/executor/condition.rs` | Evaluate one edge condition |
+| `src/engine/rules/executor/build.rs` | Construct Request and Item values from an enabled edge |
+| `src/middleware/registry.rs` | Register Middleware implementations, resolve and order effective Specs, execute hooks, and derive retry policies |
+| `src/downloader/http.rs` | Execute HTTP requests, redirects, headers, cookies, and response conversion |
+| `src/downloader/http/pool.rs` | Key, reuse, expire, and close proxy/TLS-specific HTTP clients |
+| `src/net/request/contract.rs` | Public Request, mode, state, proxy, and TLS contract |
+| `src/payload/contract.rs` | Unified transport Payload and operation-specific structural validation |
+| `src/item/store.rs` | Public Item persistence contract |
+| `src/item/jsonl.rs` | Default Jsonl Store lifecycle and submission flow |
+| `src/item/jsonl/output.rs` | Hourly JSONL files, bounded handle cache, serialized appends, flush, and error logging |
+| `src/item/jsonl/snapshot.rs` | Process-local failure-snapshot projection, ordered publication, and cleanup |
+| `src/scheduler/contract.rs` | Public Scheduler contract |
+| `src/scheduler/init.rs` | Run-seed initialization contract |
+| `src/scheduler/memory.rs` | Public Memory implementation and submodule composition |
+| `src/net/request/hash.rs` | Calculate canonical initial Request Snapshot hashes for replay comparison; shared by Memory, Redis, and MySQL |
+| `src/scheduler/memory/claim.rs` | Coordinate one capability-aware claim from queued Snapshot to processing Request |
+| `src/scheduler/memory/queue.rs` | Ready/delayed queue ordering |
+| `src/scheduler/memory/reclaim.rs` | Recover expired acknowledged and unacknowledged leases |
+| `src/scheduler/memory/restore.rs` | Restore claimed Request Snapshots and handle restoration retries |
+| `src/scheduler/memory/settle.rs` | Identity checks, settlement, and queue retry |
+| `src/scheduler/memory/state.rs` | Memory runtime state structures |
+| `src/scheduler/memory/validate.rs` | Validate new Requests and their Trace ownership |
+| `src/selector/css/healing.rs` | Healing configuration and orchestration |
+| `src/selector/css/healing/reference.rs` | CSS AST to scoring reference model |
+| `src/selector/css/healing/score.rs` | DOM candidate traversal, relationships, and scoring |
+| `src/selector/json.rs` | Full Response deserialization and shared RFC 9535 JSONPath selection |
+| `src/ai.rs` | Public AI runtime entry and `OpenAI` export |
+| `src/ai/openai.rs` | Validate provider configuration, own the reusable provider and execute model calls |
+| `src/ai/transport.rs` | Execute one provider request and bound its HTTP-decoded body before dependency buffering |
+| `src/error/ai.rs` | AI provider construction and call errors |
+| `src/selector/ai.rs` | Build prompts from Responses and enforce the JSON-object extraction contract |
+| `src/middleware/dedup/{config,fingerprint,memory}.rs` | Parse flat Dedup configuration, derive canonical bucket/items, and maintain exact Worker-local membership |
+| `src/middleware/rate_limit/{config,memory}.rs` | Parse group/QPS configuration and maintain Worker-local schedules |
 | `macros/src/spider/expand.rs` | Expand the user Spider struct into its factory |
 | `macros/src/spider/check.rs` | Validate macro input constraints |
 | `macros/src/spider/bind.rs` | Generate node registration and handler bindings |
@@ -1073,7 +1087,7 @@ Names rely on module context. For example, `request::State`, `memory::State`, an
 
 - v3: capability-scoped atomic Scheduler claiming; deterministic response charset decoding and broader fixture-backed page regression coverage. These contracts are implemented.
 - v4: the shared backend-neutral Scheduler conformance suite, Redis 7 standalone and MySQL 9 Schedulers, RedisBloom Dedup, shared Redis RateLimit, Engine-level Worker-local `ai::OpenAI` provider injection, and optional per-Request `fastrace` runtime tracing are implemented.
-- v5: mixed HTTP/browser end-to-end Engine acceptance and a separate Item attachment downloader. The Browser Downloader is implemented; attachment downloading and Browser downloading are independent deliverables. Capability-aware claim semantics remain the v3 contract.
+- v5: mixed HTTP/browser end-to-end Engine acceptance and the independent Item attachment downloader. Both are implemented; Capability-aware claim semantics remain the v3 contract.
 
 These capabilities must preserve the existing core contracts:
 
@@ -1093,7 +1107,6 @@ These capabilities must preserve the existing core contracts:
 - using Item ID for business deduplication;
 - supporting Redis Cluster through the standalone Redis Scheduler; Cluster needs a separate Scheduler design;
 - Browser mode is GET-only page navigation in the first implementation and does not serve as a generic HTTP API client;
-- downloading Item attachments; that capability is unimplemented and assigned to an independent v5 change;
 - making the core `spider` crate depend on `contrib`.
 
 ## 14. Architecture Invariants
