@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use spider::scheduler::Init as _;
-use spider::{Scheduler as _, payload, trace};
+use harbor::scheduler::Init as _;
+use harbor::{Scheduler as _, payload, trace};
 use sqlx::Row as _;
 
 use super::{fixture, server};

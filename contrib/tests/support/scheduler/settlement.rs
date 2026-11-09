@@ -1,5 +1,5 @@
-use spider::scheduler::{Error, Init};
-use spider::{Scheduler, net, payload, trace};
+use harbor::scheduler::{Error, Init};
+use harbor::{Scheduler, net, payload, trace};
 
 use super::{
     fixture::{close, open, open_run},

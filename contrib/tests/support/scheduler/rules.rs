@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use spider::scheduler::Init;
-use spider::{
+use harbor::scheduler::Init;
+use harbor::{
     Scheduler, Spider, SpiderFactory, Tx, downloader, engine, net, payload, scheduler, trace,
 };
 
@@ -12,7 +12,7 @@ pub(super) async fn claimed_requests_preserve_trace<S>(scheduler: S)
 where
     S: Scheduler + scheduler::Init + 'static,
 {
-    let config = spider::config::Config::from_yaml(
+    let config = harbor::config::Config::from_yaml(
         r#"
 spider:
   name: conformance-rules
@@ -49,7 +49,7 @@ pub(super) async fn existing_trace_runs_without_local_seed<S>(scheduler: S)
 where
     S: Scheduler + scheduler::Init + 'static,
 {
-    let config = spider::config::Config::from_yaml(
+    let config = harbor::config::Config::from_yaml(
         r#"
 spider:
   name: remote-rules
@@ -113,7 +113,7 @@ impl SpiderFactory for LocalSpiderFactory {
 }
 
 impl Spider for LocalSpider {
-    type Item = spider::item::Map;
+    type Item = harbor::item::Map;
 
     fn name(&self) -> &str {
         "conformance-rules"
@@ -123,7 +123,7 @@ impl Spider for LocalSpider {
         &self.tx
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         Ok(())
     }
 }
@@ -229,7 +229,7 @@ impl SpiderFactory for RemoteSpiderFactory {
 }
 
 impl Spider for RemoteSpider {
-    type Item = spider::item::Map;
+    type Item = harbor::item::Map;
 
     fn name(&self) -> &str {
         "remote-rules"
@@ -239,12 +239,12 @@ impl Spider for RemoteSpider {
         &self.tx
     }
 
-    async fn start(&self) -> Result<(), spider::Error> {
+    async fn start(&self) -> Result<(), harbor::Error> {
         self.started.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         self.indexed.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

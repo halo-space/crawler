@@ -15,7 +15,7 @@ pub(super) fn check(config: &graph::Config, item_configured: bool) -> Result<(),
     }
     for (name, node) in &config.nodes {
         if let Some(domains) = node.allowed_domains.as_ref() {
-            super::spider::check_allowed_domains(domains, &format!("node {name} allowed_domains"))?;
+            super::harbor::check_allowed_domains(domains, &format!("node {name} allowed_domains"))?;
         }
         for spec in &node.middlewares {
             crate::middleware::check(spec).map_err(|error| {

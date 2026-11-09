@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 
 mod item;
-mod spider;
+mod harbor;
 
 #[proc_macro_derive(Item, attributes(serde))]
 pub fn item(input: TokenStream) -> TokenStream {
@@ -9,6 +9,6 @@ pub fn item(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn spider(attr: TokenStream, item: TokenStream) -> TokenStream {
-    spider::expand(attr, item)
+pub fn harbor(attr: TokenStream, item: TokenStream) -> TokenStream {
+    harbor::expand(attr, item)
 }

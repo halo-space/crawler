@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::super::Api;
-use spider::{scheduler, trace};
+use harbor::{scheduler, trace};
 
 impl Api {
     pub(in crate::scheduler::api) async fn load_trace(

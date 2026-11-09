@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use spider::item::State;
-use spider::{config, engine, net};
+use harbor::item::State;
+use harbor::{config, engine, net};
 
 #[derive(serde::Deserialize, serde::Serialize, macros::Item)]
 #[serde(deny_unknown_fields)]
@@ -16,21 +16,21 @@ struct Article {
 
 type ArticleItem = Article;
 
-#[macros::spider]
+#[macros::harbor]
 struct Newspaper;
 
-#[macros::spider(item = Article)]
+#[macros::harbor(item = Article)]
 impl Newspaper {
     fn name(&self) -> &str {
         "newspaper-worker"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         Ok(())
     }
 
     #[item]
-    async fn save(&self, article: ArticleItem) -> Result<(), spider::Error> {
+    async fn save(&self, article: ArticleItem) -> Result<(), harbor::Error> {
         self.tx.item(vec![article]).await
     }
 }
@@ -61,6 +61,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     #[test]
     fn newspaper_rules_are_valid() {
-        spider::config::Config::from_yaml(include_str!("../../rules-newspaper.yaml")).unwrap();
+        harbor::config::Config::from_yaml(include_str!("../../rules-newspaper.yaml")).unwrap();
     }
 }

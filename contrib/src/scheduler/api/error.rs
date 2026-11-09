@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Errors raised while constructing an API Scheduler client.
 ///
-/// Operations performed after construction use `spider::scheduler::Error` so the
+/// Operations performed after construction use `harbor::scheduler::Error` so the
 /// Engine sees the same error classes for every Scheduler implementation.
 #[derive(Debug, Error)]
 pub enum Error {

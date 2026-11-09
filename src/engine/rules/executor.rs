@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{config, net, spider};
+use crate::{config, harbor, net};
 
 mod bind;
 mod build;
@@ -17,7 +17,7 @@ pub(crate) async fn execute<P>(
     response: &net::Response,
 ) -> Result<(), crate::Error>
 where
-    P: spider::Spider,
+    P: harbor::Spider,
 {
     let node_key = request.node_key();
     let node =
@@ -42,7 +42,7 @@ where
         .iter()
         .filter(|edge| edge.from == node_key)
     {
-        if !condition::matches(edge.when.as_deref(), &context)? {
+        if !condition::matches(edge.when.as_ref(), &context)? {
             continue;
         }
         match edge.kind {

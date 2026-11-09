@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Redis, MySQL, API Scheduler, and distributed middleware implementations for Harbor."
+repository = "https://github.com/halo-space/harbor"
+readme = "../README.md"
 
 [features]
 default = []
-runtime-tracing = ["dep:fastrace", "fastrace/enable", "spider/runtime-tracing"]
+runtime-tracing = ["dep:fastrace", "fastrace/enable", "harbor/runtime-tracing"]
 
 [dependencies]
 base64 = { workspace = true }
@@ -20,7 +23,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
-spider = { path = ".." }
+harbor = { path = "..", version = "0.1.0" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

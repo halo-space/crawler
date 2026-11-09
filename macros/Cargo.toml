@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Procedural macros for Harbor crawler applications."
+repository = "https://github.com/halo-space/harbor"
+readme = "../README.md"
 
 [lib]
 proc-macro = true
@@ -16,4 +19,4 @@ syn = { workspace = true }
 [dev-dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-spider = { path = ".." }
+harbor = { path = "..", version = "0.1.0" }

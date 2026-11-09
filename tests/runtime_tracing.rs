@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use fastrace::collector::SpanRecord;
-use spider::{downloader, engine, item, middleware, net, payload};
+use harbor::{downloader, engine, item, middleware, net, payload};
 
 const SECRET: &str = "runtime-secret-marker";
 
@@ -91,10 +91,10 @@ impl item::Item for Output {
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct TraceSpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl TraceSpider {
     fn name(&self) -> &str {
         "runtime-tracing"
@@ -107,7 +107,7 @@ impl TraceSpider {
         ]
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         let retry = middleware::Spec::new("retry")
             .hook("error_item")
             .args(serde_json::json!({"count": 1, "backoff": [0]}));
@@ -132,7 +132,7 @@ async fn traces_complete_request_lifecycles_without_leaking_content() {
         .with_spider(TraceSpider::new())
         .build()
         .with_concurrency(2)
-        .with_tracing(spider::trace::Tracing::all());
+        .with_tracing(harbor::trace::Tracing::all());
     tokio::spawn(async move { runtime.start_until_idle().await })
         .await
         .unwrap()

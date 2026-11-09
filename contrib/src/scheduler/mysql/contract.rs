@@ -2,7 +2,7 @@ use std::str::FromStr as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use spider::{net, payload, scheduler, trace};
+use harbor::{net, payload, scheduler, trace};
 use sqlx::MySqlPool;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};

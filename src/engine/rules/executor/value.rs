@@ -12,9 +12,17 @@ pub(super) struct Context<'a> {
 }
 
 pub(super) fn resolve(value_ref: &ValueRef, context: &Context<'_>) -> Result<Value, crate::Error> {
+    resolve_optional(value_ref, context)?
+        .ok_or_else(|| crate::Error::message("value reference resolved to a missing runtime value"))
+}
+
+pub(super) fn resolve_optional(
+    value_ref: &ValueRef,
+    context: &Context<'_>,
+) -> Result<Option<Value>, crate::Error> {
     match (&value_ref.from, &value_ref.value) {
-        (Some(from), None) => resolve_path(from, context),
-        (None, Some(value)) => Ok(value.clone()),
+        (Some(from), None) => resolve_optional_path(from, context),
+        (None, Some(value)) => Ok(Some(value.clone())),
         (Some(_), Some(_)) => Err(crate::Error::message(
             "value reference cannot define both from and value",
         )),
@@ -25,27 +33,35 @@ pub(super) fn resolve(value_ref: &ValueRef, context: &Context<'_>) -> Result<Val
 }
 
 pub(super) fn resolve_path(path: &str, context: &Context<'_>) -> Result<Value, crate::Error> {
+    resolve_optional_path(path, context)?
+        .ok_or_else(|| crate::Error::message(format!("undefined value reference: {path}")))
+}
+
+pub(super) fn resolve_optional_path(
+    path: &str,
+    context: &Context<'_>,
+) -> Result<Option<Value>, crate::Error> {
     let (root, name) = path
         .strip_prefix('$')
         .and_then(|path| path.split_once('.'))
         .ok_or_else(|| crate::Error::message(format!("invalid value reference: {path}")))?;
-    match root {
+    let value = match root {
         "fields" => context.fields.get(name).cloned(),
         "binds" => context.binds.get(name).cloned(),
         "vals" => context.request.vals.get(name).cloned(),
         "response" => match name {
-            "url" => return Ok(Value::String(context.response.url.clone())),
-            "status" => return Ok(Value::from(context.response.status.0)),
+            "url" => Some(Value::String(context.response.url.clone())),
+            "status" => Some(Value::from(context.response.status.0)),
             _ => None,
         },
         "request" => match name {
-            "url" => return Ok(Value::String(context.request.url.clone())),
-            "node" => return Ok(Value::String(context.request.node_key().to_string())),
+            "url" => Some(Value::String(context.request.url.clone())),
+            "node" => Some(Value::String(context.request.node_key().to_string())),
             _ => None,
         },
         _ => None,
-    }
-    .ok_or_else(|| crate::Error::message(format!("undefined value reference: {path}")))
+    };
+    Ok(value)
 }
 
 pub(super) fn scalar(value: &Value) -> Result<String, crate::Error> {

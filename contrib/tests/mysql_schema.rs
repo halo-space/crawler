@@ -1,7 +1,7 @@
 #[path = "mysql/server.rs"]
 mod server;
 
-use spider::Scheduler as _;
+use harbor::Scheduler as _;
 use sqlx::Row;
 
 #[tokio::test]

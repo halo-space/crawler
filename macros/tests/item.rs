@@ -1,11 +1,11 @@
-use spider::item::{Item as _, Values};
+use harbor::item::{Item as _, Values};
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, macros::Item)]
 #[serde(deny_unknown_fields)]
 struct Article {
     title: String,
     #[serde(skip)]
-    state: spider::item::State,
+    state: harbor::item::State,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, macros::Item)]
@@ -13,7 +13,7 @@ struct Article {
 struct Record<T> {
     value: T,
     #[serde(skip)]
-    state: spider::item::State,
+    state: harbor::item::State,
 }
 
 #[test]
@@ -33,7 +33,7 @@ fn derives_the_complete_item_contract() {
         serde_json::json!({"title": "Rust"})
     );
 
-    let mut item: Box<dyn spider::item::Item> = Box::new(item);
+    let mut item: Box<dyn harbor::item::Item> = Box::new(item);
     assert_eq!(item.downcast_ref::<Article>().unwrap().title, "Rust");
     item.downcast_mut::<Article>().unwrap().title = "Crawler".to_string();
     assert_eq!(item.downcast_ref::<Article>().unwrap().title, "Crawler");
@@ -47,7 +47,7 @@ fn rejects_values_that_are_not_item_fields() {
     ]))
     .unwrap_err();
 
-    assert!(matches!(&error, spider::item::Error::Deserialize(_)));
+    assert!(matches!(&error, harbor::item::Error::Deserialize(_)));
     assert!(error.to_string().contains("unknown field `titel`"));
     assert!(std::error::Error::source(&error).is_some());
 }
@@ -61,8 +61,8 @@ fn rejects_missing_and_invalid_business_fields() {
     )]))
     .unwrap_err();
 
-    assert!(matches!(missing, spider::item::Error::Deserialize(_)));
-    assert!(matches!(invalid, spider::item::Error::Deserialize(_)));
+    assert!(matches!(missing, harbor::item::Error::Deserialize(_)));
+    assert!(matches!(invalid, harbor::item::Error::Deserialize(_)));
 }
 
 #[test]

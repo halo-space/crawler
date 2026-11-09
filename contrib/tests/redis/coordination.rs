@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use spider::{Scheduler, payload};
+use harbor::{Scheduler, payload};
 
 use super::{request, server, settlement, worker};
 

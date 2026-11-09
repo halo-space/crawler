@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use serde_json::Value;
-use spider::item::{Item, Store};
-use spider::middleware::{BoxFuture, Middleware, Spec};
-use spider::scheduler::{Init, Scheduler};
-use spider::{downloader, engine, net, payload};
+use harbor::item::{Item, Store};
+use harbor::middleware::{BoxFuture, Middleware, Spec};
+use harbor::scheduler::{Init, Scheduler};
+use harbor::{downloader, engine, net, payload};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -26,7 +26,7 @@ async fn init_run(scheduler: &impl Init) {
     scheduler
         .init(
             FIXTURE_TRACE.to_string(),
-            spider::trace::Snapshot::code(FIXTURE_TASK),
+            harbor::trace::Snapshot::code(FIXTURE_TASK),
             Vec::new(),
         )
         .await
@@ -42,19 +42,19 @@ struct PayloadRecord {
 }
 
 struct RecordingScheduler {
-    inner: spider::Memory,
+    inner: harbor::Memory,
     records: Arc<Mutex<Vec<PayloadRecord>>>,
 }
 
 impl RecordingScheduler {
     fn new(records: Arc<Mutex<Vec<PayloadRecord>>>) -> Self {
         Self {
-            inner: spider::Memory::new(),
+            inner: harbor::Memory::new(),
             records,
         }
     }
 
-    fn trace_stats(&self) -> HashMap<String, spider::stats::Counter> {
+    fn trace_stats(&self) -> HashMap<String, harbor::stats::Counter> {
         let trace_ids = self.inner.trace_ids();
         assert_eq!(trace_ids.len(), 1);
         self.inner.trace_stats(&trace_ids[0])
@@ -62,56 +62,56 @@ impl RecordingScheduler {
 }
 
 impl Scheduler for RecordingScheduler {
-    fn lease(&self) -> Option<spider::scheduler::Lease> {
+    fn lease(&self) -> Option<harbor::scheduler::Lease> {
         self.inner.lease()
     }
 
-    async fn open(&self, concurrency: usize) -> Result<(), spider::scheduler::Error> {
+    async fn open(&self, concurrency: usize) -> Result<(), harbor::scheduler::Error> {
         self.inner.open(concurrency).await
     }
 
-    async fn close(&self) -> Result<(), spider::scheduler::Error> {
+    async fn close(&self) -> Result<(), harbor::scheduler::Error> {
         self.inner.close().await
     }
 
-    async fn push(&self, payload: payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn push(&self, payload: payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.inner.push(payload).await
     }
 
     async fn trace(
         &self,
         trace_id: &str,
-    ) -> Result<Option<spider::trace::Snapshot>, spider::scheduler::Error> {
+    ) -> Result<Option<harbor::trace::Snapshot>, harbor::scheduler::Error> {
         self.inner.trace(trace_id).await
     }
 
     async fn next_requests(
         &self,
         limit: usize,
-    ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
+    ) -> Result<Vec<net::Request>, harbor::scheduler::Error> {
         self.inner.next_requests(limit).await
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
+    async fn has_pending_requests(&self) -> Result<bool, harbor::scheduler::Error> {
         self.inner.has_pending_requests().await
     }
 
-    async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn ack(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn release(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
     async fn refresh_lease(
         &self,
         payload: &payload::Payload,
-    ) -> Result<(), spider::scheduler::Error> {
+    ) -> Result<(), harbor::scheduler::Error> {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn success(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.records.lock().unwrap().push(PayloadRecord {
             id: payload.id.clone(),
             state: payload.state,
@@ -121,7 +121,7 @@ impl Scheduler for RecordingScheduler {
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn failure(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.records.lock().unwrap().push(PayloadRecord {
             id: payload.id.clone(),
             state: payload.state,
@@ -140,15 +140,15 @@ impl Init for RecordingScheduler {
     async fn init(
         &self,
         trace_id: String,
-        snapshot: spider::trace::Snapshot,
+        snapshot: harbor::trace::Snapshot,
         requests: Vec<net::Request>,
-    ) -> Result<(), spider::scheduler::Error> {
+    ) -> Result<(), harbor::scheduler::Error> {
         self.inner.init(trace_id, snapshot, requests).await
     }
 }
 
 struct FlakyStore {
-    inner: spider::item::Jsonl,
+    inner: harbor::item::Jsonl,
     dir: PathBuf,
     attempts: Arc<AtomicUsize>,
     failures: usize,
@@ -159,7 +159,7 @@ impl FlakyStore {
     fn new(dir: impl Into<PathBuf>, attempts: Arc<AtomicUsize>, failures: usize) -> Self {
         let dir = dir.into();
         Self {
-            inner: spider::item::Jsonl::with_dir(&dir),
+            inner: harbor::item::Jsonl::with_dir(&dir),
             dir,
             attempts,
             failures,
@@ -172,7 +172,7 @@ impl FlakyStore {
         self
     }
 
-    async fn block_output(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+    async fn block_output(&self, payload: &payload::Payload) -> Result<(), harbor::item::Error> {
         let output = self
             .dir
             .join("data")
@@ -204,7 +204,7 @@ impl FlakyStore {
         Ok(())
     }
 
-    async fn unblock_output(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+    async fn unblock_output(&self, payload: &payload::Payload) -> Result<(), harbor::item::Error> {
         let output = self
             .dir
             .join("data")
@@ -220,15 +220,15 @@ impl FlakyStore {
 }
 
 impl Store for FlakyStore {
-    async fn open(&self) -> Result<(), spider::item::Error> {
+    async fn open(&self) -> Result<(), harbor::item::Error> {
         self.inner.open().await
     }
 
-    async fn close(&self) -> Result<(), spider::item::Error> {
+    async fn close(&self) -> Result<(), harbor::item::Error> {
         self.inner.close().await
     }
 
-    async fn submit(&self, payload: &payload::Payload) -> Result<(), spider::item::Error> {
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), harbor::item::Error> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= self.failures {
             self.block_output(payload).await?;
@@ -287,7 +287,7 @@ fn response(request: net::Request, status: u16) -> net::Response {
 #[derive(serde::Serialize)]
 struct TestItem {
     #[serde(skip)]
-    state: spider::item::State,
+    state: harbor::item::State,
     title: Option<String>,
     #[serde(skip)]
     middlewares: Vec<Spec>,
@@ -296,7 +296,7 @@ struct TestItem {
 impl TestItem {
     fn valid() -> Self {
         Self {
-            state: spider::item::State::default(),
+            state: harbor::item::State::default(),
             title: Some("book".to_string()),
             middlewares: Vec::new(),
         }
@@ -309,22 +309,22 @@ impl TestItem {
 }
 
 impl Item for TestItem {
-    fn from_values(mut values: spider::item::Values) -> Result<Self, spider::item::Error> {
+    fn from_values(mut values: harbor::item::Values) -> Result<Self, harbor::item::Error> {
         let title = values
             .shift_remove("title")
             .and_then(|value| value.as_str().map(str::to_string));
         Ok(Self {
-            state: spider::item::State::default(),
+            state: harbor::item::State::default(),
             title,
             middlewares: Vec::new(),
         })
     }
 
-    fn state(&self) -> &spider::item::State {
+    fn state(&self) -> &harbor::item::State {
         &self.state
     }
 
-    fn state_mut(&mut self) -> &mut spider::item::State {
+    fn state_mut(&mut self) -> &mut harbor::item::State {
         &mut self.state
     }
 
@@ -333,83 +333,83 @@ impl Item for TestItem {
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct ItemSpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl ItemSpider {
     fn name(&self) -> &str {
         "item"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         self.tx.item(vec![TestItem::valid()]).await
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct NoopSpider {
     calls: Arc<AtomicUsize>,
 }
 
-#[macros::spider]
+#[macros::harbor]
 impl NoopSpider {
     fn name(&self) -> &str {
         "noop"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct DedupSpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl DedupSpider {
     fn name(&self) -> &str {
         "dedup"
     }
 
-    async fn start(&self) -> Result<(), spider::Error> {
+    async fn start(&self) -> Result<(), harbor::Error> {
         let request = net::Request::follow("https://example.com/list")
-            .map_err(|error| spider::Error::Message(error.to_string()))?;
+            .map_err(|error| harbor::Error::Message(error.to_string()))?;
         self.tx.request(vec![request]).await
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
         let first = response
             .follow("/detail")
-            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .map_err(|error| harbor::Error::Message(error.to_string()))?
             .node(Self::detail)
             .with_dedup(["$request.url"], Some(60_000));
         let second = response
             .follow("/detail")
-            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .map_err(|error| harbor::Error::Message(error.to_string()))?
             .node(Self::detail)
             .with_dedup(["$request.url"], Some(60_000));
         self.tx.request(vec![first, second]).await
     }
 
-    async fn detail(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn detail(&self, _response: net::Response) -> Result<(), harbor::Error> {
         Ok(())
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct ValidateItemSpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl ValidateItemSpider {
     fn name(&self) -> &str {
         "validate_item"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         let item = TestItem {
-            state: spider::item::State::default(),
+            state: harbor::item::State::default(),
             title: None,
             middlewares: vec![
                 Spec::new("validate")
@@ -421,95 +421,95 @@ impl ValidateItemSpider {
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct ValidateRequestSpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl ValidateRequestSpider {
     fn name(&self) -> &str {
         "validate_request"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         let mut request = net::Request::follow("https://example.com/invalid")
-            .map_err(|error| spider::Error::Message(error.to_string()))?;
+            .map_err(|error| harbor::Error::Message(error.to_string()))?;
         request.url = "not-an-absolute-url".to_string();
         self.tx.request(vec![request]).await
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct ParseRetrySpider {
     attempts: Arc<AtomicUsize>,
 }
 
-#[macros::spider]
+#[macros::harbor]
 impl ParseRetrySpider {
     fn name(&self) -> &str {
         "parse_retry"
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
         let request = response
             .follow("/detail")
-            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .map_err(|error| harbor::Error::Message(error.to_string()))?
             .node(Self::detail);
         self.tx.request(vec![request]).await?;
         if attempt < 3 {
-            return Err(spider::Error::Message("temporary parse".to_string()));
+            return Err(harbor::Error::Message("temporary parse".to_string()));
         }
         Ok(())
     }
 
-    async fn detail(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn detail(&self, _response: net::Response) -> Result<(), harbor::Error> {
         Ok(())
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct QueueRetrySpider {
     attempts: Arc<AtomicUsize>,
 }
 
-#[macros::spider]
+#[macros::harbor]
 impl QueueRetrySpider {
     fn name(&self) -> &str {
         "queue_retry"
     }
 
-    async fn start(&self) -> Result<(), spider::Error> {
+    async fn start(&self) -> Result<(), harbor::Error> {
         let mut request = net::Request::follow("https://example.com")
-            .map_err(|error| spider::Error::Message(error.to_string()))?;
+            .map_err(|error| harbor::Error::Message(error.to_string()))?;
         request.max_retry_count = 2;
         self.tx.request(vec![request]).await
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
         let request = response
             .follow("/detail")
-            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .map_err(|error| harbor::Error::Message(error.to_string()))?
             .node(Self::detail);
         self.tx.request(vec![request]).await?;
-        Err(spider::Error::Message("parse failed".to_string()))
+        Err(harbor::Error::Message("parse failed".to_string()))
     }
 
-    async fn detail(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn detail(&self, _response: net::Response) -> Result<(), harbor::Error> {
         Ok(())
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct RetryItemSpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl RetryItemSpider {
     fn name(&self) -> &str {
         "retry_item"
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         let retry = Spec::new("retry")
             .hook("error_item")
             .args(serde_json::json!({"count": 2, "backoff": [0, 0]}));
@@ -529,7 +529,7 @@ impl Middleware for SpiderLifecycle {
         Box::pin(async move {
             self.calls.lock().unwrap().push("before_spider");
             if self.fail_before {
-                return Err(spider::middleware::Error::Message(
+                return Err(harbor::middleware::Error::Message(
                     "before spider".to_string(),
                 ));
             }
@@ -545,49 +545,49 @@ impl Middleware for SpiderLifecycle {
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct LifecycleSpider {
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct FailingStartSpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl FailingStartSpider {
     fn name(&self) -> &str {
         "failing_start"
     }
 
-    async fn start(&self) -> Result<(), spider::Error> {
-        Err(spider::Error::Message("start failed".to_string()))
+    async fn start(&self) -> Result<(), harbor::Error> {
+        Err(harbor::Error::Message("start failed".to_string()))
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         Ok(())
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 impl LifecycleSpider {
     fn name(&self) -> &str {
         "lifecycle"
     }
 
-    async fn start(&self) -> Result<(), spider::Error> {
+    async fn start(&self) -> Result<(), harbor::Error> {
         self.calls.lock().unwrap().push("start");
         let request = net::Request::follow("https://example.com")
-            .map_err(|error| spider::Error::Message(error.to_string()))?;
+            .map_err(|error| harbor::Error::Message(error.to_string()))?;
         self.tx.request(vec![request]).await
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         self.calls.lock().unwrap().push("index");
         Ok(())
     }
 }
 
-fn counter(record: &PayloadRecord, name: &str) -> spider::stats::Counter {
+fn counter(record: &PayloadRecord, name: &str) -> harbor::stats::Counter {
     serde_json::from_value(record.stats[name].clone()).unwrap()
 }
 
@@ -869,7 +869,7 @@ async fn item_retry_removes_failure_snapshot_after_recovery() {
         .inner
         .init(
             "trace-item".to_string(),
-            spider::trace::Snapshot::code("task"),
+            harbor::trace::Snapshot::code("task"),
             Vec::new(),
         )
         .await
@@ -907,7 +907,7 @@ async fn final_item_failure_keeps_complete_local_snapshot() {
         .inner
         .init(
             "trace-item".to_string(),
-            spider::trace::Snapshot::code("task"),
+            harbor::trace::Snapshot::code("task"),
             Vec::new(),
         )
         .await
@@ -962,7 +962,7 @@ async fn snapshot_write_failure_preserves_original_submit_error() {
         .inner
         .init(
             "trace-item".to_string(),
-            spider::trace::Snapshot::code("task"),
+            harbor::trace::Snapshot::code("task"),
             Vec::new(),
         )
         .await
@@ -1039,7 +1039,7 @@ async fn after_spider_runs_when_before_spider_fails() {
 
     let error = engine.start_until_idle().await.unwrap_err();
 
-    assert!(matches!(error, spider::Error::Middleware(_)));
+    assert!(matches!(error, harbor::Error::Middleware(_)));
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         ["before_spider", "after_spider"]

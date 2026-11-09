@@ -612,7 +612,7 @@ async fn signal_during_init_preserves_the_seed_without_starting_the_actor() {
     let release = Arc::new(Notify::new());
     let fetches = Arc::new(AtomicUsize::new(0));
     let closes = Arc::new(AtomicUsize::new(0));
-    let (_tx, events) = crate::spider::tx::channel(MAX_EVENTS);
+    let (_tx, events) = crate::harbor::tx::channel(MAX_EVENTS);
     let mut runtime = Runtime::new(Setup {
         scheduler: scheduler::Memory::new(),
         downloader: TestDownload {
@@ -689,7 +689,7 @@ async fn signal_drains_every_request_from_an_active_claim_without_claiming_again
         successes: Arc::clone(&successes),
         closes: Arc::clone(&scheduler_closes),
     };
-    let (tx, events) = crate::spider::tx::channel(MAX_EVENTS);
+    let (tx, events) = crate::harbor::tx::channel(MAX_EVENTS);
     drop(tx);
     let mut runtime = Runtime::new(Setup {
         scheduler,
@@ -732,7 +732,7 @@ async fn signal_drains_every_request_from_an_active_claim_without_claiming_again
 #[tokio::test]
 async fn start_until_idle_uses_the_configured_idle_interval() {
     let interval = Duration::from_millis(80);
-    let (tx, events) = crate::spider::tx::channel(MAX_EVENTS);
+    let (tx, events) = crate::harbor::tx::channel(MAX_EVENTS);
     drop(tx);
     let mut runtime = Runtime::new(Setup {
         scheduler: IdleScheduler::new(),
@@ -764,7 +764,7 @@ async fn start_until_idle_uses_the_configured_idle_interval() {
 
 #[tokio::test]
 async fn close_returns_the_first_error_and_logs_later_failures() {
-    let (_tx, events) = crate::spider::tx::channel(MAX_EVENTS);
+    let (_tx, events) = crate::harbor::tx::channel(MAX_EVENTS);
     let runtime = Runtime::new(Setup {
         scheduler: FailingScheduler,
         downloader: FailingDownload,
@@ -799,7 +799,7 @@ async fn close_returns_the_first_error_and_logs_later_failures() {
 
 #[tokio::test]
 async fn lifecycle_returns_the_first_error_and_logs_cleanup_failures() {
-    let (tx, events) = crate::spider::tx::channel(MAX_EVENTS);
+    let (tx, events) = crate::harbor::tx::channel(MAX_EVENTS);
     drop(tx);
     let registry = middleware::Registry::new();
     registry.register("failing-lifecycle", FailingLifecycle);

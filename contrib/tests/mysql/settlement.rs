@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use spider::stats::Counter;
-use spider::{Scheduler as _, payload};
+use harbor::stats::Counter;
+use harbor::{Scheduler as _, payload};
 use sqlx::Row as _;
 
 use super::{fixture, server};
@@ -217,7 +217,7 @@ async fn refresh_reads_database_time_after_locking_the_request() {
     database.remove().await;
 }
 
-fn take(requests: &mut Vec<spider::net::Request>, id: &str) -> spider::net::Request {
+fn take(requests: &mut Vec<harbor::net::Request>, id: &str) -> harbor::net::Request {
     let index = requests
         .iter()
         .position(|request| request.id == id)
@@ -225,9 +225,9 @@ fn take(requests: &mut Vec<spider::net::Request>, id: &str) -> spider::net::Requ
     requests.swap_remove(index)
 }
 
-fn assert_lease_mismatch(error: spider::scheduler::Error, id: &str) {
+fn assert_lease_mismatch(error: harbor::scheduler::Error, id: &str) {
     assert!(matches!(
         error,
-        spider::scheduler::Error::LeaseMismatch(request_id) if request_id == id
+        harbor::scheduler::Error::LeaseMismatch(request_id) if request_id == id
     ));
 }

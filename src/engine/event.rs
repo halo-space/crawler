@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::spider::tx::Kind;
+use crate::harbor::tx::Kind;
 use crate::{middleware, scheduler, stats, trace};
 
 mod item;

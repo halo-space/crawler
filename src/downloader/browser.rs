@@ -644,7 +644,7 @@ async fn ensure_login(
     driver: &WebDriver,
     authenticated: &Mutex<HashMap<String, Instant>>,
     cookies: &impl CookieStore,
-    config: &crate::spider::login::Config,
+    config: &crate::harbor::login::Config,
 ) -> Result<(), downloader::Error> {
     let login_url = Url::parse(&config.url)
         .map_err(|error| downloader::Error::InvalidConfig(format!("invalid login URL: {error}")))?;
@@ -716,7 +716,7 @@ async fn ensure_login(
 
 async fn login_check(
     driver: &WebDriver,
-    check: &crate::spider::login::Check,
+    check: &crate::harbor::login::Check,
 ) -> Result<bool, downloader::Error> {
     if !check.selector.is_empty()
         && driver
@@ -748,10 +748,10 @@ async fn login_check(
 
 async fn run_login_action(
     driver: &WebDriver,
-    action: &crate::spider::login::Action,
+    action: &crate::harbor::login::Action,
 ) -> Result<(), downloader::Error> {
     match action {
-        crate::spider::login::Action::Fill { selector, value } => {
+        crate::harbor::login::Action::Fill { selector, value } => {
             let value = resolve_login_value(value)?;
             let element = driver
                 .query(By::Css(selector.as_str()))
@@ -761,7 +761,7 @@ async fn run_login_action(
             element.clear().await.map_err(driver_error)?;
             element.send_keys(value).await.map_err(driver_error)?;
         }
-        crate::spider::login::Action::Click { selector } => {
+        crate::harbor::login::Action::Click { selector } => {
             driver
                 .query(By::Css(selector.as_str()))
                 .first()
@@ -771,14 +771,14 @@ async fn run_login_action(
                 .await
                 .map_err(driver_error)?;
         }
-        crate::spider::login::Action::Wait {
+        crate::harbor::login::Action::Wait {
             selector,
             url,
             timeout,
         } => {
             wait_login_condition(driver, selector, url, *timeout).await?;
         }
-        crate::spider::login::Action::Manual { timeout } => {
+        crate::harbor::login::Action::Manual { timeout } => {
             tokio::time::sleep(Duration::from_millis(*timeout)).await;
         }
     }

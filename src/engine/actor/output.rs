@@ -2,7 +2,7 @@ use kameo::message::{Context, Message};
 use kameo::reply::DelegatedReply;
 
 use super::{Engine, task};
-use crate::spider::tx::Event;
+use crate::harbor::tx::Event;
 use crate::{downloader, engine, item, scheduler};
 
 pub(super) struct Done {

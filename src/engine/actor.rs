@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use kameo::actor::{Actor, ActorRef};
 
-use crate::spider::tx::Events;
+use crate::harbor::tx::Events;
 use crate::{downloader, engine, middleware, scheduler};
 
 mod claim;

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 use kameo::actor::Spawn;
 
-use crate::spider::tx::{Event, Events};
+use crate::harbor::tx::{Event, Events};
 use crate::{downloader, engine, middleware, scheduler};
 
 pub const MAX_REQUEST_CONCURRENCY: usize = 16;

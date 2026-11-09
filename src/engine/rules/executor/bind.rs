@@ -52,6 +52,23 @@ fn apply(
     if value.is_null() {
         return Ok(Value::Null);
     }
+    if transform.kind == "add" {
+        let argument = transform
+            .args
+            .get("value")
+            .ok_or_else(|| crate::Error::message("add requires value"))?;
+        let argument = resolve_argument(argument, context)?;
+        let left = value
+            .as_i64()
+            .ok_or_else(|| crate::Error::message("add input must be an integer"))?;
+        let right = argument
+            .as_i64()
+            .ok_or_else(|| crate::Error::message("add value must be an integer"))?;
+        let result = left
+            .checked_add(right)
+            .ok_or_else(|| crate::Error::message("add result overflows an integer"))?;
+        return Ok(Value::from(result));
+    }
     let text = value::scalar(&value)?;
     match transform.kind.as_str() {
         "trim" => Ok(Value::String(text.trim().to_string())),
@@ -168,4 +185,37 @@ fn resolve_argument(value: &Value, context: &Context<'_>) -> Result<Value, crate
         .filter(|value| value.starts_with('$'))
         .map(|path| value::resolve_path(path, context))
         .unwrap_or_else(|| Ok(value.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Map, json};
+
+    use super::*;
+
+    #[test]
+    fn add_supports_literal_and_reference_integers() {
+        let request = net::Request::follow("https://example.com").unwrap();
+        let response = net::Response::new(request.clone(), net::StatusCode(200), String::new());
+        let fields = IndexMap::new();
+        let binds = IndexMap::from([(String::from("step"), json!(20))]);
+        let context = Context {
+            request: &request,
+            response: &response,
+            fields: &fields,
+            binds: &binds,
+        };
+
+        let literal = Transform {
+            kind: "add".to_string(),
+            args: Map::from_iter([(String::from("value"), json!(1))]),
+        };
+        assert_eq!(apply(json!(1), &literal, &context).unwrap(), json!(2));
+
+        let reference = Transform {
+            kind: "add".to_string(),
+            args: Map::from_iter([(String::from("value"), json!("$binds.step"))]),
+        };
+        assert_eq!(apply(json!(2), &reference, &context).unwrap(), json!(22));
+    }
 }

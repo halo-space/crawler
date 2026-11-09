@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
-use spider::{net, scheduler};
+use harbor::{net, scheduler};
 use sqlx::{MySql, MySqlPool, Row as _, Transaction};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;

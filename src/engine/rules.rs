@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use super::runtime::MAX_EVENTS;
-use crate::spider::tx;
-use crate::{config, downloader, middleware, scheduler, spider};
+use crate::harbor::tx;
+use crate::{config, downloader, middleware, scheduler, harbor};
 
 /// Rules 模式装配完成后的 Engine 类型。
 pub type Runtime<S, D, F, O = crate::item::Jsonl> = super::runtime::Runtime<
     S,
     D,
-    super::executor::Executor<<F as spider::SpiderFactory>::Spider>,
+    super::executor::Executor<<F as harbor::SpiderFactory>::Spider>,
     Init,
     O,
 >;
@@ -117,8 +117,8 @@ impl<S, D, F, O> Builder<S, D, F, O>
 where
     S: scheduler::Scheduler + scheduler::Init + 'static,
     D: downloader::Download + 'static,
-    F: spider::SpiderFactory,
-    F::Spider: std::any::Any + spider::Spider + 'static,
+    F: harbor::SpiderFactory,
+    F::Spider: std::any::Any + harbor::Spider + 'static,
     O: crate::item::Store + 'static,
 {
     pub fn build(self) -> Runtime<S, D, F, O> {
@@ -159,7 +159,7 @@ fn validate_ai(config: &config::Config, openai: Option<&crate::ai::OpenAI>) -> O
 
 fn validate_item_functions<P>(spider: &P, config: &config::Config) -> Option<String>
 where
-    P: spider::Spider,
+    P: harbor::Spider,
 {
     for edge in &config.graph.edges {
         if !matches!(edge.kind, crate::graph::edge::Kind::Item) {

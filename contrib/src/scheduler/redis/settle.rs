@@ -1,17 +1,17 @@
 use serde::Serialize;
-use spider::{net, payload, scheduler, stats};
+use harbor::{net, payload, scheduler, stats};
 
 use super::Redis;
 use super::error::redis as redis_error;
 use super::key;
 use super::validate;
 
-fn state(value: spider::net::State) -> &'static str {
+fn state(value: harbor::net::State) -> &'static str {
     match value {
-        spider::net::State::Pending => "pending",
-        spider::net::State::Processing => "processing",
-        spider::net::State::Done => "done",
-        spider::net::State::Failed => "failed",
+        harbor::net::State::Pending => "pending",
+        harbor::net::State::Processing => "processing",
+        harbor::net::State::Done => "done",
+        harbor::net::State::Failed => "failed",
     }
 }
 

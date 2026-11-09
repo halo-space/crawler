@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use spider::{scheduler, trace};
+use harbor::{scheduler, trace};
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 

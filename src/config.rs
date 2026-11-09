@@ -10,12 +10,12 @@ use serde_json::Value;
 
 use crate::graph;
 use crate::net::Request;
-use crate::spider;
+use crate::harbor;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub spider: spider::Config,
+    pub spider: harbor::Config,
     pub graph: graph::Config,
     #[serde(default)]
     pub item: Option<crate::item::Config>,

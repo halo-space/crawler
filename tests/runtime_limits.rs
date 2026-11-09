@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use spider::scheduler::{Init, Scheduler};
-use spider::{downloader, engine, net, payload};
+use harbor::scheduler::{Init, Scheduler};
+use harbor::{downloader, engine, net, payload};
 
 #[path = "support/ai.rs"]
 mod ai;
@@ -15,7 +15,7 @@ struct Claim {
 }
 
 struct ClaimScheduler {
-    inner: spider::Memory,
+    inner: harbor::Memory,
     calls: Mutex<Vec<Claim>>,
     active: AtomicUsize,
     max_active: AtomicUsize,
@@ -27,7 +27,7 @@ struct ClaimScheduler {
 impl ClaimScheduler {
     fn new(transient: usize) -> Self {
         Self {
-            inner: spider::Memory::new(),
+            inner: harbor::Memory::new(),
             calls: Mutex::new(Vec::new()),
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
@@ -45,40 +45,40 @@ impl ClaimScheduler {
     }
 
     fn with_modes(mut self, modes: impl IntoIterator<Item = net::Mode>) -> Self {
-        self.inner = spider::Memory::new().with_modes(modes);
+        self.inner = harbor::Memory::new().with_modes(modes);
         self
     }
 }
 
 impl Scheduler for ClaimScheduler {
-    fn lease(&self) -> Option<spider::scheduler::Lease> {
+    fn lease(&self) -> Option<harbor::scheduler::Lease> {
         self.inner.lease()
     }
 
-    async fn open(&self, concurrency: usize) -> Result<(), spider::scheduler::Error> {
+    async fn open(&self, concurrency: usize) -> Result<(), harbor::scheduler::Error> {
         self.opened_concurrency.store(concurrency, Ordering::SeqCst);
         self.inner.open(concurrency).await
     }
 
-    async fn close(&self) -> Result<(), spider::scheduler::Error> {
+    async fn close(&self) -> Result<(), harbor::scheduler::Error> {
         self.inner.close().await
     }
 
-    async fn push(&self, payload: payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn push(&self, payload: payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.inner.push(payload).await
     }
 
     async fn trace(
         &self,
         trace_id: &str,
-    ) -> Result<Option<spider::trace::Snapshot>, spider::scheduler::Error> {
+    ) -> Result<Option<harbor::trace::Snapshot>, harbor::scheduler::Error> {
         self.inner.trace(trace_id).await
     }
 
     async fn next_requests(
         &self,
         limit: usize,
-    ) -> Result<Vec<net::Request>, spider::scheduler::Error> {
+    ) -> Result<Vec<net::Request>, harbor::scheduler::Error> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -90,7 +90,7 @@ impl Scheduler for ClaimScheduler {
             .is_ok()
         {
             self.active.fetch_sub(1, Ordering::SeqCst);
-            return Err(spider::scheduler::Error::Unavailable(
+            return Err(harbor::scheduler::Error::Unavailable(
                 "temporary claim failure".to_string(),
             ));
         }
@@ -103,30 +103,30 @@ impl Scheduler for ClaimScheduler {
         Ok(requests)
     }
 
-    async fn has_pending_requests(&self) -> Result<bool, spider::scheduler::Error> {
+    async fn has_pending_requests(&self) -> Result<bool, harbor::scheduler::Error> {
         self.inner.has_pending_requests().await
     }
 
-    async fn ack(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn ack(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.inner.ack(payload).await
     }
 
-    async fn release(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn release(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.inner.release(payload).await
     }
 
     async fn refresh_lease(
         &self,
         payload: &payload::Payload,
-    ) -> Result<(), spider::scheduler::Error> {
+    ) -> Result<(), harbor::scheduler::Error> {
         self.inner.refresh_lease(payload).await
     }
 
-    async fn success(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn success(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.inner.success(payload).await
     }
 
-    async fn failure(&self, payload: &payload::Payload) -> Result<(), spider::scheduler::Error> {
+    async fn failure(&self, payload: &payload::Payload) -> Result<(), harbor::scheduler::Error> {
         self.inner.failure(payload).await
     }
 }
@@ -139,9 +139,9 @@ impl Init for ClaimScheduler {
     async fn init(
         &self,
         trace_id: String,
-        snapshot: spider::trace::Snapshot,
+        snapshot: harbor::trace::Snapshot,
         requests: Vec<net::Request>,
-    ) -> Result<(), spider::scheduler::Error> {
+    ) -> Result<(), harbor::scheduler::Error> {
         self.inner.init(trace_id, snapshot, requests).await
     }
 }
@@ -171,41 +171,41 @@ impl downloader::Download for SlowDownload {
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct EmptySpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl EmptySpider {
     fn name(&self) -> &str {
         "runtime-limits"
     }
 
-    async fn start(&self) -> Result<(), spider::Error> {
+    async fn start(&self) -> Result<(), harbor::Error> {
         Ok(())
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         Ok(())
     }
 }
 
-#[macros::spider]
+#[macros::harbor]
 struct ConsumeSpider {
     starts: Arc<AtomicUsize>,
 }
 
-#[macros::spider]
+#[macros::harbor]
 impl ConsumeSpider {
     fn name(&self) -> &str {
         "consume-only"
     }
 
-    async fn start(&self) -> Result<(), spider::Error> {
+    async fn start(&self) -> Result<(), harbor::Error> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn index(&self, _response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
         Ok(())
     }
 }
@@ -230,7 +230,7 @@ async fn init_run(scheduler: &impl Init) {
     scheduler
         .init(
             FIXTURE_TRACE.to_string(),
-            spider::trace::Snapshot::code(FIXTURE_TASK),
+            harbor::trace::Snapshot::code(FIXTURE_TASK),
             Vec::new(),
         )
         .await
@@ -239,8 +239,8 @@ async fn init_run(scheduler: &impl Init) {
 
 const REMOTE_AI_TRACE: &str = "remote-ai-trace";
 
-fn ai_rules() -> spider::config::Config {
-    spider::config::Config::from_yaml(
+fn ai_rules() -> harbor::config::Config {
+    harbor::config::Config::from_yaml(
         r#"
 spider:
   name: remote-ai-rules
@@ -259,7 +259,7 @@ graph:
     .unwrap()
 }
 
-async fn remote_rules(config: &spider::config::Config) -> ClaimScheduler {
+async fn remote_rules(config: &harbor::config::Config) -> ClaimScheduler {
     let scheduler = ClaimScheduler::remote();
     let task_id = config.spider.name.clone();
     let requests = config
@@ -268,7 +268,7 @@ async fn remote_rules(config: &spider::config::Config) -> ClaimScheduler {
     scheduler
         .init(
             REMOTE_AI_TRACE.to_string(),
-            spider::trace::Snapshot::rules(task_id, config.clone()),
+            harbor::trace::Snapshot::rules(task_id, config.clone()),
             requests,
         )
         .await
@@ -367,7 +367,7 @@ async fn scheduler_open_receives_frozen_request_concurrency() {
 
 #[tokio::test]
 async fn rules_builder_uses_scheduler_request_modes() {
-    let config = spider::config::Config::from_yaml(
+    let config = harbor::config::Config::from_yaml(
         r#"
 spider:
   name: browser-rules
@@ -480,7 +480,7 @@ async fn remote_rules_trace_uses_worker_openai_without_persisting_it() {
     let config = ai_rules();
     let scheduler = remote_rules(&config).await;
     let provider = ai::Server::start([r#"{"title":"Remote Rust"}"#]);
-    let openai = spider::ai::OpenAI::new(
+    let openai = harbor::ai::OpenAI::new(
         provider.base_url(),
         "provider-sentinel-secret",
         "provider-sentinel-model",

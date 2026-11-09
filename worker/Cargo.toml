@@ -10,9 +10,9 @@ name = "harbor-worker"
 path = "src/main.rs"
 
 [dependencies]
-contrib = { path = "../contrib" }
+contrib = { path = "../contrib", version = "0.1.0" }
 serde = { workspace = true }
-spider = { path = ".." }
+harbor = { path = "..", version = "0.1.0" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 rustls = { workspace = true }

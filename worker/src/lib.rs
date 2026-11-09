@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use contrib::scheduler::api::Api;
-use spider::downloader::{self, Downloader};
-use spider::item::{Jsonl, Map};
-use spider::net::{self, Mode};
-use spider::spider::{Spider, SpiderFactory, Tx};
-use spider::{Error as SpiderError, engine};
+use harbor::downloader::{self, Downloader};
+use harbor::item::{Jsonl, Map};
+use harbor::net::{self, Mode};
+use harbor::harbor::{Spider, SpiderFactory, Tx};
+use harbor::{Error as SpiderError, engine};
 
 /// Configuration for one long-lived Harbor Worker process.
 #[derive(Clone, Debug)]

@@ -5,30 +5,30 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use spider::downloader::{self, Download};
-use spider::net::{Request, Response};
+use harbor::downloader::{self, Download};
+use harbor::net::{Request, Response};
 
-#[macros::spider]
+#[macros::harbor]
 struct RetrySpider {
     url: String,
     parses: Arc<AtomicUsize>,
 }
 
-#[macros::spider]
+#[macros::harbor]
 impl RetrySpider {
     fn name(&self) -> &str {
         "http-retry"
     }
 
-    async fn start(&self) -> Result<(), spider::Error> {
+    async fn start(&self) -> Result<(), harbor::Error> {
         let mut request = Request::follow(&self.url)
-            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .map_err(|error| harbor::Error::Message(error.to_string()))?
             .with_retry(1, [0]);
         request.timeout = Some(80);
         self.tx.request(vec![request]).await
     }
 
-    async fn index(&self, _response: Response) -> Result<(), spider::Error> {
+    async fn index(&self, _response: Response) -> Result<(), harbor::Error> {
         self.parses.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -266,7 +266,7 @@ async fn engine_download_retry_starts_with_a_fresh_timeout_budget() {
         delayed.join().unwrap();
     });
     let parses = Arc::new(AtomicUsize::new(0));
-    let mut engine = spider::engine::Builder::new()
+    let mut engine = harbor::engine::Builder::new()
         .with_spider(RetrySpider::new(url, Arc::clone(&parses)))
         .build()
         .with_concurrency(1);

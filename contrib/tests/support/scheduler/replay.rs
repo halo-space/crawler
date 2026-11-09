@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use spider::{Scheduler, payload};
+use harbor::{Scheduler, payload};
 
 use super::{
     fixture::{close, open_run, race},
@@ -10,7 +10,7 @@ use super::{
 
 pub(super) async fn initial_request_validation_is_atomic<S>(scheduler: S)
 where
-    S: Scheduler + spider::scheduler::Init,
+    S: Scheduler + harbor::scheduler::Init,
 {
     open_run(&scheduler).await;
     let valid = request(
@@ -36,7 +36,7 @@ where
 
 pub(super) async fn unbound_push_is_atomic<S>(scheduler: S)
 where
-    S: Scheduler + spider::scheduler::Init,
+    S: Scheduler + harbor::scheduler::Init,
 {
     open_run(&scheduler).await;
 
@@ -65,7 +65,7 @@ where
 
 pub(super) async fn request_replay_is_atomic<S>(scheduler: S)
 where
-    S: Scheduler + spider::scheduler::Init + 'static,
+    S: Scheduler + harbor::scheduler::Init + 'static,
 {
     open_run(&scheduler).await;
     let original = request("replay", "https://example.com/replay");
@@ -169,7 +169,7 @@ where
 
     let valid = request("invalid-collection-valid", "https://example.com/valid");
     let mut invalid = request("invalid-collection-invalid", "https://example.com/invalid");
-    invalid.state = spider::net::State::Processing;
+    invalid.state = harbor::net::State::Processing;
     assert!(
         scheduler
             .push(payload::Payload::new().requests(vec![valid, invalid]))

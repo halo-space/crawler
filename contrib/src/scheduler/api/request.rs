@@ -2,7 +2,7 @@ mod claim;
 mod init;
 mod trace;
 
-use spider::{net, payload, scheduler};
+use harbor::{net, payload, scheduler};
 
 use super::{Api, wire};
 

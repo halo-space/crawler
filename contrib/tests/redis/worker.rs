@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use spider::{Scheduler, net, payload};
+use harbor::{Scheduler, net, payload};
 
 use super::{key, request, run, server, settlement};
 

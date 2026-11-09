@@ -1,5 +1,5 @@
-use spider::scheduler::{Error, Init};
-use spider::{Scheduler, net, payload, trace};
+use harbor::scheduler::{Error, Init};
+use harbor::{Scheduler, net, payload, trace};
 
 use super::{
     fixture::{close, open},
@@ -56,7 +56,7 @@ where
         7
     );
 
-    let rules = spider::config::Config::from_yaml(
+    let rules = harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-trace

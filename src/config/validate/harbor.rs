@@ -1,8 +1,8 @@
 use std::net::IpAddr;
 
-use crate::{config, graph, net, spider};
+use crate::{config, graph, net, harbor};
 
-pub(super) fn check(config: &spider::Config, graph: &graph::Config) -> Result<(), config::Error> {
+pub(super) fn check(config: &harbor::Config, graph: &graph::Config) -> Result<(), config::Error> {
     if config.name.trim().is_empty() {
         return Err(config::Error::Message(
             "spider.name is required".to_string(),

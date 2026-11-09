@@ -1,9 +1,9 @@
-use spider::{engine, net};
+use harbor::{engine, net};
 
-#[macros::spider]
+#[macros::harbor]
 struct BasicSpider;
 
-#[macros::spider]
+#[macros::harbor]
 impl BasicSpider {
     fn name(&self) -> &str {
         "basic"
@@ -13,11 +13,11 @@ impl BasicSpider {
         vec!["https://example.com/".to_string()]
     }
 
-    async fn index(&self, response: net::Response) -> Result<(), spider::Error> {
+    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
         let soup = response.css()?;
         let title = soup
             .find("h1")
-            .map_err(|error| spider::Error::Message(error.to_string()))?
+            .map_err(|error| harbor::Error::Message(error.to_string()))?
             .map(|node| node.text())
             .unwrap_or_else(|| response.url.clone());
 
@@ -31,14 +31,14 @@ impl BasicSpider {
 struct BasicItem {
     title: String,
     #[serde(skip)]
-    state: spider::item::State,
+    state: harbor::item::State,
 }
 
 impl BasicItem {
     fn new(title: String) -> Self {
         Self {
             title,
-            state: spider::item::State::default(),
+            state: harbor::item::State::default(),
         }
     }
 }

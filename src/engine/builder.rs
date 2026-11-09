@@ -2,9 +2,9 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::runtime::{MAX_EVENTS, Runtime};
-use crate::spider::Spider as _;
-use crate::spider::tx;
-use crate::{config, downloader, engine, middleware, scheduler, spider};
+use crate::harbor::Spider as _;
+use crate::harbor::tx;
+use crate::{config, downloader, engine, middleware, scheduler, harbor};
 
 pub struct Builder<
     S = scheduler::Memory,
@@ -154,8 +154,8 @@ impl<S, D, F, O> Builder<S, D, F, O>
 where
     S: scheduler::Scheduler + scheduler::Init + 'static,
     D: downloader::Download + 'static,
-    F: spider::SpiderFactory,
-    F::Spider: Any + spider::Spider + 'static,
+    F: harbor::SpiderFactory,
+    F::Spider: Any + harbor::Spider + 'static,
     O: crate::item::Store + 'static,
 {
     pub fn build(

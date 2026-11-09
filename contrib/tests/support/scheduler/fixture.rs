@@ -2,8 +2,8 @@ use std::future::Future;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use spider::scheduler::Init;
-use spider::{Scheduler, trace};
+use harbor::scheduler::Init;
+use harbor::{Scheduler, trace};
 
 use super::payload::{TASK_ID, TRACE_ID};
 

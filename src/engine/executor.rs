@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::engine::contract::Execute;
-use crate::{net, spider};
+use crate::{net, harbor};
 
 /// The single runtime executor for both code and Rules Traces.
 pub struct Executor<P> {
@@ -28,7 +28,7 @@ impl<P> Executor<P> {
 
 impl<P> Execute for Executor<P>
 where
-    P: Any + spider::Spider + Send + Sync + 'static,
+    P: Any + harbor::Spider + Send + Sync + 'static,
 {
     #[allow(clippy::manual_async_fn)]
     fn start(&self) -> impl Future<Output = Result<(), crate::Error>> + Send {
@@ -101,7 +101,7 @@ fn trace(request: &net::Request) -> Result<&Arc<crate::trace::Snapshot>, crate::
 
 impl<P> Executor<P>
 where
-    P: Any + spider::Spider + Send + Sync + 'static,
+    P: Any + harbor::Spider + Send + Sync + 'static,
 {
     fn validate_code(&self, request: &net::Request) -> Result<(), crate::Error> {
         if request.node_key() != "index" && self.spider.handler(request.node_key()).is_none() {

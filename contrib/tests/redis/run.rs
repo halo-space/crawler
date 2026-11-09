@@ -1,6 +1,6 @@
 use contrib::scheduler::redis::Redis;
-use spider::scheduler::Init;
-use spider::{Scheduler, trace};
+use harbor::scheduler::Init;
+use harbor::{Scheduler, trace};
 
 pub(super) const TASK_ID: &str = "redis-test-task";
 pub(super) const TRACE_ID: &str = "redis-test-trace";

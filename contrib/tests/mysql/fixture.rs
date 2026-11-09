@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use contrib::scheduler::mysql::MySql;
-use spider::scheduler::Init as _;
-use spider::{Scheduler as _, net, payload, trace};
+use harbor::scheduler::Init as _;
+use harbor::{Scheduler as _, net, payload, trace};
 
 pub(super) const TASK_ID: &str = "mysql-test-task";
 pub(super) const TRACE_ID: &str = "mysql-test-trace";

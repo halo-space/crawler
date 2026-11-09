@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use contrib::scheduler::mysql::MySql;
-use spider::scheduler::Lease;
+use harbor::scheduler::Lease;
 
 use super::{conformance, server};
 
@@ -71,7 +71,7 @@ fn isolated(urls: &Arc<Mutex<VecDeque<String>>>, lease: Lease) -> MySql {
         .unwrap()
         .with_worker_version("test")
         .unwrap()
-        .with_modes([spider::net::Mode::Http, spider::net::Mode::Browser])
+        .with_modes([harbor::net::Mode::Http, harbor::net::Mode::Browser])
         .unwrap()
         .with_lease(lease)
         .unwrap()

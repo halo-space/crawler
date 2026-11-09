@@ -1,11 +1,11 @@
 #[path = "support/scheduler/conformance.rs"]
 mod conformance;
 
-use spider::Memory;
-use spider::scheduler::Lease;
+use harbor::Memory;
+use harbor::scheduler::Lease;
 
 fn new() -> Memory {
-    Memory::new().with_modes([spider::net::Mode::Http, spider::net::Mode::Browser])
+    Memory::new().with_modes([harbor::net::Mode::Http, harbor::net::Mode::Browser])
 }
 
 fn short_lease() -> Memory {

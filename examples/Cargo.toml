@@ -10,5 +10,5 @@ publish = false
 macros = { path = "../macros" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-spider = { path = ".." }
+harbor = { path = "..", version = "0.1.0" }
 tokio = { workspace = true }

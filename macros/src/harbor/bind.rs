@@ -9,7 +9,7 @@ use super::check;
 pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::TokenStream {
     if item.trait_.is_some() {
         return quote! {
-            compile_error!("#[spider] expects a plain impl block, not a trait impl");
+            compile_error!("#[harbor] expects a plain impl block, not a trait impl");
         };
     }
 
@@ -17,7 +17,7 @@ pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::To
     let self_ty = item.self_ty;
     let generics = item.generics;
     let where_clause = generics.where_clause.as_ref();
-    let item_type = item_type.unwrap_or_else(|| parse_quote!(::spider::item::Map));
+    let item_type = item_type.unwrap_or_else(|| parse_quote!(::harbor::item::Map));
 
     let mut methods = Vec::new();
     let mut errors = Vec::new();
@@ -45,7 +45,7 @@ pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::To
             other => {
                 let tokens = other.into_token_stream().to_string();
                 errors.push(quote! {
-                    compile_error!(concat!("#[spider] only supports methods in impl blocks: ", #tokens));
+                    compile_error!(concat!("#[harbor] only supports methods in impl blocks: ", #tokens));
                 });
             }
         }
@@ -71,7 +71,7 @@ pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::To
         let method = syn::Ident::new(name, proc_macro2::Span::call_site());
         let wrapper = wrapper(name);
         let call = if check::is_trait_method(name) {
-            quote!(::spider::Spider::#method(spider, response))
+            quote!(::harbor::Spider::#method(spider, response))
         } else {
             quote!(spider.#method(response))
         };
@@ -79,8 +79,8 @@ pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::To
         quote! {
             fn #wrapper<'a>(
                 spider: &'a Self,
-                response: ::spider::Response,
-            ) -> ::spider::net::BoxFuture<'a> {
+                response: ::harbor::Response,
+            ) -> ::harbor::net::BoxFuture<'a> {
                 Box::pin(#call)
             }
         }
@@ -89,7 +89,7 @@ pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::To
         let wrapper = wrapper(name);
         let name = LitStr::new(name, proc_macro2::Span::call_site());
         quote! {
-            #name => Some(::spider::net::Handler::new(#name, Self::#wrapper)),
+            #name => Some(::harbor::net::Handler::new(#name, Self::#wrapper)),
         }
     });
     let item_wrappers = item_functions
@@ -101,8 +101,8 @@ pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::To
             quote! {
                 fn #wrapper<'a>(
                     spider: &'a Self,
-                    item: <Self as ::spider::Spider>::Item,
-                ) -> ::spider::net::BoxFuture<'a> {
+                    item: <Self as ::harbor::Spider>::Item,
+                ) -> ::harbor::net::BoxFuture<'a> {
                     Box::pin(spider.#method(item))
                 }
             }
@@ -114,7 +114,7 @@ pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::To
             let wrapper = item_wrapper(name);
             let name = LitStr::new(name, proc_macro2::Span::call_site());
             quote! {
-                #name => Some(::spider::item::Function::new(#name, Self::#wrapper)),
+                #name => Some(::harbor::item::Function::new(#name, Self::#wrapper)),
             }
         });
 
@@ -142,30 +142,30 @@ pub(super) fn expand(item: ItemImpl, item_type: Option<Type>) -> proc_macro2::To
 
             fn __spider_item_fn_item<'a>(
                 spider: &'a Self,
-                item: <Self as ::spider::Spider>::Item,
-            ) -> ::spider::net::BoxFuture<'a> {
-                Box::pin(::spider::Spider::item(spider, item))
+                item: <Self as ::harbor::Spider>::Item,
+            ) -> ::harbor::net::BoxFuture<'a> {
+                Box::pin(::harbor::Spider::item(spider, item))
             }
         }
 
         #(#attrs)*
-        impl #generics ::spider::Spider for #self_ty #where_clause {
+        impl #generics ::harbor::Spider for #self_ty #where_clause {
             type Item = #item_type;
 
-            fn tx(&self) -> &::spider::Tx {
+            fn tx(&self) -> &::harbor::Tx {
                 &self.tx
             }
 
-            fn handler(&self, node: &str) -> Option<::spider::net::Handler> {
+            fn handler(&self, node: &str) -> Option<::harbor::net::Handler> {
                 match node {
                     #(#arms)*
                     _ => None,
                 }
             }
 
-            fn item_fn(&self, name: &str) -> Option<::spider::item::Function<Self>> {
+            fn item_fn(&self, name: &str) -> Option<::harbor::item::Function<Self>> {
                 match name {
-                    "item" => Some(::spider::item::Function::new(
+                    "item" => Some(::harbor::item::Function::new(
                         "item",
                         Self::__spider_item_fn_item,
                     )),
@@ -268,8 +268,8 @@ mod tests {
             "impl BookSpider {
                 pub async fn detail(
                     &self,
-                    response: spider::Response,
-                ) -> Result<(), spider::Error> {
+                    response: harbor::Response,
+                ) -> Result<(), harbor::Error> {
                     let _ = response;
                     Ok(())
                 }
@@ -278,8 +278,8 @@ mod tests {
 
                 pub async fn index(
                     &self,
-                    response: spider::Response,
-                ) -> Result<(), spider::Error> {
+                    response: harbor::Response,
+                ) -> Result<(), harbor::Error> {
                     let _ = response;
                     Ok(())
                 }

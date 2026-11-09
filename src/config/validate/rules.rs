@@ -22,24 +22,65 @@ pub(super) fn check(config: &graph::Config) -> Result<(), Error> {
             check_value(&edge.from, value_ref, source)?;
         }
         if let Some(when) = &edge.when {
-            let path = when
-                .strip_suffix(" != null")
-                .or_else(|| when.strip_suffix(" == null"))
-                .ok_or_else(|| {
-                    Error::Message(format!(
-                        "edge from {} uses unsupported when expression: {when}",
-                        edge.from
-                    ))
-                })?;
-            check_reference(
+            check_condition(
                 &edge.from,
-                path.trim(),
-                &source.fields,
+                when,
+                source,
                 &source.binds.keys().map(String::as_str).collect(),
             )?;
         }
     }
 
+    Ok(())
+}
+
+fn check_condition(
+    node: &str,
+    condition: &graph::edge::Condition,
+    source: &graph::node::Config,
+    binds: &HashSet<&str>,
+) -> Result<(), Error> {
+    match condition {
+        graph::edge::Condition::Predicate(predicate) => {
+            check_reference(node, &predicate.from, &source.fields, binds)?;
+            match predicate.op {
+                graph::edge::ConditionOp::Present | graph::edge::ConditionOp::Absent => {
+                    if predicate.value.is_some() {
+                        return Err(Error::Message(format!(
+                            "edge from {node} {:#?} does not accept value",
+                            predicate.op
+                        )));
+                    }
+                }
+                _ => {
+                    let value = predicate.value.as_ref().ok_or_else(|| {
+                        Error::Message(format!("edge from {node} condition requires value"))
+                    })?;
+                    check_value(node, value, source)?;
+                }
+            }
+        }
+        graph::edge::Condition::All(group) => {
+            if group.all.is_empty() {
+                return Err(Error::Message(format!(
+                    "edge from {node} when.all must not be empty"
+                )));
+            }
+            for condition in &group.all {
+                check_condition(node, condition, source, binds)?;
+            }
+        }
+        graph::edge::Condition::Any(group) => {
+            if group.any.is_empty() {
+                return Err(Error::Message(format!(
+                    "edge from {node} when.any must not be empty"
+                )));
+            }
+            for condition in &group.any {
+                check_condition(node, condition, source, binds)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -100,6 +141,7 @@ fn check_node(name: &str, node: &graph::node::Config) -> Result<(), Error> {
                             | "uppercase"
                             | "url_join"
                             | "url_normalize"
+                            | "add"
                     ) {
                         return Err(Error::Message(format!(
                             "node {name} bind {bind_name} uses unsupported transform: {}",
@@ -153,6 +195,23 @@ fn check_transform(
     available_bind: &HashSet<&str>,
 ) -> Result<(), Error> {
     match transform.kind.as_str() {
+        "add" => {
+            if transform.args.keys().any(|name| name != "value")
+                || !transform.args.contains_key("value")
+            {
+                return Err(Error::Message(format!(
+                    "node {node} bind {bind_name} add requires only value"
+                )));
+            }
+            let value = transform.args.get("value").expect("checked above");
+            if let Some(path) = value.as_str().filter(|value| value.starts_with('$')) {
+                check_reference(node, path, fields, available_bind)?;
+            } else if !value.is_i64() {
+                return Err(Error::Message(format!(
+                    "node {node} bind {bind_name} add.value must be an integer or reference"
+                )));
+            }
+        }
         "url_join" => {
             if transform.args.keys().any(|name| name != "base_url") {
                 return Err(Error::Message(format!(

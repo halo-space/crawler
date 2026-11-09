@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use contrib::middleware::rate_limit::Redis;
-use spider::middleware::{Middleware as _, Next, Spec};
-use spider::net::Request;
+use harbor::middleware::{Middleware as _, Next, Spec};
+use harbor::net::Request;
 
 #[allow(dead_code)]
 #[path = "redis/server.rs"]
@@ -90,7 +90,7 @@ async fn active_qps_conflict_does_not_change_the_schedule() {
 
     assert!(matches!(
         result,
-        Err(spider::middleware::Error::InvalidConfig { name, message })
+        Err(harbor::middleware::Error::InvalidConfig { name, message })
             if name == "rate_limit" && message.contains("different qps")
     ));
     assert_eq!(state(&server, &group).await, before);

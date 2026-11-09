@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use serde_json::Value;
-use spider::downloader::{Download, http::Http};
-use spider::{net, selector};
+use harbor::downloader::{Download, http::Http};
+use harbor::{net, selector};
 
 const EASTMONEY_URL: &str = "https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.601398,1.600036,1.600030,1.601318,0.300059,1.600705,1";
 

@@ -1,10 +1,10 @@
-use crate::{net, spider};
+use crate::{net, harbor};
 
-pub type Call<S> = for<'a> fn(&'a S, <S as spider::Spider>::Item) -> net::BoxFuture<'a>;
+pub type Call<S> = for<'a> fn(&'a S, <S as harbor::Spider>::Item) -> net::BoxFuture<'a>;
 
 pub struct Function<S>
 where
-    S: spider::Spider,
+    S: harbor::Spider,
 {
     name: &'static str,
     call: Call<S>,
@@ -12,7 +12,7 @@ where
 
 impl<S> Function<S>
 where
-    S: spider::Spider,
+    S: harbor::Spider,
 {
     pub fn new(name: &'static str, call: Call<S>) -> Self {
         Self { name, call }

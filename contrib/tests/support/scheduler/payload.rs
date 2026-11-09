@@ -1,4 +1,4 @@
-use spider::{net, payload};
+use harbor::{net, payload};
 
 pub(super) const TASK_ID: &str = "conformance-task";
 pub(super) const TRACE_ID: &str = "conformance-trace";

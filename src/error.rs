@@ -7,7 +7,7 @@ pub mod middleware;
 pub mod net;
 pub mod scheduler;
 pub mod selector;
-pub mod spider;
+pub mod harbor;
 pub mod stats;
 
 /// Unified error returned by the framework runtime.
@@ -38,7 +38,7 @@ pub enum Error {
     Scheduler(#[from] scheduler::Error),
 
     #[error("spider failed: {0}")]
-    Spider(#[from] spider::Error),
+    Spider(#[from] harbor::Error),
 
     #[error("selector failed: {0}")]
     Selector(#[from] selector::Error),

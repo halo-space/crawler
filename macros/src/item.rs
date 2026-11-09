@@ -74,28 +74,28 @@ fn try_expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let (impl_generics, _, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
-        impl #impl_generics ::spider::item::Item for #ident #type_generics #where_clause {
+        impl #impl_generics ::harbor::item::Item for #ident #type_generics #where_clause {
             fn from_values(
-                values: ::spider::item::Values,
-            ) -> ::std::result::Result<Self, ::spider::item::Error> {
-                ::spider::item::deserialize(values)
+                values: ::harbor::item::Values,
+            ) -> ::std::result::Result<Self, ::harbor::item::Error> {
+                ::harbor::item::deserialize(values)
             }
 
-            fn state(&self) -> &::spider::item::State {
+            fn state(&self) -> &::harbor::item::State {
                 &self.state
             }
 
-            fn state_mut(&mut self) -> &mut ::spider::item::State {
+            fn state_mut(&mut self) -> &mut ::harbor::item::State {
                 &mut self.state
             }
 
             fn values(
                 &self,
-            ) -> ::std::result::Result<::spider::item::Values, ::spider::item::Error> {
+            ) -> ::std::result::Result<::harbor::item::Values, ::harbor::item::Error> {
                 let value = ::serde_json::to_value(self)
-                    .map_err(::spider::item::Error::Serialize)?;
+                    .map_err(::harbor::item::Error::Serialize)?;
                 let ::serde_json::Value::Object(values) = value else {
-                    return Err(::spider::item::Error::Message(
+                    return Err(::harbor::item::Error::Message(
                         "Item serialization must produce an object".to_string(),
                     ));
                 };
@@ -104,10 +104,10 @@ fn try_expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
             fn replace_values(
                 &mut self,
-                values: ::spider::item::Values,
-            ) -> ::std::result::Result<(), ::spider::item::Error> {
+                values: ::harbor::item::Values,
+            ) -> ::std::result::Result<(), ::harbor::item::Error> {
                 let state = self.state.clone();
-                let mut replacement: Self = ::spider::item::deserialize(values)?;
+                let mut replacement: Self = ::harbor::item::deserialize(values)?;
                 replacement.state = state;
                 *self = replacement;
                 Ok(())
@@ -163,13 +163,13 @@ mod tests {
             struct Article<T> {
                 title: T,
                 #[serde(skip)]
-                state: spider::item::State,
+                state: harbor::item::State,
             }
             "#,
         );
 
-        assert!(output.contains("spider :: item :: Item for Article < T >"));
-        assert!(output.contains("spider :: item :: deserialize"));
+        assert!(output.contains("harbor :: item :: Item for Article < T >"));
+        assert!(output.contains("harbor :: item :: deserialize"));
         assert!(output.contains("& self . state"));
         assert!(output.contains("& mut self . state"));
     }
@@ -180,7 +180,7 @@ mod tests {
             r#"
             struct Article {
                 #[serde(skip)]
-                state: spider::item::State,
+                state: harbor::item::State,
             }
             "#,
         );
@@ -197,7 +197,7 @@ mod tests {
             r#"
             #[serde(deny_unknown_fields)]
             struct Article {
-                state: spider::item::State,
+                state: harbor::item::State,
             }
             "#,
         );
@@ -233,7 +233,7 @@ mod tests {
                 #[serde(flatten)]
                 extra: std::collections::HashMap<String, serde_json::Value>,
                 #[serde(skip)]
-                state: spider::item::State,
+                state: harbor::item::State,
             }
             "#,
         );

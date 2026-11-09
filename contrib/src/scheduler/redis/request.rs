@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spider::{net, payload, scheduler, trace};
+use harbor::{net, payload, scheduler, trace};
 
 use super::Redis;
 use super::error::{message, redis as redis_error};

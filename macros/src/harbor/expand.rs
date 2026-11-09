@@ -31,17 +31,17 @@ pub(super) fn structure(mut item: ItemStruct) -> proc_macro2::TokenStream {
         impl #impl_generics #ident #ty_generics #where_clause {
             pub fn new(
                 #(#constructor_args,)*
-            ) -> impl ::spider::SpiderFactory<Spider = Self> {
+            ) -> impl ::harbor::SpiderFactory<Spider = Self> {
                 #factory {
                     #(#constructor_fields,)*
                 }
             }
         }
 
-        impl #impl_generics ::spider::SpiderFactory for #factory #ty_generics #where_clause {
+        impl #impl_generics ::harbor::SpiderFactory for #factory #ty_generics #where_clause {
             type Spider = #ident #ty_generics;
 
-            fn build(self, tx: ::spider::Tx) -> Self::Spider {
+            fn build(self, tx: ::harbor::Tx) -> Self::Spider {
                 #ident {
                     #(#build_fields,)*
                     tx,
@@ -64,7 +64,7 @@ fn fields(item: &ItemStruct) -> Result<Vec<(syn::Ident, syn::Type)>, proc_macro2
 
                 if ident == "tx" {
                     return Err(quote! {
-                        compile_error!("#[spider] reserves the tx field for framework injection");
+                        compile_error!("#[harbor] reserves the tx field for framework injection");
                     });
                 }
 
@@ -74,7 +74,7 @@ fn fields(item: &ItemStruct) -> Result<Vec<(syn::Ident, syn::Type)>, proc_macro2
             Ok(fields)
         }
         Fields::Unnamed(_) => Err(quote! {
-            compile_error!("#[spider] does not support tuple structs");
+            compile_error!("#[harbor] does not support tuple structs");
         }),
     }
 }
@@ -82,16 +82,16 @@ fn fields(item: &ItemStruct) -> Result<Vec<(syn::Ident, syn::Type)>, proc_macro2
 fn inject_tx(item: &mut ItemStruct) -> Result<(), proc_macro2::TokenStream> {
     match &mut item.fields {
         Fields::Unit => {
-            let fields: FieldsNamed = parse_quote!({ tx: ::spider::Tx });
+            let fields: FieldsNamed = parse_quote!({ tx: ::harbor::Tx });
             item.fields = Fields::Named(fields);
             Ok(())
         }
         Fields::Named(fields) => {
-            fields.named.push(parse_quote!(tx: ::spider::Tx));
+            fields.named.push(parse_quote!(tx: ::harbor::Tx));
             Ok(())
         }
         Fields::Unnamed(_) => Err(quote! {
-            compile_error!("#[spider] does not support tuple structs");
+            compile_error!("#[harbor] does not support tuple structs");
         }),
     }
 }

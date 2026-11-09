@@ -2,8 +2,8 @@ use std::time::Duration;
 use std::{collections::HashMap, io::Read as _, io::Write as _, sync::Arc};
 
 use serde_json::json;
-use spider::scheduler::Init as _;
-use spider::{Scheduler as _, net, payload, scheduler, trace};
+use harbor::scheduler::Init as _;
+use harbor::{Scheduler as _, net, payload, scheduler, trace};
 
 use super::Api;
 use super::client;

@@ -1,4 +1,4 @@
-use spider::{net, scheduler, stats};
+use harbor::{net, scheduler, stats};
 
 pub(super) fn worker(worker_id: &str, modes: &[net::Mode]) -> Result<(), scheduler::Error> {
     if worker_id.trim().is_empty() {

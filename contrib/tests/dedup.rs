@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use contrib::middleware::dedup::{Options, Redis as Dedup};
-use spider::middleware::{Middleware as _, Next, Spec};
-use spider::net::Request;
+use harbor::middleware::{Middleware as _, Next, Spec};
+use harbor::net::Request;
 
 const DEFAULT_URL: &str = "redis://127.0.0.1:6379";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);

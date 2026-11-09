@@ -1,5 +1,5 @@
 use contrib::scheduler::redis::Redis;
-use spider::{Scheduler, net, payload};
+use harbor::{Scheduler, net, payload};
 
 use super::{request, server, worker};
 
@@ -135,9 +135,9 @@ fn take(requests: &mut Vec<net::Request>, id: &str) -> net::Request {
     requests.swap_remove(index)
 }
 
-fn assert_lease_mismatch(error: spider::scheduler::Error, id: &str) {
+fn assert_lease_mismatch(error: harbor::scheduler::Error, id: &str) {
     assert!(matches!(
         error,
-        spider::scheduler::Error::LeaseMismatch(request_id) if request_id == id
+        harbor::scheduler::Error::LeaseMismatch(request_id) if request_id == id
     ));
 }

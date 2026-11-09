@@ -2,744 +2,865 @@
 
 [项目 README](../README.zh-CN.md) | 简体中文 | [English](usage.md)
 
-`Harbor` 是一个使用 Rust 编写的爬虫运行时。默认单进程形态提供内存调度器、HTTP 下载器、中间件
-生命周期、异步 Spider 处理器、规则模式、CSS Healing、AI Selector 和本地 JSONL 数据输出；`contrib`
-提供 Redis/MySQL Scheduler 和分布式中间件，并保持同一套 Engine 合同。运行时已完成 Task/Trace 运行种子、
-按 Worker 能力领取 Request，以及确定性的响应字符集解码。
+本文只介绍 Harbor 的使用方法：如何创建爬虫、如何编写 Rules、如何抓取列表和详情、如何保存 Item。
 
-完整的当前功能、运行模型与扩展边界见[架构与功能说明](architecture.zh-CN.md)。
+## 1. 准备项目
 
-## 运行环境
+Harbor 使用 Rust 2024 edition。开发环境需要 Rust 1.97 或更高版本。
 
-- Rust 1.97.0
-- Cargo
-
-克隆仓库后可直接检查整个 workspace：
+工作区内运行示例：
 
 ```bash
-cargo check --workspace --all-targets
-```
-
-## 代码模式
-
-代码模式使用 `#[spider]` 宏定义 Spider。宏负责注入框架内部的事件发送器，业务代码只需要声明
-Spider 字段和处理函数。
-
-完整可编译示例位于 [examples/src/bin/basic.rs](../examples/src/bin/basic.rs)，其中包含 Spider、Item 和
-Engine 的完整定义。运行命令：
-
-```bash
+# 运行代码模式示例。
 cargo run -p examples --bin basic
-```
 
-独立 Worker 服务位于 `harbor-worker` crate。它连接 Master API，消费已经发布的 Request，
-从 Trace Snapshot 恢复 Rules，并通过 Worker 自己的 Store 写入 Item：
-
-```bash
-HARBOR_MASTER_URL=https://master.example.com/ \
-HARBOR_TOKEN=... \
-HARBOR_WORKER_ID=worker-01 \
-HARBOR_WORKER_LIMIT=5 \
-cargo run -p harbor-worker
-```
-
-代码模式使用默认 Memory Scheduler 时，每次启动都以唯一的 `Spider.name` 创建一份运行种子：新的
-`trace_id`、不可变 Trace Snapshot 和初始 Request。远程 Scheduler 可以声明只消费已有运行种子；在
-这条代码模式路径中，Engine 不会在 Worker 本地创建 Trace，也不会调用 `Spider.start()`。代码 Request
-只持久化稳定 node，Worker 通过本地 Spider node 注册表恢复处理函数，不保存 Rust 函数指针。
-`Request::follow()` 只负责构造 Request 规格，因此 `task_id / trace_id` 可以暂时为空，直到运行种子或
-当前 Tx 上下文完成绑定。`Scheduler::init` 与 `Scheduler::push` 一律拒绝未绑定 Request；进入队列后的
-Snapshot、领取、重试和恢复始终同时携带两者，并关联真实 Trace Snapshot。代码模式使用 `dsl` 为空的
-Trace Snapshot，不以缺少 Trace 表示代码模式。
-
-Rules 启动时先静态校验配置、冻结 Trace Snapshot、生成初始 Requests，再把两者直接交给
-`Scheduler::init` 原子发布。运行种子发布不执行 Worker Middleware、`before_scheduler` 或 Dedup；
-后续通过 `Tx` 产生的 Request 仍在 `Scheduler::push` 前经过正常准入链路。
-
-## Redis Scheduler
-
-`contrib::scheduler::redis::Redis` 完整实现核心 `Scheduler` 和 `Init` 合同。它与 Memory 使用相同的
-装配方式，Engine 不包含 Redis 特例：
-
-```rust
-use contrib::scheduler::redis::Redis;
-use spider::{engine, net};
-
-let scheduler = Redis::new("redis://127.0.0.1:6379")?
-    .with_namespace("crawler")?
-    .with_worker_id("worker-01")?
-    .with_worker_host("crawler-node-01")?
-    .with_worker_version("1.0.0")?
-    .with_modes([net::Mode::Http])?;
-
-let mut engine = engine::Engine::new()
-    .with_scheduler(scheduler)
-    .with_spider(BasicSpider::new())
-    .build();
-
-engine.start().await?; // 持续运行到 SIGINT/SIGTERM，再排空已接收工作。
-```
-
-Worker ID、host、version 和 modes 都是 Scheduler 配置。`open(concurrency)` 完成注册并启动心跳；同一个
-仍在线的 Worker ID 会拒绝重复注册。心跳失败只暂停后续领取，并持续重试直至恢复；已领取 Request 不受
-影响。正常 `close()` 会先等待心跳任务结束，再尝试显式离线，保证离线写入后不会继续发送心跳；更新
-失败时记录日志，随后由心跳超时释放注册。若 `close()` 在等待心跳或离线响应时被取消，连接、注册 token
-和停止状态仍保留，再次调用 `close()` 会继续完成关闭。所有
-Redis key 都按 namespace 隔离，关闭不会删除
-排队数据。Redis 保存
-Trace Snapshot、Request 状态、按 mode 分域的 processing 租约、结算和统计。每个
-`processing:<mode>` ZSET 是唯一的活动执行权/租约投影，score 使用 `lease_time`；Request Hash 仍是状态
-事实来源。Item 持久化属于独立的 `item::Store` 依赖，不进入 Redis Scheduler。一次 Engine 运行在启动时只绑定
-一个 Store；使用 `.with_store(store)` 替换默认的 JSONL 实现。框架不提供 Store 路由、Store 注册表、
-按 Task 选择 Store，也没有 `persister_id` 这一运行时字段。
-同一生命周期内，只有并发数相同的重复 `open` 才是幂等操作；不同并发数会被拒绝，必须先 `close()`
-再开始新的生命周期。
-
-从第一次注册尝试开始，到注册确认或 `close()` 显式放弃为止，Worker 与 namespace 配置保持冻结，保证
-取消后的重试仍绑定同一个 Worker 身份和 namespace。
-
-Redis 会限制每次领取的重复维护工作：一次 `next_requests` 每个 mode 最多回收 64 条过期租约，并在两个 mode 合计巡检
-128 条 processing 记录；对传入的每个
-mode，最多提升并巡检 128 条延迟 Request。在回收、延迟提升、巡检或选择任务时发现单条 Request 记录缺失，
-会清理对应的悬挂索引；合法 processing Hash 的 score 或 mode 投影不一致会原地修复，不消费重试次数；
-Request Hash 或队列记录本身非法时才会移出活动索引，写入完成记录并转为失败终态。这些记录都不会阻塞
-后续正常 Request。领取返回前，Worker 会重新计算不可变 Request Snapshot 的 hash；hash 不一致会进入同一
-恢复路径，不会执行该 Request。已通过 hash 验证的 Snapshot 重试上限不能被可变 Hash 覆盖；单条恢复失败也
-不能扣留同批合法 Request。共享索引的 Redis 类型损坏则会在状态写入前明确使本次领取失败。Request
-Snapshot 的 `max_retry_count` 必须位于 `1..=128`；恢复以不可变 Snapshot 为准，可变 Hash 不能扩大该值。
-当前 key 布局不迁移旧 Redis namespace，部署时使用新的 namespace。
-
-失败 Worker 的领取资格投影到按 mode 分域的 `pending_exclusions` ZSET。单次领取最多检查 128 个排除成员，
-必要时会推进按 mode 保存的“最新已检查 ready-event revision + 最后一个排除的 ready member”游标并临时
-返回空集合。每次进入 ready 队列都会向 `ready_events:<mode>` 写入事件；恢复游标前只检查该 mode 的后续
-事件。仅当新的 ready Request 排在游标 member 之前且当前 Worker 可以领取时才重置扫描；低优先级或其他
-mode 的 ready 写入不会丢失已有进度。选择不会越过尚未确认的高优先级前缀或 mode。Pending 判断直接比较
-排队数量和当前 Worker 的排除索引，不会在一次 Redis Lua 调用中扫描完整积压。
-
-本版本只支持 Redis 7+ 单实例 primary，不支持 Redis Cluster。多 key Lua 状态转换依赖单实例原子性，
-Cluster 将作为独立 Scheduler 设计。需要可恢复持久化时，必须启用 AOF（`appendonly yes`）并配置
-`maxmemory-policy noeviction`。`appendfsync` 是运维侧在更强持久性与写入吞吐/延迟之间的选择
-（例如 `always` 与 `everysec`）。
-
-## MySQL Scheduler
-
-`contrib::scheduler::mysql::MySql` 面向 MySQL 9，完整实现与 Memory/Redis 相同的 `Scheduler` 和
-`Init` 合同。隔离边界直接使用 DSN 中选择的数据库，不增加 namespace：
-
-```rust
-use contrib::scheduler::mysql::MySql;
-use spider::{engine, net};
-
-let scheduler = MySql::new("mysql://crawler:secret@127.0.0.1:3306/crawler")?
-    .with_worker_id("worker-01")?
-    .with_worker_host("crawler-node-01")?
-    .with_worker_version("1.0.0")?
-    .with_modes([net::Mode::Http])?;
-
-let mut engine = engine::Engine::new()
-    .with_scheduler(scheduler)
-    .with_spider(BasicSpider::new())
-    .build();
-
-engine.start().await?;
-```
-
-建表由运维人员显式执行 [contrib/sql/mysql/schema.sql](../contrib/sql/mysql/schema.sql)。
-`MySql::open()` 不执行 DDL；它只建立连接池，校验七张必需表、全部运行期字段的类型和可空性、NO PAD 的
-`utf8mb4_0900_bin` 身份/合同文本列、`InnoDB` 和使用完整字段的原子性唯一键，然后注册 Worker 并启动心跳。
-所有连接使用 `READ COMMITTED`。领取先用 keyset 游标按 priority/FIFO 扫描候选，再通过
-`FOR UPDATE OF r SKIP LOCKED` 锁定事实 Request；锁住的队首会被跳过并继续向后扫描，直到拿满请求数量或
-确实没有合格候选。领取、租约恢复、
-ack/release、续租、成功/失败结算、统计合并和重试入队都在数据库事务内完成。
-
-`requests.snapshot` 保存不可变 JSON Snapshot，`snapshot_hash` 保存 32 字节 SHA-256；
-`queues.sequence` 每次重新入队都会生成新的自增序号，因此优先级相同时保持与 Redis 相同的 FIFO
-语义。`created_time / updated_time` 使用 `DATETIME(3)` 便于运维查询；`lease_time`、`next_time`、
-`start_time / end_time` 等运行期时间继续使用毫秒整数，与其他 Scheduler 语义一致。
-
-MySQL Scheduler 直接操作 DSN 数据库，不经过 Master。无法向 Worker 开放数据库连接时，使用下面的
-API Scheduler，由独立 Master 项目在服务端实现同一套事务语义。两者只是不同的 Scheduler 装配，
-Item 仍由 Worker 上独立配置的 Store 持久化。
-
-## API Scheduler
-
-API Scheduler 使用已有 HTTP transport、namespace 和认证，同时持有完全相同的 Worker 配置与生命周期：
-
-```rust
-use contrib::scheduler::api::Api;
-use spider::net;
-
-let scheduler = Api::new("https://master.example.com", api_key)?
-    .with_namespace("crawler")?
-    .with_worker_id("worker-01")?
-    .with_worker_host("crawler-node-01")?
-    .with_worker_version("1.0.0")?
-    .with_modes([net::Mode::Http])?;
-```
-
-`open` 先读取 `/v1/worker/policy`，再通过 `/v1/worker/register` 注册，并采用服务端返回的心跳间隔；
-心跳和显式离线分别调用 `/v1/worker/heartbeat` 与 `/v1/worker/offline`。Worker 管理响应固定使用
-`{code, message, data}`，`200` 表示成功，注册时 `100` 表示在线 ID 冲突。服务端生成的注册 token 会在
-心跳和离线请求中原样返回，但不参与 Request 领取、租约或结算身份校验。
-policy 中的租约超时和续租间隔必须与 Scheduler 本地配置完全一致。API Scheduler 不为发给 Master
-的请求体或 Master 返回的响应体增加字节数配置。
-只要 API Scheduler 仍保留未完成注册 key 或已确认 token，其配置就保持冻结，直到生命周期完成或被
-显式关闭。
-
-claim 和 release 使用操作级 `Idempotency-Key` 恢复。传输错误、超时或成功响应无法解码时，结果仍未
-确认，因此相同领取参数的下一次 claim 或相同租约身份的下一次 release 会复用保留的 key；尚有未确认
-claim 时，不同领取参数会被拒绝。收到成功结果或确定性失败后清除对应 key。claim 串行执行，排队中的
-claim 会重新检查 Worker 在线状态；claim 重放保留第一次操作的单调起点，未确认的 release key 随租约
-截止而过期。API `close()` 会先停止并等待原心跳任务，再发送离线更新；如果等待过程被取消，下一次
-`close()` 会继续等待同一个任务。
-
-批量领取省略 Trace Snapshot 时，API 恢复会对同一批相同 `trace_id` 只读取一次，并发读取不同
-Trace。Trace 读取、缺失、解码、校验和 task/node 绑定错误只调用 `release`，不调用 `ack` 或
-`failure`，也不消耗 Request 重试；只有 Request Snapshot 或执行状态本身损坏才使用
-`ack + failure`。恢复及每条 Request 的恢复结算共用 lease handoff deadline，成功恢复的 Request
-保持服务端领取顺序。逐条 release 相互独立，单条失败不会阻止剩余领取结果归还。
-
-## Selector
-
-在处理函数中通过 `self.tx.request(...)` 提交的新请求会进入同一个 Scheduler 队列；通过
-`self.tx.item(...)` 提交的数据经过 Item 中间件后交给独立的 Item Store。
-
-Rules 模式中，extractor 表达式直接决定结果数量：零个匹配为 `null`，一个匹配为标量或节点对象，
-多个匹配为数组，不再提供额外的 `select`。媒体字段通过
-`node.fields.<name>.kind = image | video | audio` 声明，crawler 在 validator 处理
-`item.schema` 前将其规范化为固定 media object 数组。
-
-代码模式通过 `response.css()?` 获得原生 `scrape_core::Soup`，业务代码继续直接使用 Soup 和
-Tag。Healing 只是 CSS 专属且需要显式开启的能力，只扫描当前 HTML 文档，不保存历史节点指纹，
-不作用于 JSONPath，也不会调用 AI。Rules 模式使用同一套 CSS 实现：
-
-```yaml
-args:
-  healing:
-    min: 0.8
-```
-
-Rules Executor 会把一份 JSON 响应反序列化一次，并在多个 JSON 字段间复用这份文档。代码模式通过
-`Response::json<T>()` 取得完整的 `serde_json::Value`，再使用 RFC 9535 JSONPath 查询。选择结果
-直接引用原始值，不会把数字、布尔、对象或数组转成字符串：
-
-```rust
-let document: serde_json::Value = response.json()?;
-let stock_codes = spider::selector::json::select(&document, "$.data.diff[*].f12")?;
-```
-
-Rules 模式直接复用同一个 selector。下面是一份使用东方财富测试接口的完整配置：
-
-```yaml
-spider:
-  name: eastmoney
-  start:
-    - node: index
-      url: "https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.601398,1.600036,1.600030,1.601318,0.300059,1.600705,1"
-
-graph:
-  nodes:
-    index:
-      fields:
-        quotes:
-          required: true
-          extractors:
-            - kind: json
-              expr: $.data.diff[*]
-        stock_codes:
-          extractors:
-            - kind: json
-              expr: $.data.diff[*].f12
-        total:
-          extractors:
-            - kind: json
-              expr: $.data.total
-  edges:
-    - from: index
-      kind: item
-      fn: save
-      vals:
-        quotes: {from: $fields.quotes}
-        stock_codes: {from: $fields.stock_codes}
-        total: {from: $fields.total}
-
-item:
-  schema:
-    fields:
-      quotes: {type: array}
-      stock_codes: {type: array}
-      total: {type: int}
-```
-
-`quotes`、`stock_codes` 和 `total` 都是用户自定义的输出字段名，不是 JSON extractor 的固定关键字；
-后续可以通过 `$fields.quotes`、`$fields.stock_codes` 和 `$fields.total` 引用。固定配置只有
-`kind: json` 和 RFC 9535 JSONPath `expr`。
-
-Item edge 会把解析结果交给 Rust Spider 注册的 `save` Item 处理函数；如果省略 `fn`，框架默认调用
-名为 `item` 的处理函数。`item.schema` 继续负责不同 Rules 配置自己的字段校验。
-
-例如 `$.data.diff[*].f12` 会从东方财富行情响应中选择证券代码。合法路径未命中时继续当前字段的下一个 extractor；
-一个匹配保留原始 JSON 值，多个匹配按现有 Rules 数量合同折叠为数组。正文非法或 JSONPath 非法都
-直接报错。框架不存在通用 Healing 阶段；JSON 选择没有 Healing，也不会触发 AI fallback。
-
-AI 是与 CSS 并列的独立 extractor。它通过 OpenAI-compatible Chat Completion API 发送当前
-Response 文本和 `expr` 提示词，结果严格限定为一个 JSON 对象：
-
-```yaml
-- kind: ai
-  expr: '按 {"title":"xx","content":"xx"} 提取文章。'
-```
-
-provider 配置属于 Worker 本地运行配置，只构造一次并由代码模式和 Rules 模式通过
-`response.ai(expr).await` 复用：
-
-```rust
-use spider::{ai, engine};
-
-let openai = ai::OpenAI::new(
-    "https://api.example.com/v1",
-    api_key,
-    "model-name",
-)?;
-let mut engine = engine::Engine::new()
-    .with_ai(openai)
-    .with_rules(rules)
-    .with_spider(Newspaper::new())
-    .build();
-```
-
-业务层负责从环境变量、配置中心或其他密钥来源取得 `base_url`、`api_key` 和 `model_name`，再构造
-`ai::OpenAI`；crawler 不负责读取这些值。provider 配置和密钥不会进入 Rules 或 Trace Snapshot。
-`base_url` 必须是绝对 HTTP(S) 端点，不能内嵌凭据，也不能包含 query 或 fragment。凡是能从同一个
-任务池领取 AI 工作的 Worker，都必须配置等价的 provider endpoint 和 model。AI 不生成 CSS，也
-不会被 CSS Healing 自动调用。请求会同时设置
-`response_format=json_object`；数组、标量、Markdown 和说明文字在返回后仍会被拒绝。Response
-正文缓冲区在字符集解码前限制为 1 MiB；包含 `expr`、固定约束和解码后正文的完整 UTF-8 prompt
-另行限制为 1 MiB。provider HTTP body 在 HTTP 内容解码后、`async-openai` 完整缓冲前限制为
-4 MiB。每次 provider 调用超时为 60 秒；重试继续只使用已有 `error_parse` 策略。
-
-## 规则模式
-
-规则模式从 YAML 加载任务入口、请求图、解析规则、数据绑定和 Item Schema，但运行时仍装载一份
-Rust Spider。多份 Rules 可以共享同一套 Spider 业务代码和同一种 Item 类型；YAML 负责表达每个
-任务不同的抓取规则。Rules 的 `spider.name` 在本地作为 `task_id`，不要求等于部署侧 Rust
-`Spider::name()`。
-
-```rust
-use spider::{config, engine};
-
-# async fn run() -> Result<(), Box<dyn std::error::Error>> {
-let rules = config::Config::load("examples/rules-newspaper.yaml").await?;
-let mut engine = engine::Engine::new()
-    .with_rules(rules)
-    .with_spider(Newspaper::new())
-    .build()
-    .with_concurrency(8);
-
-engine.start().await?;
-# Ok(())
-# }
-```
-
-完整配置位于 [examples/rules-newspaper.yaml](../examples/rules-newspaper.yaml)，运行命令：
-
-```bash
+# 运行 Rules 模式示例。
 cargo run -p examples --bin rules
 ```
 
-`spider.start[*]` 和 request edge 使用同一套完整 Request Spec；Request 在入队前已经拥有 node、
-URL、transport、priority 和 vals。URL 数组展开会在模板渲染前写入从 `1` 开始的保留
-`vals.idx`。Rules 先形成 parse/bind 基础字段，Item edge 的 `vals` 只有非空值才覆盖同名字段；随后
-根据 `#[spider(item = Article)]` 关联的 Rust 类型调用 derive 生成的 `Item::from_values`，注入
-SchemaKey，再调用默认 `item` 或 edge 的 `fn` 业务函数。规则模式与代码模式共用 Engine、
-Scheduler、Downloader、Middleware、Request、Response、Item 和 Payload，不维护第二套运行时模型。
-Request 与 bind 模板只解析一次源字符串；动态值中带入的花括号只作为数据，不会再次解释为模板表达式。
-当 bind template 变量解析为数组时，模板会按数组元素逐项渲染并返回 URL 数组；多个数组变量必须长度一致，
-标量变量会广播到每一项。这就是一个列表页按每行生成多个详情页 Request 的批量写法。
-每条 Rules Request 都由统一 Executor 先调用 Rust Spider 的 `index(response.clone())` 业务入口，
-然后再根据 `Request.node` 解释对应 DSL node；这里不存在 Code/Rules Executor 替换。
-每个具体 Item 同时 derive `serde::Serialize`、`serde::Deserialize` 和 `macros::Item`，启用 serde
-未知字段拒绝，并显式持有一份 `#[serde(skip)] item::State`。Item derive 自动生成
-`from_values / state / state_mut`，业务代码不再手写这些适配函数。edge `fn` 引用的额外 Item 函数
-必须使用 `#[item]` 显式注册；本地 Rules 装配发现函数不存在时，会在运行时初始化前直接 panic。
+自己的应用需要依赖 Harbor、过程宏和 Tokio：
 
-## Item 与输出
+```toml
+[dependencies]
+# Harbor 提供 Engine、Request、Response、Item 和 Rules。
+harbor = { path = "../harbor" }
 
-框架在 `Tx.item(...)` 提交数据时为没有 ID 的 Item 生成 UUID v7。这个 ID 只标识当前数据实例，
-不参与业务去重。内置去重只作用于进入 Scheduler 前的 Request；Item 业务去重属于下游业务逻辑，
-不属于 Store 合同。
+# macros 提供 #[macros::harbor] 和 #[derive(macros::Item)]。
+macros = { path = "../harbor/macros" }
 
-Engine 默认使用 `item::Jsonl` 作为 Item Store，并将每条数据保存为一行 JSON：
+# Tokio 用于运行异步 Spider。
+tokio = { version = "1", features = ["macros", "rt", "fs", "signal"] }
+
+# Item 和 Rules 配置使用 Serde。
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.10"
+```
+
+## 2. 代码模式
+
+代码模式适合需要在 Rust 中自由编写解析逻辑的爬虫。
+
+### 2.1 最小代码
+
+```rust
+use harbor::{engine, net};
+
+// #[macros::harbor] 为 Spider 注入框架需要的运行能力。
+#[macros::harbor]
+struct ExampleSpider;
+
+#[macros::harbor]
+impl ExampleSpider {
+    // 返回当前爬虫的名称。
+    fn name(&self) -> &str {
+        "example"
+    }
+
+    // 返回起始 URL。每个 URL 会生成一条初始 Request。
+    async fn start_urls(&self) -> Vec<String> {
+        vec!["https://example.com".to_string()]
+    }
+
+    // index 是默认的页面处理入口。
+    async fn index(&self, response: net::Response) -> Result<(), harbor::Error> {
+        // 解析当前页面的 CSS 文档。
+        let soup = response.css()?;
+
+        // 读取页面标题；没有标题时使用当前 URL。
+        let title = soup
+            .find("h1")
+            .map_err(|error| harbor::Error::Message(error.to_string()))?
+            .map(|node| node.text())
+            .unwrap_or_else(|| response.url.clone());
+
+        // 批量提交 Item。这里提交一个 Item，因此仍使用 Vec。
+        self.tx.item(vec![ExampleItem::new(title)]).await?;
+        Ok(())
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, macros::Item)]
+#[serde(deny_unknown_fields)]
+struct ExampleItem {
+    // 业务字段会写入最终 JSONL。
+    title: String,
+
+    // state 是框架字段，不写入业务数据。
+    #[serde(skip)]
+    state: harbor::item::State,
+}
+
+impl ExampleItem {
+    // 创建一条 Item。
+    fn new(title: String) -> Self {
+        Self {
+            title,
+            state: harbor::item::State::default(),
+        }
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 默认使用内存调度器、HTTP Downloader 和本地 JSONL Store。
+    let mut engine = engine::Engine::new()
+        .with_spider(ExampleSpider::new())
+        .build()
+        .with_concurrency(8);
+
+    // 启动爬虫。
+    engine.start().await?;
+    Ok(())
+}
+```
+
+默认 Item 文件写入：
 
 ```text
 ./data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
-每行格式固定为 `{"id":"...","data":{...}}`，框架 Item ID 与业务数据分开保存。
-`self.tx.request(...)` 把 Request 提交给 Scheduler；`self.tx.item(...)` 则把只包含 Item 的 `Payload`
-交给 `Store::submit(&Payload)`。两者可以独立替换：`.with_scheduler(...)` 只替换 Request 调度，
-`.with_store(...)` 为本次 Engine 运行选择唯一的 Item Store，并替换 Item 持久化。Store 选择在
-`build()` 完成时固定；框架不会把后续 Item 路由到其他 Store，也不会把一次提交广播到多个 Store。
-不需要、也不能配置 `persister_id`。
+每行只保存框架 Item ID 和业务数据：
 
-`Jsonl::with_dir(path)` 可修改输出根目录。Jsonl 会先序列化完整 Payload，再持有小时文件的追加锁写入并
-flush 完整字节序列；写入或 flush 失败时记录并返回错误，不执行事务或文件回滚，底层已经写入的字节可能
-保留。打开文件缓存有固定上限，所有缓存槽都在使用时，额外路径使用不进入缓存的临时句柄。提交失败快照由
-Jsonl 自己管理，位于
-`<dir>/data/items/snapshots/`：先完整写入临时文件并 flush，再原子 rename；同一个不可变 Payload 投影后续重试成功后
-删除，重试耗尽则保留供人工处理。完全相同的不可变 Payload 投影可以共用这份恢复快照，但每次 `submit`
-仍会执行输出，不会形成持久化回放索引或 Item 去重。Item 提交采用 at-least-once 语义，业务 Item 去重属于
-Store 合同之外的下游业务逻辑。
-每个 Store 实现都必须在修改后端前调用 `Payload::validate_store()` 校验完整 Payload。Store 重试耗尽后，
-`error_item` 只作为逐个 Item 的 best-effort 通知：回调失败记录日志，当前 Request 仍保留原始 Store 错误。
-
-## Request 执行
-
-`Scheduler::push` 对相同 Request ID 与初始 Snapshot 的重放执行幂等 no-op，只原子补写缺失
-Request；任一已有 ID 的 Snapshot 冲突时整批失败。
-当前 Request 执行中直接等待的 `Tx.request` 会使用父 Request ID、规范化后的子 Request 初始规格，
-以及该规格在当前 parse attempt 中的出现次数，为框架生成的子 Request 分配稳定 ID。因此 parse retry
-或队列重试重放相同输出时复用同一 ID；同一次执行中有意产生的多个相同 Request 仍拥有不同 ID。
-通过 `Request::with_id` 设置的 ID 始终以业务值为准。这是 Request 输出重放保护，不是业务 Dedup；
-Item 与 detached Tx 输出仍保持 at-least-once 语义。
-
-Request 进入本地执行槽后先通过 `Scheduler::ack` 确认执行权，长任务运行期间通过
-`Scheduler::refresh_lease` 独立续租，提交最终结果期间也保持续租，最后分别调用 `Scheduler::success` 或
-`Scheduler::failure`。租约超时和续租间隔由具体 Scheduler 自己提供；Memory 默认超时 30 秒、
-每 10 秒续租。最终 Payload 生成前明确丢失执行权时，Engine 终止执行且不提交结算；Payload 生成后
-以 `success / failure` 为最终依据，并发续租错误不能取消结算，临时结算错误只重试同一个 Payload，
-不会重新执行 Request。已确认执行失败时会保留有序且不重复的失败 Worker；未 ack 的领取过期不消费尝试次数。
-每次逻辑领取都在第一次 `next_requests` 尝试前记录单调时刻，并在临时错误重试间保留；最终返回的
-每条 Request 都以该时刻计算首个本地租约截止点，因此 Scheduler 处理、网络和重试耗时会占用这份
-保守预算。Engine 不会把 Worker 墙钟与 Scheduler 服务端时间比较；一次成功续租会从自身的单调起点
-开始计算下一个本地截止点。
-Memory 只从进程内不可变映射读取 Trace Snapshot。Engine 直接跟踪克隆出来的 Tx 生产者，不再通过固定空闲等待窗口猜测是否仍有输出。
-Engine 内部由一个 Kameo Actor 统一协调，Request 和输出 I/O 仍在独立 Tokio 任务中执行。
-一次领取为空后默认等待一秒再试；`with_idle_interval(duration)` 可替换这个正数且只在启动时加载的
-间隔。空队列不会结束 Worker。`Runtime::start()` 监听 SIGINT/SIGTERM，收到信号后停止新领取，允许已经
-开始的领取返回，不设置内部超时地排空已接受 Request 和 Tx 工作，最后才关闭各组件。
-当前 Request 内直接 await 的 Tx 调用可以使用完整 Request 上下文；移动到独立任务中的 Tx clone
-只保留 `task_id / trace_id`，不会继承 Request 执行权、租约身份、node、version 或 stats。
-任何输出 Request 都必须在执行 `before_scheduler` Middleware 前匹配该 Tx 的 `task_id / trace_id`，
-且这些 Middleware 不得改写 `id / task_id / trace_id`。
-Request 并发数、单次领取上限和 Event 容量是三个独立且只在启动时加载的配置，分别通过
-`with_concurrency`、`with_claim_limit` 和 `with_event_limit` 设置。
-Actor 开始处理 Event 时即释放 Event 容量，但 Tx 调用仍会等待对应 Scheduler 与 Middleware 工作完成。
-
-## Dedup
-
-Dedup 只处理 Request。每一条生效的 `dedup` Spec 就是一条规则，参数固定为扁平的
-`args.key / normalize / ttl`，旧 `args.rules` 配置非法。成员桶固定为 `task_id + node`，SHA-256
-只计算配置明确选择的有序值的规范 JSON；`trace_id`、Middleware name、`Spec.key`、Rules 名称和
-隐式 URL 都不参与。对象 key 递归排序，数组顺序、配置路径顺序、JSON 类型和重复值保持有效；
-`before_scheduler` 不允许改写 node。
-
-默认 `middleware::dedup::Memory` 原子检查并写入一条精确成员。TTL 省略或 `-1` 表示进程生命周期内
-永久保留，`0` 表示跳过查询和写入，正整数按毫秒过期。运行期 `Tx` 输出在 `Scheduler::push` 前执行
-Dedup；Rules 运行种子不经过准入，因此不会提前消耗去重状态。
-`contrib::middleware::dedup::Redis` 使用 RedisBloom，注册时显式提供 `capacity / error_rate`，接受
-Bloom 误判，不增加可配置 namespace；正数有限 TTL 会被拒绝，不使用 Set 或时间桶模拟成员过期。
-第一个创建 `task_id + node` filter 的 Worker 会固定其实际 Options，共享该桶的所有 Worker 必须使用
-等价 Options。
-
-## HTTP Downloader
-
-HTTP Downloader 按 Request 应用 proxy 和 TLS 配置。只有 proxy URL 与
-`accept_invalid_certs` 完全相同的请求才复用 Client；默认最多保留 64 个空闲 Client，
-空闲 90 秒后惰性过期。容量压力下淘汰最早空闲的 Client，正在使用的 Client 不会被淘汰，
-因此可以暂时超过该上限。`Http::with_max_idle_clients` 在 Worker 启动时替换默认值，
-`Http::close()` 清空整个池。直连请求、不同代理凭据和不同 TLS 行为不会共用同一 Client 条目。
-
-每个 Worker 默认最多接收 64 MiB 解码后响应体。`Http::with_max_body_bytes` 可以替换这个默认上限；
-代码或 Rules 中的 `Request.max_body_bytes` 只能选择小于或等于 Worker 上限的正数值，超过时在网络 I/O
-前失败。Downloader 按解码后 chunk 读取且不预分配上限大小，但成功结果仍是一个有界的
-`Response.body: Bytes`；本合同不增加公开 stream 或文件写入 API。`Request.timeout` 覆盖连接、
-所有 redirect 和最终 body 读取的一次完整下载；redirect 不重置超时，每次新的下载重试从零开始新预算。
-只跟随 `301`、`302`、`303`、`307` 和 `308`。redirect 将带 body 的 Request 改为 GET 时，会随被丢弃
-的 body 一并删除相关 headers；原始 GET 即使带 body 也保留其 headers。
-
-### Headers
-
-`Headers` 直接包装标准 `http::HeaderMap`，保留大小写不敏感的名称、响应原始值和重复字段。
-`set` 替换该名称的所有值，`append` 追加新值；Rules 输入仍是单值 map。Request Snapshot
-把规范化名称序列化为值数组，不可表示为字符串的 Request header 值在 Snapshot 边界被拒绝。
-
-### Cookies
-
-每条 Request 都携带可序列化的 CookieStore 快照。Downloader 在解析前按标准 Domain、Path、Secure、
-Max-Age 和 Expires 规则应用所有响应 Cookie，后代 Request 通过 Snapshot 和 Scheduler 恢复继承这条谱系。
-已入队的并行兄弟各自保留独立快照，后续 Cookie 变更不会反向修改它。跨源 follow 或 redirect 会移除
-源站 headers，并把 CookieStore 缩减为目标 URL 可用的 Cookie，无关凭据不会进入目标 Request Snapshot。
-跨站 Public Suffix Domain 会被拒绝；与当前 Request host 完全相同的 Public Suffix 会规范化为
-HostOnly。原始 `Cookie` header 不作为第二套会话来源，代码与 Rules 必须使用 Request cookie API。
-
-## Rate Limit
-
-每个 `rate_limit` group 在活跃期间固定一个 interval，同组使用冲突 QPS 会返回非法配置错误。
-只有当该 group 无持有者且下一次允许时间已过，后续查找才会惰性清理它。默认
-`middleware::rate_limit::Memory` 只在当前 Worker 内限速；
-`contrib::middleware::rate_limit::Redis` 使用 Redis 服务端时间，让多个 Worker 共享同一个 group 的
-总 QPS。Redis key 只来自显式 group；未配置时使用 Request URL host，不加入 `task_id` 或 Worker 身份。
-
-## Response 文本
-
-v3 的响应文本合同保持 `Response.body` 为 HTTP 内容解码后、字符转码前的 Downloader 交付 bytes，
-并把字符解码统一放在 `Response::text()`。编码优先级固定为 BOM、合法的 `Content-Type` charset、HTML 或缺失 MIME 时前
-1024 bytes 内的 HTML meta，最后回退 UTF-8。非法字节使用 Unicode replacement 语义，运行时不做
-统计字符集猜测；`Response::json<T>()` 复用同一条文本解码路径。
-
-## 运行期追踪
-
-运行期追踪用于观察一条已领取 Request 从确认执行权、下载、解析、Tx 输出到最终结算的耗时和结果。
-它是可选能力，默认关闭，不改变 Scheduler、Downloader、Spider、Item Store 或业务 `trace_id` 的语义。
-
-### 开启依赖
-
-可执行程序需要开启 `spider/runtime-tracing`，并直接依赖 `fastrace` 来安装 Reporter：
-
-```toml
-[dependencies]
-fastrace = { version = "0.7.18", default-features = false, features = ["enable"] }
-spider = { path = "..", features = ["runtime-tracing"] }
+```json
+{"id":"...","data":{"title":"示例标题"}}
 ```
 
-使用 API Scheduler 时，改为开启 `contrib/runtime-tracing`；该 feature 会同时开启
-`spider/runtime-tracing`，并允许 API Scheduler 向可信 Master 传播追踪上下文：
-
-```toml
-[dependencies]
-contrib = { path = "../contrib", features = ["runtime-tracing"] }
-fastrace = { version = "0.7.18", default-features = false, features = ["enable"] }
-```
-
-只在 Cargo 中开启 feature 还不会采样 Request。可执行程序还必须安装进程级 Reporter，并对本次
-Engine 运行调用 `with_tracing`。未启用 feature 时，追踪代码不会生成 span；即使调用
-`Tracing::all()`，Engine 仍按无追踪方式运行。
-
-### 在本地终端查看
-
-`ConsoleReporter` 把完整的 `SpanRecord` 输出到当前进程的标准错误流 `stderr`，因此直接在终端运行
-程序就能看到本地追踪结果：
+### 2.2 提交下一条 Request
 
 ```rust
-use fastrace::collector::{Config, ConsoleReporter};
-use spider::{engine, trace};
+use harbor::net::Request;
+
+// 在当前页面解析详情链接。
+let detail_url = "https://example.com/detail/1";
+
+// Request::follow 要求绝对 URL。
+let request = Request::follow(detail_url)?;
+
+// 批量提交下一跳 Request。
+self.tx.request(vec![request]).await?;
+```
+
+### 2.3 读取 Response
+
+```rust
+// CSS 解析返回页面节点。
+let soup = response.css()?;
+
+// JSON 解析保留数字、布尔值、对象和数组的原始类型。
+let document: serde_json::Value = response.json()?;
+
+// 使用 JSONPath 读取 JSON 字段。
+let values = harbor::selector::json::select(&document, "$.data.items[*].id")?;
+
+// 读取响应文本。
+let text = response.text()?;
+```
+
+## 3. Rules 模式
+
+Rules 模式用 YAML 配置起始请求、节点、字段、绑定、下一跳和 Item Schema。
+
+Rules 顶层只有三个业务块：
+
+```yaml
+# 爬虫和起始 Request。
+spider: {}
+
+# 页面节点和节点之间的 Request / Item 流转。
+graph: {}
+
+# 最终 Item 字段类型和校验规则。
+item: {}
+```
+
+### 3.1 启动 Rules
+
+```rust
+use std::path::PathBuf;
+
+use harbor::{config, engine, net};
+
+#[derive(serde::Deserialize, serde::Serialize, macros::Item)]
+#[serde(deny_unknown_fields)]
+struct Article {
+    // 这些字段由 Rules 的 edge.vals 映射。
+    title: String,
+    content: String,
+    url: String,
+
+    // state 是框架字段，不写入最终 Item。
+    #[serde(skip)]
+    state: harbor::item::State,
+}
+
+#[macros::harbor(item = Article)]
+struct ArticleSpider;
+
+#[macros::harbor(item = Article)]
+impl ArticleSpider {
+    // Rust Spider 名称。
+    fn name(&self) -> &str {
+        "article"
+    }
+
+    // Rules 每条 Request 仍会经过这个入口。
+    async fn index(&self, _response: net::Response) -> Result<(), harbor::Error> {
+        Ok(())
+    }
+
+    // Rules 的 Item edge 可以通过 fn: save 调用这个函数。
+    #[item]
+    async fn save(&self, item: Article) -> Result<(), harbor::Error> {
+        // Item 仍通过统一的 Tx 提交。
+        self.tx.item(vec![item]).await
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Reporter 是进程级依赖，应在 Engine 产生任何 span 之前安装一次。
-    fastrace::set_reporter(ConsoleReporter, Config::default());
+    // 读取并校验 YAML Rules。
+    let path = PathBuf::from("rules.yaml");
+    let rules = config::Config::load(path).await?;
 
+    // Rules 需要关联一个 Rust Spider 类型。
     let mut engine = engine::Engine::new()
-        .with_spider(BasicSpider::new())
+        .with_rules(rules)
+        .with_spider(ArticleSpider::new())
         .build()
-        .with_tracing(trace::Tracing::all());
+        .with_concurrency(8);
 
-    // 先保存结果，保证 Engine 失败时也会刷新已经完成的 span。
-    let result = engine.start().await;
-    fastrace::flush();
-    result?;
+    // 启动 Rules 爬虫。
+    engine.start().await?;
     Ok(())
 }
 ```
 
-`Config::default()` 的最大后台上报间隔为 1 秒。长时间运行的 Worker 会周期输出，进程正常退出前仍应
-调用一次 `fastrace::flush()`，立即把剩余记录交给 Reporter。需要调整周期时可以显式配置：
-
-```rust
-use std::time::Duration;
-
-fastrace::set_reporter(
-    ConsoleReporter,
-    Config::default().report_interval(Duration::from_millis(500)),
-);
-```
-
-也可以把输出重定向到文件；由于 `ConsoleReporter` 使用 `stderr`，普通错误日志也会进入同一个文件：
-
-```bash
-cargo run --bin <your-bin> 2> runtime-traces.log
-```
-
-fastrace 的 ConsoleReporter 与代码中的 `tracing::warn!`、`tracing::error!` 是两条独立管线。后者仍由
-应用自己的 `tracing` Subscriber 决定是否和如何输出；`RUST_LOG` 不控制 ConsoleReporter 的 span。生产
-环境可以把 ConsoleReporter 替换成实现 `fastrace::collector::Reporter` 的远端 Reporter，Engine 配置
-无需变化；具体后端和配套 crate 由应用选择，crawler 不固定 Jaeger、Datadog 或 OpenTelemetry 实现。
-
-### 全量与采样
-
-本地调试可以追踪全部 Request：
-
-```rust
-let tracing = trace::Tracing::all();
-```
-
-生产环境通常按比例采样：
-
-```rust
-let tracing = trace::Tracing::sample(0.1)?; // 约 10%
-
-let mut engine = engine::Engine::new()
-    .with_spider(BasicSpider::new())
-    .build()
-    .with_tracing(tracing);
-```
-
-`Tracing::sample(ratio)` 只接受有限的 `0.0..=1.0` 数值；`0.0` 表示不采样，`1.0` 等价于
-`Tracing::all()`，NaN、无穷大和越界值会返回错误。`Tracing::default()` 同样关闭采样。配置在本次
-Engine 启动后冻结，不做热更新。
-
-采样不是每次领取时重新随机决定。框架根据 Request ID、Request version 和 Worker ID 计算稳定结果，
-因此同一 Request version 被同一 Worker 再次执行时会保持一致；Request 被另一个 Worker 执行时，
-采样结果可以不同。下载、解析或 Scheduler 操作的内部重试不会重新进行根链路采样。
-
-### Trace 结构
-
-每条被采样且已领取的 Request 都建立一条独立的 `crawler.request` 根 span。Engine 不建立覆盖整个
-Worker 的总根 span，避免常驻进程生成一条无限增长的 trace。同一业务 Trace 下的多条 Request 因此会
-拥有不同的 fastrace TraceId；需要按一次业务运行聚合时，应查询根 span 的
-`crawler.trace_id` 属性。
-
-根 span 固定记录以下有界属性：
-
-| 属性 | 含义 |
-| --- | --- |
-| `crawler.task_id` | Task 身份 |
-| `crawler.trace_id` | crawler 的业务运行身份 |
-| `crawler.request_id` | 当前 Request 身份 |
-| `crawler.node` | 当前 node |
-| `crawler.version` | Request 执行版本 |
-| `crawler.worker_id` | 当前 Worker 身份 |
-| `crawler.mode` | `http` 或 `browser` |
-
-按实际执行路径，根 span 下可能出现：
-
-| Span | 覆盖范围 |
-| --- | --- |
-| `scheduler.ack` | Downloader 开始前确认当前执行权 |
-| `crawler.execute` | 当前 Request 的 Middleware、下载和解析主流程 |
-| `middleware.before_download`、`middleware.after_download`、`middleware.before_parse` | 对应 Middleware 阶段 |
-| `downloader.fetch` | 一次下载尝试 |
-| `executor.parse` | 一次完整解析尝试 |
-| `middleware.error_download`、`middleware.error_parse` | 下载或解析终态错误回调 |
-| `output.requests`、`output.items` | Spider Tx 产生的 Request 或 Item 输出 |
-| `middleware.before_scheduler`、`scheduler.push` | 新 Request 的准入与入队 |
-| `middleware.before_item`、`item_store.submit` | Item 准入与持久化 |
-| `middleware.error_item` | Item 提交终态错误回调 |
-| `scheduler.refresh_lease` | 长任务执行权刷新 |
-| `scheduler.success / failure / release` | 成功、失败或未执行归还结算 |
-
-未发生的阶段不会产生占位 span。例如没有重试时只出现一次下载或解析 span，没有 Item 输出时不会
-出现 `output.items`。当前 Request 根 span 从 Scheduler 已经领取 Request 后开始，不覆盖 Engine 的空闲
-轮询或 `next_requests` 调用。
-
-每个操作 span 通过 `span.status_code=ok|error` 表示结果；错误只记录有界的 `error.type` 分类。重试
-span 从 1 开始记录 `retry.attempt`，Tx 输出记录 `output.count`，下载记录
-`http.request.method` 和成功响应的 `http.response.status_code`。Reporter 自身还会提供 TraceId、SpanId、
-父子关系、开始时间和耗时。
-
-### 上下文与数据边界
-
-fastrace TraceId 只属于运行期观测，永远不会替代 crawler 的业务 `trace_id`，也不会写入 Request、
-Trace Snapshot、Payload、Item、失败快照或 Rules DSL。Tx 的 Request/Item Event 会在进程内私下携带
-当前 span context，使异步输出仍属于产生它的当前 Request 链路；这个字段不是公共或持久化合同。
-
-分布式场景只在 Worker 使用 `contrib::scheduler::api::Api` 调用可信 Master 时注入 W3C
-`traceparent`。框架不会把该 header 发送给爬取目标、redirect 目标或 AI provider，也不会向 Redis
-传播追踪上下文。同一次 API 操作的传输重试使用同一个 `traceparent`。API Scheduler 不在某条
-Request 的活动上下文中时，不会凭空生成该 header；Master 是否继续接收和导出上下文由独立 Master
-项目决定。
-
-span 不记录响应正文、Request body、Item 内容、AI prompt、API key、Cookie、代理凭据、完整 URL 或
-原始错误文本。业务标识不超过 128 bytes 且不含控制字符时按原值记录，否则记录稳定的
-`sha256:<hex>` 标记。业务标识本身仍对 Reporter 可见，因此不要把密钥或令牌用作 Task、Trace、
-Request、node 或 Worker ID。该数据边界只约束 fastrace span；应用自己的普通日志仍需独立遵守脱敏规则。
-
-### 没有本地输出时
-
-依次检查以下条件：
-
-1. 可执行程序是否编译开启了 `spider/runtime-tracing` 或 `contrib/runtime-tracing`。
-2. `fastrace::set_reporter(...)` 是否在 Engine 启动前执行。Reporter 安装前产生的 span 会被忽略。
-3. 当前 Runtime 是否调用了 `with_tracing(Tracing::all())` 或非零比例的 `Tracing::sample(...)`。
-4. Scheduler 是否真的领取并执行了 Request；空队列和仅有轮询不会产生 `crawler.request`。
-5. 进程退出前是否调用了 `fastrace::flush()`，以及终端或容器是否收集了 `stderr`。
-
-Reporter 未安装、当前 Request 未被采样或编译期 feature 未开启时，Engine 都会继续正常执行；追踪
-上报失败不参与 Request 的成功、失败或重试判断。
-
-## 当前范围
-
-当前核心运行时包含：
-
-- 单进程运行
-- Memory Scheduler
-- HTTP 下载
-- CSS 和正则表达式
-- 确定性 CSS Healing 和显式 AI Selector
-- 请求校验、重试、限速和去重中间件
-- 代码模式与 YAML 规则模式
-- 本地 JSONL Item 输出
-
-每个 Scheduler 自己持有 Worker 身份和支持的下载模式；Engine 只向 `open(concurrency)` 传入冻结的
-并发数，并向 `next_requests(limit)` 传入批次上限。能力筛选必须和领取原子完成。Redis 与 MySQL 是当前
-可用的持久化 Scheduler 实现，并已通过共享 Scheduler 一致性测试。
-Worker 侧 `contrib::scheduler::api::Api` 适配器也已经实现；对应 Master 服务不属于这个 workspace。
-本仓库只维护 Worker 侧适配器及其客户端 HTTP 合同；Master 服务、服务端协议、数据库、Cron、Control
-API、前端及其设计由独立项目负责。
-可选 `fastrace` 运行期链路追踪已经实现；Browser Downloader 已使用 `thirtyfour` 支持 Chrome/Chromium
-页面导航和渲染 DOM，HTTP/browser 混合端到端验收属于 v5。AI provider 配置已经收口为 Worker 本地配置：通过 `Engine::with_ai` 注入一个可复用的
-`ai::OpenAI` provider，Rules 只保留提示词。
-
-Browser 登录配置属于 `spider.login`，不是独立的登录 Request。创建 Trace 时，它会随 Rules DSL 写入
-`traces.snapshot.dsl.spider.login`；Worker 执行 Request 时只从当前 Trace Snapshot 读取，不重新读取
-`spiders` 表。配置示例：
+## 4. Spider 配置
 
 ```yaml
 spider:
-  name: jd_article
-  login:
-    login_key: jd_main
-    url: https://passport.jd.com/
-    check:
-      selector: ".user-name"
-    actions:
-      - kind: fill
-        selector: "#loginname"
-        value: env:JD_USERNAME
-      - kind: fill
-        selector: "#nloginpwd"
-        value: env:JD_PASSWORD
-      - kind: click
-        selector: "#loginsubmit"
-      - kind: manual
-        timeout: 120000
+  # Rules 任务名称。
+  name: article
+
+  # 可选配置版本。
+  version: "1"
+
+  # 默认 Request 优先级。
+  priority: 0
+
+  # 允许抓取的域名。
+  allowed_domains:
+    - example.com
+
+  # 可选业务时区。
+  timezone: Asia/Shanghai
+
+  # 起始 Request。node 必须存在于 graph.nodes。
+  start:
+    - node: index
+      url: "https://example.com"
+      method: GET
+      timeout: 30000
+      vals:
+        source: homepage
 ```
 
-`selector`、`url`、`cookie` 检查条件全部满足才算登录成功；`value` 可以是固定值或 `env:NAME`。
-Cookie 默认按 `login_key + origin` 在 Worker 内存中复用；需要跨 Worker 共享时，显式注入
-`contrib::browser::RedisCookieStore`。`ttl` 和 `refresh_after` 使用毫秒。登录配置不进入
-Request Snapshot，登录失败沿用 `error_download.retry`。默认 Browser 是无头模式；使用人工扫码时应配置
-可见的远程 WebDriver 或通过 `Browser::with_headless(false)` 关闭无头模式。
-Memory 使用内部身份 `local`，默认支持 HTTP，可通过 `Memory::with_modes(...)` 替换能力集合；它不注册、
-也不发送心跳。Redis、MySQL 和 API 要求在 Scheduler 上配置稳定的 Worker ID、host 和 version，
-`with_modes(...)` 冻结其下载能力。缺少元数据或 mode 集合为空会在 Scheduler 配置/open 时被拒绝。
+`start` 中可以配置完整 Request：
 
-媒体对象规范化本身不会下载文件。需要下载的媒体字段设置
-`node.fields.<name>.download: true`，在 `before_item.download` 阶段执行。Spider 级
-`spider.attachment` 选择默认本地实现或注册的 `AttachmentDownloader`；附件下载重试耗尽后只记录日志，
-不让当前 Request 失败。默认单个附件超时 60 秒，响应体上限为 64 MiB。
-
-后端或 API 在保存配置前，可以通过 `Config::validate()` 校验完整规则，也可以通过
-`middleware::check(&spec)` 单独校验一条中间件配置。
-
-## 开发验证
-
-```bash
-cargo fmt --all -- --check
-cargo test --workspace --all-targets
-cargo test --workspace --all-targets --features runtime-tracing
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy --workspace --all-targets --features runtime-tracing -- -D warnings
-cargo doc --workspace --no-deps
+```yaml
+spider:
+  start:
+    - node: index
+      url: "https://example.com/api/list"
+      method: POST
+      download_mode: http
+      timeout: 30000
+      max_body_bytes: 8388608
+      headers:
+        Accept: application/json
+        Content-Type: application/json
+      cookies:
+        region: cn
+      body:
+        kind: json
+        data:
+          page: 1
+      vals:
+        page: 1
 ```
+
+## 5. Graph 节点
+
+```yaml
+graph:
+  nodes:
+    index:
+      # 当前节点的说明文字，可选。
+      label: 首页
+
+      # 当前节点自己的域名限制，可选。
+      allowed_domains:
+        - example.com
+
+      # 从当前 Response 提取字段。
+      fields: {}
+
+      # 根据字段计算派生值。
+      binds: {}
+
+      # 当前节点产出的 Item Middleware。
+      middlewares: []
+```
+
+节点名称由用户决定，例如 `index`、`list`、`detail`。起始 Request 和 Request edge 的 `node` 必须引用已有节点。
+
+## 6. Fields 字段提取
+
+### 6.1 CSS
+
+```yaml
+fields:
+  title:
+    # 所有 extractor 都为空时，该字段报错。
+    required: true
+    extractors:
+      - kind: css
+        expr: "h1.title::text"
+
+  cover:
+    # 媒体字段使用 crawler 处理类型。
+    kind: image
+    extractors:
+      - kind: css
+        expr: "img.cover::attr(src)"
+```
+
+CSS 表达式支持：
+
+```yaml
+# 提取文本。
+expr: "h1::text"
+
+# 提取属性。
+expr: "a.detail::attr(href)"
+
+# 不加输出后缀时保留节点对象。
+expr: "article.content"
+```
+
+CSS Healing 需要显式开启：
+
+```yaml
+fields:
+  title:
+    extractors:
+      - kind: css
+        expr: "h1.title::text"
+        args:
+          healing:
+            # 取值范围为 0.0 到 1.0。
+            min: 0.8
+```
+
+### 6.2 Regex
+
+```yaml
+fields:
+  article_id:
+    extractors:
+      - kind: regex
+        # 优先返回第一个捕获组。
+        expr: "article_id=(\\w+)"
+```
+
+### 6.3 JSONPath
+
+```yaml
+fields:
+  titles:
+    extractors:
+      - kind: json
+        # JSONPath 直接保留原始 JSON 类型。
+        expr: "$.data.items[*].title"
+
+  total:
+    extractors:
+      - kind: json
+        expr: "$.data.total"
+```
+
+### 6.4 多个 extractor 兜底
+
+```yaml
+fields:
+  title:
+    required: true
+    extractors:
+      # 第一个 extractor 有非空结果时停止。
+      - kind: css
+        expr: "h1.title::text"
+
+      # 第一个结果为空时尝试第二个 extractor。
+      - kind: css
+        expr: "meta[property='og:title']::attr(content)"
+```
+
+可选字段没有结果时使用 `default`；省略时结果为 `null`：
+
+```yaml
+fields:
+  summary:
+    required: false
+    default: ""
+    extractors:
+      - kind: css
+        expr: ".summary::text"
+```
+
+## 7. Binds 派生字段
+
+### 7.1 Pipeline
+
+```yaml
+binds:
+  detail_urls:
+    # 从 fields 取值，再按顺序执行转换。
+    kind: pipeline
+    from: "$fields.detail_links"
+    transforms:
+      - kind: url_join
+        base_url: "$response.url"
+      - kind: url_normalize
+```
+
+支持的常用 transform：
+
+- `trim`
+- `normalize_space`
+- `lowercase`
+- `uppercase`
+- `url_join`
+- `url_normalize`
+- `add`：整数加法
+
+页码或偏移量可以通过 `vals` 传递：
+
+```yaml
+binds:
+  page:
+    # 读取当前 Request 的 page。
+    kind: pipeline
+    from: "$vals.page"
+    transforms:
+      # 计算下一页。
+      - kind: add
+        value: 1
+```
+
+### 7.2 Template
+
+```yaml
+binds:
+  detail_url:
+    # 模板变量必须在 vars 中声明。
+    kind: template
+    template: "https://example.com/detail/{id}"
+    vars:
+      id:
+        from: "$fields.article_id"
+```
+
+## 8. Edges 下一跳
+
+### 8.1 列表页生成详情页
+
+```yaml
+graph:
+  edges:
+    - from: list
+      # request 表示生成下一条 Request。
+      kind: request
+      request:
+        node: detail
+        url:
+          from: "$binds.detail_urls"
+
+    - from: detail
+      # item 表示生成最终 Item。
+      kind: item
+      fn: save
+      vals:
+        title:
+          from: "$binds.title"
+        url:
+          from: "$response.url"
+```
+
+`request.url` 是数组时会批量生成多条 Request；`request.vals` 的数组按位置对齐，标量会广播到每条 Request。
+
+### 8.2 条件 Edge
+
+```yaml
+edges:
+  - from: list
+    kind: request
+    when:
+      # 只有 has_more 为 true 时才生成下一条 Request。
+      from: "$fields.has_more"
+      op: eq
+      value: true
+    request:
+      node: list
+      url:
+        from: "$binds.next_url"
+```
+
+支持的 `when.op`：
+
+- `present`
+- `absent`
+- `eq`
+- `ne`
+- `gt`
+- `gte`
+- `lt`
+- `lte`
+
+缺少运行期值时条件不成立。`false` 和 `0` 仍然属于存在值。
+
+### 8.3 分页
+
+分页不需要单独的 `pagination` 配置。通常使用当前节点指向自己的 Request edge：
+
+```yaml
+spider:
+  start:
+    - node: list
+      url: "https://example.com/list?page=1"
+      vals:
+        # 当前 Request 的页码。
+        page: 1
+
+graph:
+  nodes:
+    list:
+      fields:
+        has_more:
+          extractors:
+            - kind: json
+              expr: "$.has_more"
+      binds:
+        page:
+          kind: pipeline
+          from: "$vals.page"
+          transforms:
+            - kind: add
+              value: 1
+        page_url:
+          kind: template
+          template: "https://example.com/list?page={page}"
+          vars:
+            page:
+              from: "$binds.page"
+  edges:
+    - from: list
+      kind: request
+      when:
+        # 没有更多数据时正常停止。
+        from: "$fields.has_more"
+        op: eq
+        value: true
+      request:
+        # 自环表示下一页仍然使用 list 节点。
+        node: list
+        url:
+          from: "$binds.page_url"
+        vals:
+          # 下一条 Request 继续使用 page 这个名字。
+          page:
+            from: "$binds.page"
+```
+
+如果响应直接返回下一页 URL：
+
+```yaml
+fields:
+  next_url:
+    required: false
+    extractors:
+      - kind: json
+        expr: "$.next"
+
+edges:
+  - from: list
+    kind: request
+    when:
+      from: "$fields.next_url"
+      op: present
+    request:
+      node: list
+      url:
+        from: "$fields.next_url"
+```
+
+## 9. Item Schema
+
+`item.schema` 描述最终 Item 的字段类型和校验规则：
+
+```yaml
+item:
+  schema:
+    fields:
+      title:
+        type: string
+        rules:
+          - required
+          - min: 1
+
+      url:
+        type: string
+        rules:
+          - required
+          - url
+
+      images:
+        type: array
+```
+
+`node.fields.<name>.kind` 和 `item.schema.fields.<name>.type` 是两个维度：
+
+- `kind` 表示爬虫如何处理字段：`text`、`image`、`video`、`audio`
+- `type` 表示字段数据类型，例如 `string`、`array`
+
+## 10. 媒体字段
+
+媒体字段仍然按照普通字段提取，只需要声明媒体类型：
+
+```yaml
+graph:
+  nodes:
+    detail:
+      fields:
+        images:
+          # 图片字段使用 image。
+          kind: image
+          # true 表示在 Item 阶段下载附件。
+          download: true
+          extractors:
+            - kind: css
+              expr: "img.cover::attr(src)"
+
+item:
+  schema:
+    fields:
+      images:
+        # 图片、视频、音频统一以数组保存。
+        type: array
+```
+
+媒体对象包含：
+
+```json
+{
+  "name": "",
+  "url": "https://cdn.example.com/image.jpg",
+  "src": "https://origin.example.com/image.jpg",
+  "width": 0,
+  "height": 0,
+  "size": 0,
+  "ext": "jpg",
+  "alt": ""
+}
+```
+
+第一版只保存媒体信息，不下载文件。需要下载时，在 `spider.attachment` 开启配置；`src` 始终保留原始地址。
+
+## 11. Middleware
+
+Middleware 配置在具体对象上：
+
+```yaml
+middlewares:
+  - hook: before_scheduler
+    name: dedup
+    key: detail_url
+    args:
+      key:
+        - "$request.url"
+      ttl: 604800000
+```
+
+字段说明：
+
+- `hook`：使用哪个生命周期阶段
+- `name`：Middleware 名称
+- `key`：当前 Middleware 实例名称
+- `order`：可选执行顺序
+- `skip`：`true` 表示跳过；省略表示启用
+- `args`：当前 Middleware 的参数
+
+Request Middleware 放在 `spider.start[*]` 或 `edge.request`：
+
+```yaml
+request:
+  node: detail
+  url:
+    from: "$binds.detail_url"
+  middlewares:
+    - hook: before_scheduler
+      name: dedup
+      key: detail_url
+      args:
+        key: ["$request.url"]
+        ttl: 604800000
+```
+
+Item Middleware 放在节点下：
+
+```yaml
+graph:
+  nodes:
+    detail:
+      middlewares:
+        - hook: before_item
+          name: download
+          skip: true
+```
+
+常用内置 Middleware：
+
+```yaml
+# 重试。
+- hook: error_download
+  name: retry
+  key: default
+  args:
+    count: 3
+    backoff: [1000, 3000, 5000]
+
+# 限速。
+- hook: before_download
+  name: rate_limit
+  key: api
+  args:
+    group: example_api
+    qps: 2
+
+# 请求去重。
+- hook: before_scheduler
+  name: dedup
+  key: request_url
+  args:
+    key: ["$request.url"]
+    ttl: 604800000
+```
+
+## 12. HTTP 和 Browser
+
+### 12.1 HTTP
+
+HTTP 是默认下载模式：
+
+```yaml
+spider:
+  start:
+    - node: index
+      url: "https://example.com"
+      download_mode: http
+      method: GET
+      timeout: 30000
+```
+
+### 12.2 Browser
+
+Browser 适合需要 JavaScript 渲染的页面：
+
+```yaml
+spider:
+  start:
+    - node: index
+      url: "https://example.com"
+      download_mode: browser
+      method: GET
+      timeout: 60000
+      wait_selector: "main.content"
+```
+
+Browser 第一版支持 GET 页面导航、渲染后的 DOM、Cookie Session 复用和 CSS 等待。不支持在 Rules 中配置点击、滚动、表单操作或多 Tab 流程。
+
+## 13. Item 输出目录
+
+默认使用 JSONL Store：
+
+```rust
+use harbor::{engine, item};
+
+// 修改 Item 输出根目录。
+let store = item::Jsonl::with_dir("./crawler-data");
+
+// 将 Store 装配到 Engine。
+let mut engine = engine::Engine::new()
+    .with_spider(ExampleSpider::new())
+    .with_store(store)
+    .build();
+
+// 启动爬虫。
+engine.start().await?;
+```
+
+输出文件位于：
+
+```text
+./crawler-data/data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
+```
+
+## 14. 选择 Scheduler
+
+默认使用内存 Scheduler：
+
+```rust
+// 不配置 Scheduler 时，Engine 使用内存 Scheduler。
+let engine = harbor::engine::Engine::new()
+    .with_spider(ExampleSpider::new())
+    .build();
+```
+
+Redis、MySQL 和 Master API Scheduler 通过替换 Scheduler 装配；Spider、Rules 和 Item 配置不需要改变。
+
+```rust
+use contrib::scheduler::redis::Redis;
+use harbor::{engine, net};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 创建 Redis Scheduler。
+    let scheduler = Redis::new("redis://127.0.0.1:6379")?
+        .with_namespace("harbor")?
+        .with_worker_id("worker-01")?
+        .with_worker_host("crawler-01")?
+        .with_worker_version("0.1.0")?
+        .with_modes([net::Mode::Http])?;
+
+    // 只替换 Scheduler，Spider 代码不变。
+    let mut engine = engine::Engine::new()
+        .with_scheduler(scheduler)
+        .with_spider(ExampleSpider::new())
+        .build();
+
+    engine.start().await?;
+    Ok(())
+}
+```
+
+## 15. 常见配置问题
+
+- `spider.start[*].node` 必须存在于 `graph.nodes`。
+- Request edge 必须配置 `request.node` 和 `request.url`。
+- Item edge 不能配置 `request`。
+- 媒体字段必须在 `item.schema.fields` 中声明为 `type: array`。
+- `headers.Cookie` 不允许配置，Cookie 使用 `cookies`。
+- `when` 使用结构化条件，不使用字符串表达式。
+- `page`、`offset`、`cursor` 等都是用户字段，不是框架保留字段。
+- URL 数组为空时不会生成下一条 Request，也不表示当前 Request 失败。
+- 没有下一页时让 `when` 返回 false，当前列表 Request 正常结束。

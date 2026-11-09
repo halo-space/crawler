@@ -51,7 +51,7 @@ Snapshot. It does not read the Master database directly. `HARBOR_WORKER_LIMIT` i
 The smallest Engine assembly is:
 
 ```rust
-let mut engine = spider::engine::Engine::new()
+let mut engine = harbor::engine::Engine::new()
     .with_spider(BasicSpider::new())
     .build();
 
@@ -67,7 +67,7 @@ replaceable.
 
 | Crate | Responsibility |
 | --- | --- |
-| `spider` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
+| `harbor` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
 | `macros` | Spider, handler, and Item derive macros |
 | `contrib` | Redis/MySQL Schedulers, the Worker-side API Scheduler adapter, and distributed middleware implementations |
 | `harbor-worker` | Standalone Worker service that connects to Master API, runs the shared Engine, and writes Items through a Worker-owned Store |

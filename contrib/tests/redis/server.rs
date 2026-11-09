@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use contrib::scheduler::redis::Redis;
-use spider::Scheduler;
+use harbor::Scheduler;
 
 const DEFAULT_URL: &str = "redis://127.0.0.1:6379";
 const DEFAULT_WORKER_ID: &str = "worker-a";
