@@ -21,6 +21,20 @@ pub use store::Store;
 
 pub type Values = indexmap::IndexMap<String, serde_json::Value>;
 
+pub(crate) fn middleware_specs(item: &dyn Item) -> Vec<crate::middleware::Spec> {
+    let state = item.state().middlewares();
+    let declared = item.middlewares();
+    if std::ptr::eq(state, declared) {
+        state.to_vec()
+    } else {
+        state
+            .iter()
+            .cloned()
+            .chain(declared.iter().cloned())
+            .collect()
+    }
+}
+
 #[doc(hidden)]
 pub fn deserialize<T>(values: Values) -> Result<T, Error>
 where

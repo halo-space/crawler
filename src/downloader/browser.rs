@@ -21,6 +21,11 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_SESSIONS: usize = 64;
 const SELECTOR_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_STATUS: u16 = 200;
+const DEFAULT_USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+];
 
 struct Session {
     driver: Arc<WebDriver>,
@@ -255,8 +260,12 @@ impl<C: CookieStore> Browser<C> {
         )?;
 
         self.reap_idle().await;
-        if let Some(session) = self.sessions.read().await.get(&key).cloned() {
-            return Ok((key, session));
+        {
+            let sessions = self.sessions.read().await;
+            if let Some(session) = sessions.get(&key).cloned() {
+                *session.last_used.lock().await = Instant::now();
+                return Ok((key, session));
+            }
         }
 
         let driver = Arc::new(self.create_driver(request).await?);
@@ -271,21 +280,24 @@ impl<C: CookieStore> Browser<C> {
             let _ = session.driver.as_ref().clone().quit().await;
             return Ok((key, existing));
         }
-        if sessions.len() >= self.max_sessions
-            && let Some((old_key, old_session)) = sessions
+        if sessions.len() >= self.max_sessions {
+            let candidate = sessions
                 .iter()
                 .filter_map(|(key, session)| {
-                    session
-                        .last_used
-                        .try_lock()
-                        .ok()
-                        .map(|last| (key.clone(), session.clone(), *last))
+                    let serial = session.serial.try_lock().ok()?;
+                    let last = *session.last_used.try_lock().ok()?;
+                    drop(serial);
+                    Some((key.clone(), session.clone(), last))
                 })
-                .min_by_key(|(_, _, last)| *last)
-                .map(|(key, session, _)| (key, session))
-        {
-            sessions.remove(&old_key);
-            let _ = old_session.driver.as_ref().clone().quit().await;
+                .min_by_key(|(_, _, last)| *last);
+            if let Some((old_key, old_session, old_last)) = candidate
+                && let Ok(_serial) = old_session.serial.try_lock()
+            {
+                let current_last = *old_session.last_used.lock().await;
+                if current_last == old_last && sessions.remove(&old_key).is_some() {
+                    let _ = old_session.driver.as_ref().clone().quit().await;
+                }
+            }
         }
         sessions.insert(key.clone(), session.clone());
         Ok((key, session))
@@ -349,6 +361,8 @@ impl<C: CookieStore> Browser<C> {
             .and_then(|config| config.spider.login.clone());
         let cookies = Arc::clone(&self.cookies);
         let authenticated = &session.authenticated;
+        let restore_state = Arc::new(Mutex::new(None::<(Vec<String>, Vec<Cookie>)>));
+        let restore_state_inner = Arc::clone(&restore_state);
         let result = tokio::time::timeout(timeout, async move {
             if let Some(login) = login.as_ref() {
                 ensure_login(&fetch_driver, authenticated, cookies.as_ref(), login).await?;
@@ -368,6 +382,22 @@ impl<C: CookieStore> Browser<C> {
                             .to_string(),
                     ));
                 }
+                let names = request_cookies
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>();
+                let host = url.host_str().unwrap_or_default();
+                let previous = fetch_driver
+                    .get_all_cookies()
+                    .await
+                    .map_err(driver_error)?
+                    .into_iter()
+                    .filter(|cookie| {
+                        names.iter().any(|name| name == &cookie.name)
+                            && cookie_applies_to_host(cookie, host)
+                    })
+                    .collect::<Vec<_>>();
+                *restore_state_inner.lock().await = Some((names, previous));
                 for (name, value) in request_cookies {
                     let mut cookie = Cookie::new(name, value);
                     cookie.set_path("/");
@@ -387,16 +417,7 @@ impl<C: CookieStore> Browser<C> {
                 .await
                 .map_err(driver_error)?;
 
-            let headers = request
-                .headers
-                .iter()
-                .filter_map(|(name, value)| {
-                    value
-                        .to_str()
-                        .ok()
-                        .map(|value| (name.as_str().to_string(), value.to_string()))
-                })
-                .collect::<HashMap<_, _>>();
+            let headers = browser_headers(&request);
             cdp.network()
                 .set_extra_http_headers(headers)
                 .await
@@ -492,37 +513,41 @@ impl<C: CookieStore> Browser<C> {
         .await
         .map_err(|_| downloader::Error::Timeout)?;
 
-        driver
+        let headers_result = driver
             .cdp()
             .network()
             .set_extra_http_headers(HashMap::new())
             .await
-            .map_err(driver_error)?;
-        result
+            .map_err(driver_error);
+        let restore_result = if let Some((names, previous)) = restore_state.lock().await.take() {
+            restore_browser_cookies(&driver, &names, &previous).await
+        } else {
+            Ok(())
+        };
+        match (result, headers_result, restore_result) {
+            (Ok(response), Ok(()), Ok(())) => Ok(response),
+            (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(cleanup), _) | (Err(error), Ok(()), Err(cleanup)) => {
+                tracing::warn!(error = %cleanup, "Browser request cleanup failed");
+                Err(error)
+            }
+            (Err(error), Ok(()), Ok(())) => Err(error),
+        }
     }
 
     async fn reap_idle(&self) {
         let now = Instant::now();
-        let mut expired = Vec::new();
-        {
-            let sessions = self.sessions.read().await;
-            for (key, session) in sessions.iter() {
-                if session
-                    .last_used
-                    .try_lock()
-                    .map(|last| now.duration_since(*last) >= self.idle_timeout)
-                    .unwrap_or(false)
-                {
-                    expired.push((key.clone(), session.clone()));
-                }
-            }
-        }
-        if expired.is_empty() {
-            return;
-        }
         let mut sessions = self.sessions.write().await;
-        for (key, session) in expired {
-            if sessions.remove(&key).is_some() {
+        let keys = sessions.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            let Some(session) = sessions.get(&key).cloned() else {
+                continue;
+            };
+            let Ok(_serial) = session.serial.try_lock() else {
+                continue;
+            };
+            let last = *session.last_used.lock().await;
+            if now.duration_since(last) >= self.idle_timeout && sessions.remove(&key).is_some() {
                 let _ = session.driver.as_ref().clone().quit().await;
             }
         }
@@ -549,6 +574,7 @@ impl<C: CookieStore> downloader::Download for Browser<C> {
         *opened = false;
         let sessions = std::mem::take(&mut *self.sessions.write().await);
         for session in sessions.into_values() {
+            let _serial = session.serial.lock().await;
             let _ = session.driver.as_ref().clone().quit().await;
         }
         Ok(())
@@ -821,6 +847,49 @@ fn reject_sensitive_headers(request: &net::Request) -> Result<(), downloader::Er
     Ok(())
 }
 
+fn random_user_agent() -> &'static str {
+    DEFAULT_USER_AGENTS[fastrand::usize(..DEFAULT_USER_AGENTS.len())]
+}
+
+fn browser_headers(request: &net::Request) -> HashMap<String, String> {
+    let mut headers = request
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+    if !headers.contains_key("user-agent") {
+        headers.insert("user-agent".to_string(), random_user_agent().to_string());
+    }
+    headers
+}
+
+async fn restore_browser_cookies(
+    driver: &WebDriver,
+    names: &[String],
+    previous: &[Cookie],
+) -> Result<(), downloader::Error> {
+    for name in names {
+        driver.delete_cookie(name).await.map_err(driver_error)?;
+    }
+    for cookie in previous {
+        let mut cookie = cookie.clone();
+        if cookie
+            .domain
+            .as_deref()
+            .is_some_and(|domain| domain.is_empty() || domain.contains(':'))
+        {
+            cookie.domain = None;
+        }
+        driver.add_cookie(cookie).await.map_err(driver_error)?;
+    }
+    Ok(())
+}
+
 fn request_cookie_values(
     request: &net::Request,
     url: &Url,
@@ -848,6 +917,21 @@ fn driver_error(error: impl std::fmt::Display) -> downloader::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_uses_a_default_user_agent_only_when_request_does_not_specify_one() {
+        let request = net::Request::follow("https://example.com").unwrap();
+        let headers = browser_headers(&request);
+        assert!(DEFAULT_USER_AGENTS.contains(&headers["user-agent"].as_str()));
+
+        let mut request = request;
+        request
+            .headers
+            .try_set("User-Agent", "custom-agent")
+            .unwrap();
+        let headers = browser_headers(&request);
+        assert_eq!(headers["user-agent"], "custom-agent");
+    }
 
     #[test]
     fn session_key_uses_origin_not_path() {

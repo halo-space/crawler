@@ -211,7 +211,8 @@ impl Registry {
         mut item: Box<dyn Item>,
         attachment: Option<&crate::item::attachment::Config>,
     ) -> Result<Output<Box<dyn Item>>, Error> {
-        for bind in self.resolve(item.middlewares(), "before_item", true)? {
+        let specs = crate::item::middleware_specs(item.as_ref());
+        for bind in self.resolve(&specs, "before_item", true)? {
             if bind.spec.name == "download" {
                 if let Some(config) = attachment {
                     item = self.download_item(item, config).await;
@@ -264,7 +265,8 @@ impl Registry {
     }
 
     pub async fn error_item(&self, item: &dyn Item, error: &str) -> Result<(), Error> {
-        for bind in self.resolve(item.middlewares(), "error_item", false)? {
+        let specs = crate::item::middleware_specs(item);
+        for bind in self.resolve(&specs, "error_item", false)? {
             bind.middleware.error_item(item, error, &bind.spec).await?;
         }
         Ok(())
@@ -370,8 +372,21 @@ fn validate_attachment_sizes(
             continue;
         };
         for value in media {
-            let Some(size) = value.get("size").and_then(serde_json::Value::as_i64) else {
+            let Some(object) = value.as_object() else {
                 continue;
+            };
+            let has_source = object
+                .get("src")
+                .or_else(|| object.get("url"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|source| !source.is_empty());
+            if !has_source {
+                continue;
+            }
+            let Some(size) = object.get("size").and_then(serde_json::Value::as_i64) else {
+                return Err(crate::item::Error::Message(format!(
+                    "attachment size for {field} is missing"
+                )));
             };
             if size < 0 || size as u64 > config.max_body_bytes {
                 return Err(crate::item::Error::Message(format!(
@@ -437,6 +452,9 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use indexmap::IndexMap;
+    use serde_json::Value;
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -449,6 +467,12 @@ mod tests {
 
     struct AttachmentProbe(Arc<AtomicUsize>);
 
+    struct AttachmentConfigProbe {
+        calls: Arc<AtomicUsize>,
+        configs: Arc<Mutex<Vec<(u64, u64)>>>,
+        size: i64,
+    }
+
     impl crate::item::attachment::AttachmentDownloader for AttachmentProbe {
         fn download<'a>(
             &'a self,
@@ -460,6 +484,41 @@ mod tests {
                 Ok(())
             })
         }
+    }
+
+    impl crate::item::attachment::AttachmentDownloader for AttachmentConfigProbe {
+        fn download<'a>(
+            &'a self,
+            item: &'a mut dyn Item,
+            config: &'a crate::item::attachment::Config,
+        ) -> crate::item::attachment::BoxFuture<'a, Result<(), crate::item::Error>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.configs
+                    .lock()
+                    .unwrap()
+                    .push((config.timeout, config.max_body_bytes));
+                let mut values = item.values()?;
+                if let Some(Value::Array(media)) = values.get_mut("cover") {
+                    for value in media {
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert("size".to_string(), Value::from(self.size));
+                        }
+                    }
+                }
+                item.replace_values(values)
+            })
+        }
+    }
+
+    fn attachment_item() -> crate::item::Map {
+        let mut item = crate::item::Map::new(IndexMap::from([(
+            "cover".to_string(),
+            serde_json::json!([{"src": "https://example.com/cover.jpg"}]),
+        )]));
+        item.state_mut().set_download_fields(["cover"]);
+        item.state_mut().id_mut().push_str("item-1");
+        item
     }
 
     #[derive(Clone, Copy)]
@@ -699,14 +758,15 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_item_middleware_before_execution() {
         let registry = Registry::new();
-        let item = TestItem {
+        let mut item = TestItem {
             state: crate::item::State::default(),
-            middlewares: vec![
-                Spec::new("validate")
-                    .hook("before_item")
-                    .args(serde_json::json!({"required": "title"})),
-            ],
+            middlewares: Vec::new(),
         };
+        item.state.middlewares_mut().push(
+            Spec::new("validate")
+                .hook("before_item")
+                .args(serde_json::json!({"required": "title"})),
+        );
 
         let error = match registry.before_item(Box::new(item), None).await {
             Ok(_) => panic!("invalid Item middleware must be rejected"),
@@ -727,12 +787,12 @@ mod tests {
         };
         item.state_mut().set_download_fields(["cover"]);
         item.state_mut().id_mut().push_str("item-1");
-        item.middlewares = vec![Spec {
+        item.state_mut().middlewares_mut().push(Spec {
             hook: Some("before_item".to_string()),
             name: "download".to_string(),
             skip: true,
             ..Spec::default()
-        }];
+        });
 
         let config = crate::item::attachment::Config {
             enabled: true,
@@ -746,6 +806,85 @@ mod tests {
             panic!("item should continue when download is skipped");
         };
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn custom_attachment_downloader_receives_default_and_overridden_limits() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let configs = Arc::new(Mutex::new(Vec::new()));
+        let registry = Registry::new();
+        registry.register_attachment(AttachmentConfigProbe {
+            calls: calls.clone(),
+            configs: configs.clone(),
+            size: 1,
+        });
+
+        let default_config = crate::item::attachment::Config {
+            enabled: true,
+            ..Default::default()
+        };
+        let Output::Continue(_) = registry
+            .before_item(Box::new(attachment_item()), Some(&default_config))
+            .await
+            .unwrap()
+        else {
+            panic!("item should continue after attachment download");
+        };
+
+        let overridden_config = crate::item::attachment::Config {
+            enabled: true,
+            timeout: 12_345,
+            max_body_bytes: 1_024,
+            ..Default::default()
+        };
+        let Output::Continue(_) = registry
+            .before_item(Box::new(attachment_item()), Some(&overridden_config))
+            .await
+            .unwrap()
+        else {
+            panic!("item should continue after attachment download");
+        };
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            configs.lock().unwrap().as_slice(),
+            &[
+                (
+                    crate::item::attachment::DEFAULT_TIMEOUT_MILLIS,
+                    crate::item::attachment::DEFAULT_MAX_BODY_BYTES
+                ),
+                (12_345, 1_024)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_custom_attachment_is_retried_and_then_logged() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = Registry::new();
+        registry.register_attachment(AttachmentConfigProbe {
+            calls: calls.clone(),
+            configs: Arc::new(Mutex::new(Vec::new())),
+            size: 5,
+        });
+        let config = crate::item::attachment::Config {
+            enabled: true,
+            max_body_bytes: 4,
+            retry: crate::item::attachment::Retry {
+                count: 1,
+                backoff: Vec::new(),
+            },
+            ..Default::default()
+        };
+
+        let Output::Continue(_) = registry
+            .before_item(Box::new(attachment_item()), Some(&config))
+            .await
+            .unwrap()
+        else {
+            panic!("attachment failure must not fail the Item lifecycle");
+        };
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

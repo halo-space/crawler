@@ -733,7 +733,10 @@ service is not part of this workspace. This repository maintains only the Worker
 client-side HTTP contract; a separate project owns the Master service, server-side protocol, database,
 Cron, Control API, frontend, and their design.
 Optional `fastrace` runtime tracing is implemented; the Browser Downloader now uses `thirtyfour` for
-Chrome/Chromium navigation and rendered DOM, while mixed HTTP/browser end-to-end acceptance remains v5 work. AI provider configuration is already Worker-local: one reusable
+Chrome/Chromium navigation and rendered DOM, and mixed HTTP/browser end-to-end acceptance is implemented. If a
+Browser Request does not specify `User-Agent`, the Worker selects one from the built-in Chrome UA pool for each
+navigation; an explicit Request `User-Agent` is preserved. UA selection is request-local and does not change the
+Session key or Snapshot. AI provider configuration is already Worker-local: one reusable
 `ai::OpenAI` provider is injected through `Engine::with_ai`, while Rules retain only the prompt.
 
 Browser login belongs to `spider.login`; it is not a separate login Request. When a Trace is created, the login

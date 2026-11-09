@@ -46,10 +46,15 @@ pub trait Item: erased_serde::Serialize + Any + Send + Sync {
         ))
     }
 
+    /// Returns the middleware specs stored in the canonical Item State.
+    ///
+    /// Implementations should keep this default implementation so the engine and custom Item code
+    /// observe the same middleware list.
     fn middlewares(&self) -> &[middleware::Spec] {
         self.state().middlewares()
     }
 
+    /// Returns the canonical Item State middleware list for mutation.
     fn middlewares_mut(&mut self) -> &mut Vec<middleware::Spec> {
         self.state_mut().middlewares_mut()
     }

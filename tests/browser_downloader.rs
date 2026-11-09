@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -108,6 +108,53 @@ fn cookie_page() -> (String, thread::JoinHandle<()>) {
         }
     });
     (format!("http://{address}/cookie"), handle)
+}
+
+type ExplicitCookiePage = (
+    String,
+    Arc<Mutex<Vec<String>>>,
+    mpsc::Sender<()>,
+    thread::JoinHandle<()>,
+);
+
+fn explicit_cookie_page() -> ExplicitCookiePage {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let (stop, stopped) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        loop {
+            if stopped.try_recv().is_ok() {
+                return;
+            }
+            let Ok((mut stream, _)) = listener.accept() else {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).unwrap_or_default();
+            if size == 0 {
+                continue;
+            }
+            let request = String::from_utf8_lossy(&request[..size]).into_owned();
+            let is_page = request.starts_with("GET /cookie");
+            captured.lock().unwrap().push(request);
+            let (status, body) = if is_page {
+                ("200 OK", "cookie-isolated")
+            } else {
+                ("404 Not Found", "")
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{address}/cookie"), requests, stop, handle)
 }
 
 fn cross_origin_redirect_pages() -> (
@@ -292,6 +339,51 @@ async fn browser_reuses_session_cookies_between_requests() {
 
     browser.close().await.unwrap();
     server.join().unwrap();
+}
+
+#[tokio::test]
+async fn browser_request_cookie_does_not_persist_in_session() {
+    if std::env::var_os("BROWSER_TESTS").is_none() {
+        return;
+    }
+
+    let (url, requests, stop, server) = explicit_cookie_page();
+    let browser = Browser::new();
+    browser.open().await.unwrap();
+
+    let first = Request::follow(url.clone())
+        .unwrap()
+        .mode(Mode::Browser)
+        .cookie("request_only", "one")
+        .unwrap();
+    browser.fetch(first).await.unwrap();
+
+    let mut second = Request::follow(url.replacen("/cookie", "/cookie2", 1))
+        .unwrap()
+        .mode(Mode::Browser);
+    second.headers.try_set("Cache-Control", "no-cache").unwrap();
+    browser.fetch(second).await.unwrap();
+
+    browser.close().await.unwrap();
+    stop.send(()).unwrap();
+    server.join().unwrap();
+
+    let requests = requests.lock().unwrap().clone();
+    let page_requests = requests
+        .iter()
+        .filter(|request| request.starts_with("GET /cookie"))
+        .collect::<Vec<_>>();
+    assert!(page_requests.len() >= 2, "requests: {requests:?}");
+    assert!(
+        page_requests
+            .iter()
+            .any(|request| { request.contains("Cookie: request_only=one") })
+    );
+    let last = page_requests.last().unwrap();
+    assert!(
+        !last.contains("Cookie: request_only=one"),
+        "all_requests: {requests:?}, page_requests: {page_requests:?}"
+    );
 }
 
 #[tokio::test]

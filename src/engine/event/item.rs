@@ -119,10 +119,9 @@ fn retry_policy(
     payload: &payload::Payload,
     registry: &middleware::Registry,
 ) -> Result<crate::middleware::retry::Policy, crate::Error> {
-    let mut policies = payload
-        .items
-        .iter()
-        .map(|item| registry.retry_policy(item.middlewares(), "error_item"));
+    let mut policies = payload.items.iter().map(|item| {
+        registry.retry_policy(&crate::item::middleware_specs(item.as_ref()), "error_item")
+    });
     let Some(first) = policies
         .next()
         .transpose()

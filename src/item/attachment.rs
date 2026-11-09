@@ -312,4 +312,30 @@ mod tests {
         tokio::fs::remove_dir_all(directory).await.unwrap();
         server.join().unwrap();
     }
+
+    #[test]
+    fn config_uses_one_default_limit_and_allows_an_override() {
+        let default: Config = serde_json::from_value(serde_json::json!({
+            "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(default.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(default.timeout, DEFAULT_TIMEOUT_MILLIS);
+        assert!(default.validate().is_ok());
+
+        let overridden: Config = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "max_body_bytes": 1024,
+            "timeout": 2500
+        }))
+        .unwrap();
+        assert_eq!(overridden.max_body_bytes, 1024);
+        assert_eq!(overridden.timeout, 2500);
+
+        let invalid = Config {
+            max_body_bytes: 0,
+            ..Default::default()
+        };
+        assert!(invalid.validate().is_err());
+    }
 }

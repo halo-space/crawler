@@ -24,6 +24,7 @@ chrono-tz = "0.10"
 encoding_rs = "0.8"
 erased-serde = "0.4"
 fastrace = { version = "0.7.18", default-features = false }
+fastrand = "2"
 flate2 = "1"
 futures-util = "0.3"
 http = "1"
@@ -71,6 +72,7 @@ cookie_store = { workspace = true }
 encoding_rs = { workspace = true }
 erased-serde = { workspace = true }
 fastrace = { workspace = true, optional = true }
+fastrand = { workspace = true }
 futures-util = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }

@@ -660,7 +660,9 @@ execution. Main-document status and headers come from CDP Network events, and op
 waits for a CSS selector. Browser disconnects, navigation failures, wait timeouts, and page-read failures destroy
 the Session; `error_download.retry` supplies the backoff and retry policy. Browser Request headers are restricted
 to non-credential cache and negotiation headers; Cookie state is handled separately, and unsupported headers are
-rejected before navigation so they cannot leak across a redirect.
+rejected before navigation so they cannot leak across a redirect. If a Request does not provide `User-Agent`,
+Browser selects one from the built-in Chrome UA pool for that navigation; an explicit Request `User-Agent` is
+preserved and is not replaced. UA selection is request-local and is not part of the Session key or Snapshot.
 
 A Spider may declare Browser login under `spider.login`. When a Spider configuration creates a Trace, the login
 configuration is frozen with the complete DSL at `traces.snapshot.dsl.spider.login`. The Worker does not reread the

@@ -2942,6 +2942,7 @@ dependencies = [
  "encoding_rs",
  "erased-serde",
  "fastrace",
+ "fastrand",
  "flate2",
  "futures-util",
  "http",

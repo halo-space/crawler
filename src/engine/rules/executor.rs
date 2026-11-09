@@ -74,7 +74,9 @@ where
     if let Some((values, schema, function)) = output {
         let mut item =
             <P::Item as crate::item::Item>::from_values(values).map_err(crate::Error::Item)?;
-        crate::item::Item::middlewares_mut(&mut item).extend(node.middlewares.clone());
+        crate::item::Item::state_mut(&mut item)
+            .middlewares_mut()
+            .extend(node.middlewares.clone());
         let download_fields = node
             .fields
             .iter()
