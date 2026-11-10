@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Executable worker for Harbor crawler applications."
+repository = "https://github.com/halo-space/harbor"
 
 [[bin]]
 name = "halo-harbor-worker"
