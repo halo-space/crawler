@@ -829,7 +829,7 @@ let engine = halo::harbor::engine::Engine::new()
 Redis、MySQL 和 Master API Scheduler 通过替换 Scheduler 装配；Spider、Rules 和 Item 配置不需要改变。
 
 ```rust
-use halo_harbor_contrib::scheduler::redis::Redis;
+use contrib::scheduler::redis::Redis;
 use halo::harbor::{engine, net};
 
 #[tokio::main]

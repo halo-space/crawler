@@ -41,19 +41,10 @@ collects the paged ranking plus daily detail pages, while
 run. The daily/one-time schedule is created by the external Scheduler or Master; the Rules DSL
 only describes the Request graph.
 
-Run the standalone Worker service with the default in-memory Scheduler:
-
-```bash
-HARBOR_WORKER_ID=worker-01 \
-HARBOR_WORKER_LIMIT=5 \
-cargo run -p halo-harbor-worker
-```
-
-The Worker assembles one shared Engine and can select `memory`, `redis`, `mysql`, or `master_api`
-with `HARBOR_SCHEDULER`. Redis and MySQL use `HARBOR_REDIS_URL` or `HARBOR_MYSQL_DSN`; the
-Master API backend uses `HARBOR_MASTER_URL` and `HARBOR_TOKEN`. Each Scheduler owns its own
-registration, heartbeat, claiming, recovery, and settlement behavior. `HARBOR_WORKER_LIMIT` is
-the initial claim limit; a control-plane Scheduler may update it through its heartbeat.
+`halo-harbor-worker` is a generic Worker library. The application assembles it with a concrete
+Scheduler through `Builder::with_scheduler(...)`; Memory, Redis, MySQL, and Master API are
+replaceable Scheduler implementations and are not selected through Worker environment variables.
+Each Scheduler owns its own registration, heartbeat, claiming, recovery, and settlement behavior.
 
 The smallest Engine assembly is:
 
@@ -77,7 +68,7 @@ replaceable.
 | `halo-harbor` | Core runtime, Engine, Scheduler contracts, HTTP downloader, Rules, selectors, and Item Store |
 | `halo-harbor-macros` | Spider, handler, and Item derive macros |
 | `halo-harbor-contrib` | Redis/MySQL Schedulers, the Worker-side API Scheduler adapter, and distributed middleware implementations |
-| `halo-harbor-worker` | Standalone Worker service that assembles a selected Scheduler, runs the shared Engine, and writes Items through a Worker-owned Store |
+| `halo-harbor-worker` | Generic Worker library that runs the shared Engine with injected Scheduler, Downloader, Spider, Middleware, and Store |
 | `examples` | Executable code-mode and Rules-mode examples |
 
 ## Documentation

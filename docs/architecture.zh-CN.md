@@ -4,16 +4,16 @@
 
 ## 1. 定位与当前范围
 
-`Harbor` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 提供 Redis 7 单实例与 MySQL 9 Scheduler，用于持久化多 Worker 队列，`harbor-worker` 提供独立 Worker 服务入口。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
+`Harbor` 是一个 Rust 2024 workspace。默认可运行形态是单进程异步爬虫运行时，使用内存 Scheduler 和 HTTP Downloader；`contrib` 提供 Redis 7 单实例与 MySQL 9 Scheduler，用于持久化多 Worker 队列，`halo-harbor-worker` 提供接收外部依赖注入的通用 Worker 库。代码模式与 YAML Rules 模式共享同一套 Engine、Request、Response、Item、Middleware、Scheduler 和 Payload，不存在第二套规则引擎。
 
 当前 workspace 包含五个 crate：
 
 | crate | 职责 |
 | --- | --- |
-| `spider` | 核心运行时、公共数据对象、扩展合同，以及默认 Memory Scheduler 和 HTTP Downloader |
-| `macros` | `#[spider]` 过程宏；生成代码模式 Spider 的构造、node 注册和分发连接代码 |
-| `contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式 Middleware 实现 |
-| `harbor-worker` | 独立 Worker 服务，装配 API Scheduler、共享 Engine、Downloader 和 Worker 自己的 Item Store |
+| `halo-harbor` | 核心运行时、公共数据对象、扩展合同，以及默认 Memory Scheduler 和 HTTP Downloader |
+| `halo-harbor-macros` | `#[spider]` 过程宏；生成代码模式 Spider 的构造、node 注册和分发连接代码 |
+| `halo-harbor-contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式 Middleware 实现 |
+| `halo-harbor-worker` | 通用 Worker 库，运行共享 Engine，并接收外部注入的 Scheduler、Downloader、Spider、Middleware 和 Item Store |
 | `examples` | 可运行的代码模式和 Rules 模式示例 |
 
 ### 1.1 能力状态
@@ -38,15 +38,15 @@
 | Redis Scheduler | 已实现 | 仅 Redis 7+ 单实例；完整实现 namespace Scheduler/Init、Worker 注册/心跳与 Lua 原子转换 |
 | MySQL Scheduler | 已实现 | MySQL 9；使用 DSN 数据库隔离、显式建表脚本、事务领取/结算与 Worker 注册/心跳 |
 | API Scheduler 适配器 | 已实现 | 通过外部 Master API 完成注册/心跳的 Worker 侧 Scheduler；Master 服务属于独立项目 |
-| 独立 Worker 服务 | 已实现 | `harbor-worker` 从环境变量读取 Worker 配置，通过 Master API 领取 Request，从 Trace Snapshot 恢复 Rules，并写入本地 JSONL Item |
+| 通用 Worker 运行时 | 已实现 | `halo-harbor-worker` 从注入的 Scheduler 领取 Request，从 Trace Snapshot 恢复 Rules，并通过注入的 Store 写入 Item |
 | 运行期链路追踪 | 已实现 | 可选的逐 Request `fastrace` 根链路与有界生命周期 span；不等于业务 `trace_id` |
 
 XPath 已从路线中移除。HTML 的主选择能力固定为 CSS，不维护不完整的 XPath 子集。
 Healing 不是通用 selector 阶段。目前只有 CSS 提供 Healing；Regex 与 JSON 保持各自的精确选择
 语义，XML selector 当前也没有实现。
 
-Harbor workspace 不包含、也不实现 Master 服务，只负责 Worker 侧 API Scheduler 适配器、客户端
-HTTP 合同和消费该合同的 `harbor-worker` 进程。Master 服务、服务端协议、数据库、Migration、
+Harbor workspace 不包含、也不实现 Master 服务，只负责 Worker 侧 API Scheduler 适配器和客户端
+HTTP 合同。Master 服务、服务端协议、数据库、Migration、
 Cron、Control API、管理前端及其设计均由独立项目负责。
 Item 持久化严格属于 Worker：默认使用 `item::Jsonl`，`.with_store(...)` 只用于替换为 Worker
 自己的业务存储后端。一次 Engine 运行只能在启动时绑定一个 Store；运行时不在多个 Store 之间
@@ -349,9 +349,9 @@ let scheduler = contrib::scheduler::redis::Redis::new("redis://127.0.0.1:6379")?
     .with_worker_id("worker-01")?
     .with_worker_host("crawler-node-01")?
     .with_worker_version("1.0.0")?
-    .with_modes([spider::net::Mode::Http])?;
+    .with_modes([halo::harbor::net::Mode::Http])?;
 
-let engine = spider::engine::Engine::new()
+let engine = halo::harbor::engine::Engine::new()
     .with_scheduler(scheduler)
     .with_spider(MySpider::new())
     .build();
@@ -909,7 +909,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `src/trace/tracing.rs` | 运行期追踪配置、确定性采样、有界 span helper 与错误分类 |
 | `src/engine/event/request.rs` | 处理 Tx 产生的 Request 输出 |
 | `src/engine/event/item.rs` | 执行 Item Middleware、Store 重试与 `error_item` 编排 |
-| `src/spider/tx/identity.rs` | 为当前 Request 输出派生可重放的稳定 ID |
+| `src/harbor/tx/identity.rs` | 为当前 Request 输出派生可重放的稳定 ID |
 | `src/engine/executor.rs` | 根据 Trace Snapshot 选择 Code/Rules 并调用共享 Spider |
 | `src/engine/code.rs` | 代码模式本地运行种子初始化 |
 | `src/engine/rules.rs` | Rules 模式装配与运行种子初始化 |
@@ -950,9 +950,9 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 | `src/selector/ai.rs` | 从 Response 构造 prompt，并执行 JSON 对象提取合同 |
 | `src/middleware/dedup/{config,fingerprint,memory}.rs` | 解析扁平 Dedup 配置、生成规范桶/成员并维护 Worker 本地精确成员 |
 | `src/middleware/rate_limit/{config,memory}.rs` | 解析 group/QPS 配置并维护 Worker 本地调度 |
-| `macros/src/spider/expand.rs` | 将用户 Spider 结构展开为工厂实现 |
-| `macros/src/spider/check.rs` | 宏输入约束校验 |
-| `macros/src/spider/bind.rs` | 生成 node 注册与 handler 绑定代码 |
+| `macros/src/harbor/expand.rs` | 将用户 Spider 结构展开为工厂实现 |
+| `macros/src/harbor/check.rs` | 宏输入约束校验 |
+| `macros/src/harbor/bind.rs` | 生成 node 注册与 handler 绑定代码 |
 | `contrib/src/scheduler/redis/contract.rs` | Redis 对外类型、生命周期及 Scheduler/Init 合同连接 |
 | `contrib/src/scheduler/redis/worker.rs` | Redis Worker 配置、注册隔离、心跳与离线生命周期 |
 | `contrib/src/scheduler/redis/request.rs` | Redis Request 序列化、入队、领取、恢复和租约回收 |
@@ -1000,7 +1000,7 @@ Item 提交采用 at-least-once 语义。业务级 Item 去重属于 Store 合�
 - 不让 Item ID 承担业务去重；
 - Redis 单实例 Scheduler 不支持 Redis Cluster；Cluster 需要独立的 Scheduler 设计；
 - Browser 模式第一版只支持 GET 页面导航，不承担通用 HTTP API 请求；
-- 不让核心 `spider` crate 依赖 `contrib`。
+- 不让核心 `halo-harbor` crate 依赖 `halo-harbor-contrib`。
 
 ## 14. 架构不变量
 

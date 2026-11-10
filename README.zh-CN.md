@@ -35,18 +35,9 @@ cargo run -p examples --bin rules
 基金排行以及每日详情，`examples/rules-eastmoney-funds-history.yaml` 用于首次执行的历史净值抓取。
 每天一次或只执行一次由外部 Scheduler/Master 创建 Task，Rules DSL 只描述 Request 图。
 
-运行独立 Worker 服务，默认使用 Memory Scheduler：
-
-```bash
-HARBOR_WORKER_ID=worker-01 \
-HARBOR_WORKER_LIMIT=5 \
-cargo run -p halo-harbor-worker
-```
-
-Worker 通过 `HARBOR_SCHEDULER` 选择 `memory`、`redis`、`mysql` 或 `master_api`。
-Redis 和 MySQL 分别使用 `HARBOR_REDIS_URL`、`HARBOR_MYSQL_DSN`；Master API 使用
-`HARBOR_MASTER_URL`、`HARBOR_TOKEN`。注册、心跳、领取、恢复和结算都由选中的 Scheduler
-自己负责。`HARBOR_WORKER_LIMIT` 是初始领取上限，支持控制面的 Scheduler 可以在心跳时更新它。
+`halo-harbor-worker` 是通用 Worker 库。应用通过 `Builder::with_scheduler(...)` 注入具体
+Scheduler；Memory、Redis、MySQL 和 Master API 都是可替换的 Scheduler 实现，不由 Worker
+通过环境变量选择。注册、心跳、领取、恢复和结算都由注入的 Scheduler 自己负责。
 
 最小 Engine 装配方式：
 
@@ -69,7 +60,7 @@ engine.start().await?;
 | `halo-harbor` | 核心运行时、Engine、Scheduler 合同、HTTP 下载、Rules、Selector 与 Item Store |
 | `halo-harbor-macros` | Spider、处理函数与 Item 派生宏 |
 | `halo-harbor-contrib` | Redis/MySQL Scheduler、Worker 侧 API Scheduler 适配器与分布式中间件实现 |
-| `halo-harbor-worker` | 独立 Worker 服务，装配选中的 Scheduler，运行共享 Engine，并通过 Worker 自己的 Store 写入 Item |
+| `halo-harbor-worker` | 通用 Worker 库，运行共享 Engine，并接收外部注入的 Scheduler、Downloader、Spider、Middleware 和 Store |
 | `examples` | 可直接运行的代码模式与 Rules 模式示例 |
 
 ## 文档

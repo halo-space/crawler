@@ -4,16 +4,16 @@ This document describes the features implemented by the current source tree, the
 
 ## 1. Positioning and Current Scope
 
-`Harbor` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` provides Redis 7 standalone and MySQL 9 Schedulers for durable multi-Worker queues, and `harbor-worker` provides the standalone Worker service entrypoint. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
+`Harbor` is a Rust 2024 workspace. Its default runnable topology is a single-process asynchronous crawler runtime with the in-memory Scheduler and HTTP Downloader. `contrib` provides Redis 7 standalone and MySQL 9 Schedulers for durable multi-Worker queues, and `halo-harbor-worker` provides a generic Worker library that receives these dependencies from the application. Code mode and YAML Rules mode share the same Engine, Request, Response, Item, Middleware, Scheduler, and Payload objects. Rules mode is not a second runtime.
 
 The workspace contains five crates:
 
 | Crate | Responsibility |
 | --- | --- |
-| `spider` | Core runtime, public data objects, extension contracts, default Memory Scheduler, and HTTP Downloader |
-| `macros` | The `#[spider]` procedural macro, including code-mode construction, node registration, and dispatch bindings |
-| `contrib` | Replaceable Redis/MySQL Schedulers, Worker-side API Scheduler adapter, and distributed Middleware implementations |
-| `harbor-worker` | Standalone Worker service that assembles the API Scheduler, shared Engine, Downloader, and Worker-owned Item Store |
+| `halo-harbor` | Core runtime, public data objects, extension contracts, default Memory Scheduler, and HTTP Downloader |
+| `halo-harbor-macros` | The `#[spider]` procedural macro, including code-mode construction, node registration, and dispatch bindings |
+| `halo-harbor-contrib` | Replaceable Redis/MySQL Schedulers, Worker-side API Scheduler adapter, and distributed Middleware implementations |
+| `halo-harbor-worker` | Generic Worker library that runs the shared Engine with injected Scheduler, Downloader, Spider, Middleware, and Item Store |
 | `examples` | Runnable code-mode and Rules-mode examples |
 
 ### 1.1 Capability Status
@@ -38,7 +38,7 @@ The workspace contains five crates:
 | Redis Scheduler | Implemented | Redis 7+ standalone only; complete namespaced Scheduler/Init contract, Worker registration/heartbeat, and Lua-atomic transitions |
 | MySQL Scheduler | Implemented | MySQL 9; DSN-database isolation, operator-installed schema, transactional claim/settlement, and Worker registration/heartbeat |
 | API Scheduler adapter | Implemented | Worker-side Scheduler with registration/heartbeat over an external Master API; the Master service belongs to a separate project |
-| Standalone Worker service | Implemented | `harbor-worker` reads Worker configuration from environment variables, consumes Master API Requests, restores Rules from Trace Snapshots, and writes local JSONL Items |
+| Generic Worker runtime | Implemented | `halo-harbor-worker` consumes Requests from the injected Scheduler, restores Rules from Trace Snapshots, and writes Items through the injected Store |
 | Runtime tracing | Implemented | Optional per-Request `fastrace` roots and bounded lifecycle spans; distinct from business `trace_id` |
 
 XPath has been removed from the roadmap. CSS is the sole HTML selector path; the project does not maintain a partial XPath implementation.
@@ -46,8 +46,7 @@ Healing is not a generic selector stage. Only CSS exposes Healing; Regex and JSO
 selection semantics, and XML selection is not currently implemented.
 
 The Harbor workspace does not contain or implement the Master service. It owns the Worker-side
-API Scheduler adapter, its client-side HTTP contract, and the `harbor-worker` process that consumes
-that contract. The Master service, server-side protocol,
+API Scheduler adapter and its client-side HTTP contract. The Master service, server-side protocol,
 database, migrations, Cron, Control API, frontend, and their design belong to a separate project.
 Item persistence remains strictly inside the Worker: `item::Jsonl` is the default and
 `.with_store(...)` may replace it with a Worker-owned business backend. One Engine run has exactly one
@@ -368,9 +367,9 @@ let scheduler = contrib::scheduler::redis::Redis::new("redis://127.0.0.1:6379")?
     .with_worker_id("worker-01")?
     .with_worker_host("crawler-node-01")?
     .with_worker_version("1.0.0")?
-    .with_modes([spider::net::Mode::Http])?;
+    .with_modes([halo::harbor::net::Mode::Http])?;
 
-let engine = spider::engine::Engine::new()
+let engine = halo::harbor::engine::Engine::new()
     .with_scheduler(scheduler)
     .with_spider(MySpider::new())
     .build();
@@ -1018,7 +1017,7 @@ the Store contract.
 | `src/trace/tracing.rs` | Runtime tracing configuration, deterministic sampling, bounded span helpers, and error classes |
 | `src/engine/event/request.rs` | Handle Request output emitted by Tx |
 | `src/engine/event/item.rs` | Run Item middleware, Store retries, and `error_item` orchestration |
-| `src/spider/tx/identity.rs` | Derive replay-stable IDs for current-Request output |
+| `src/harbor/tx/identity.rs` | Derive replay-stable IDs for current-Request output |
 | `src/engine/executor.rs` | Select Code/Rules from Trace Snapshot and invoke the shared Spider |
 | `src/engine/code.rs` | Code-mode local run-seed initialization |
 | `src/engine/rules.rs` | Rules-mode assembly and run-seed initialization |
@@ -1059,9 +1058,9 @@ the Store contract.
 | `src/selector/ai.rs` | Build prompts from Responses and enforce the JSON-object extraction contract |
 | `src/middleware/dedup/{config,fingerprint,memory}.rs` | Parse flat Dedup configuration, derive canonical bucket/items, and maintain exact Worker-local membership |
 | `src/middleware/rate_limit/{config,memory}.rs` | Parse group/QPS configuration and maintain Worker-local schedules |
-| `macros/src/spider/expand.rs` | Expand the user Spider struct into its factory |
-| `macros/src/spider/check.rs` | Validate macro input constraints |
-| `macros/src/spider/bind.rs` | Generate node registration and handler bindings |
+| `macros/src/harbor/expand.rs` | Expand the user Spider struct into its factory |
+| `macros/src/harbor/check.rs` | Validate macro input constraints |
+| `macros/src/harbor/bind.rs` | Generate node registration and handler bindings |
 | `contrib/src/scheduler/redis/contract.rs` | Redis public type, lifecycle, and Scheduler/Init contract wiring |
 | `contrib/src/scheduler/redis/worker.rs` | Redis Worker configuration, registration fencing, heartbeat, and offline lifecycle |
 | `contrib/src/scheduler/redis/request.rs` | Redis Request serialization, queueing, claim, restore, and lease recovery |
@@ -1109,7 +1108,7 @@ These capabilities must preserve the existing core contracts:
 - using Item ID for business deduplication;
 - supporting Redis Cluster through the standalone Redis Scheduler; Cluster needs a separate Scheduler design;
 - Browser mode is GET-only page navigation in the first implementation and does not serve as a generic HTTP API client;
-- making the core `spider` crate depend on `contrib`.
+- making the core `halo-harbor` crate depend on `halo-harbor-contrib`.
 
 ## 14. Architecture Invariants
 
