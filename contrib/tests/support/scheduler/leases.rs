@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use halo::harbor::scheduler::Init;
-use halo::harbor::{Scheduler, payload};
+use harbor::scheduler::Init;
+use harbor::{Scheduler, payload};
 
 use super::{
     fixture::{Timing, close, open_run},

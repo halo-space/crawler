@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use halo::contrib::scheduler::mysql::MySql;
-use halo::harbor::scheduler::Lease;
+use contrib::scheduler::mysql::MySql;
+use harbor::scheduler::Lease;
 
 use super::{conformance, server};
 
@@ -71,10 +71,7 @@ fn isolated(urls: &Arc<Mutex<VecDeque<String>>>, lease: Lease) -> MySql {
         .unwrap()
         .with_worker_version("test")
         .unwrap()
-        .with_modes([
-            halo::harbor::net::Mode::Http,
-            halo::harbor::net::Mode::Browser,
-        ])
+        .with_modes([harbor::net::Mode::Http, harbor::net::Mode::Browser])
         .unwrap()
         .with_lease(lease)
         .unwrap()

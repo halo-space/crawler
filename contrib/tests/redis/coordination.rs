@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use halo::harbor::{Scheduler, payload};
+use harbor::{Scheduler, payload};
 
 use super::{request, server, settlement, worker};
 

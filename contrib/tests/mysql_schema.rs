@@ -1,7 +1,7 @@
 #[path = "mysql/server.rs"]
 mod server;
 
-use halo::harbor::Scheduler as _;
+use harbor::Scheduler as _;
 use sqlx::Row;
 
 #[tokio::test]
@@ -217,8 +217,8 @@ async fn scheduler_open_rejects_padding_identity_collations() {
     database.remove().await;
 }
 
-fn configured(url: &str) -> halo::contrib::scheduler::mysql::MySql {
-    halo::contrib::scheduler::mysql::MySql::new(url)
+fn configured(url: &str) -> contrib::scheduler::mysql::MySql {
+    contrib::scheduler::mysql::MySql::new(url)
         .unwrap()
         .with_worker_id("schema-worker")
         .unwrap()

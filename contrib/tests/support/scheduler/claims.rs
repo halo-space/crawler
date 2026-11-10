@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use halo::harbor::{Scheduler, net, payload};
+use harbor::{Scheduler, net, payload};
 
 use super::{
     fixture::{Timing, close, open_run, race},
@@ -10,7 +10,7 @@ use super::{
 
 pub(super) async fn claims_use_frozen_capabilities_and_priority<S>(scheduler: S)
 where
-    S: Scheduler + halo::harbor::scheduler::Init,
+    S: Scheduler + harbor::scheduler::Init,
 {
     open_run(&scheduler).await;
     let mut low = request("http-low", "https://example.com/http/low");
@@ -85,7 +85,7 @@ where
 
 pub(super) async fn concurrent_claims_are_atomic<S>(scheduler: S)
 where
-    S: Scheduler + halo::harbor::scheduler::Init + 'static,
+    S: Scheduler + harbor::scheduler::Init + 'static,
 {
     open_run(&scheduler).await;
     let mut requests = Vec::with_capacity(32);
@@ -156,7 +156,7 @@ where
 
 pub(super) async fn delayed_requests_wait_for_next_time<S>(scheduler: S, timing: Timing)
 where
-    S: Scheduler + halo::harbor::scheduler::Init,
+    S: Scheduler + harbor::scheduler::Init,
 {
     open_run(&scheduler).await;
     let mut delayed = request("delayed", "https://example.com/delayed");

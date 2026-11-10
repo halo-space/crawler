@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use halo::contrib::middleware::rate_limit::Redis;
-use halo::harbor::middleware::{Middleware as _, Next, Spec};
-use halo::harbor::net::Request;
+use contrib::middleware::rate_limit::Redis;
+use harbor::middleware::{Middleware as _, Next, Spec};
+use harbor::net::Request;
 
 #[allow(dead_code)]
 #[path = "redis/server.rs"]
@@ -90,7 +90,7 @@ async fn active_qps_conflict_does_not_change_the_schedule() {
 
     assert!(matches!(
         result,
-        Err(halo::harbor::middleware::Error::InvalidConfig { name, message })
+        Err(harbor::middleware::Error::InvalidConfig { name, message })
             if name == "rate_limit" && message.contains("different qps")
     ));
     assert_eq!(state(&server, &group).await, before);

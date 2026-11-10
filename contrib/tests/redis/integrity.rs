@@ -1,4 +1,4 @@
-use halo::harbor::{Scheduler, payload};
+use harbor::{Scheduler, payload};
 
 use super::{key, request, run, server, settlement, worker};
 
@@ -502,7 +502,7 @@ async fn replay_rejects_a_removed_trace_without_mutating_requests() {
         .unwrap_err();
     assert!(matches!(
         error,
-        halo::harbor::scheduler::Error::TraceNotFound(id) if id == run::TRACE_ID
+        harbor::scheduler::Error::TraceNotFound(id) if id == run::TRACE_ID
     ));
     let after = redis::cmd("HGETALL")
         .arg(&request_key)
@@ -552,7 +552,7 @@ async fn replay_rejects_a_missing_trace_task_owner() {
         .unwrap_err();
     assert!(matches!(
         error,
-        halo::harbor::scheduler::Error::TraceNotFound(id) if id == run::TRACE_ID
+        harbor::scheduler::Error::TraceNotFound(id) if id == run::TRACE_ID
     ));
 
     scheduler.close().await.unwrap();
@@ -591,7 +591,7 @@ async fn replay_rejects_a_mismatched_trace_task_owner() {
         .unwrap_err();
     assert!(matches!(
         error,
-        halo::harbor::scheduler::Error::IdentityMismatch { id, field }
+        harbor::scheduler::Error::IdentityMismatch { id, field }
             if id == "mismatched-trace-task-owner-request" && field == "task_id"
     ));
 

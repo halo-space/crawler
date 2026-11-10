@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use halo::contrib::scheduler::redis::Redis;
-use halo::harbor::scheduler::Init;
-use halo::harbor::{Scheduler, payload, stats, trace};
+use contrib::scheduler::redis::Redis;
+use harbor::scheduler::Init;
+use harbor::{Scheduler, payload, stats, trace};
 use tracing::instrument::WithSubscriber;
 
 use super::{key, request, server, settlement, worker};
@@ -338,9 +338,7 @@ async fn push_rejects_a_trace_whose_snapshot_was_removed() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap_err();
-    assert!(
-        matches!(error, halo::harbor::scheduler::Error::TraceNotFound(id) if id == "missing-trace")
-    );
+    assert!(matches!(error, harbor::scheduler::Error::TraceNotFound(id) if id == "missing-trace"));
     let exists = redis::cmd("EXISTS")
         .arg(key::request(&namespace, "missing-trace-request"))
         .query_async::<usize>(&mut connection)
@@ -954,7 +952,7 @@ async fn claim_bounds_expired_lease_recovery() {
 async fn assert_settlement_is_unchanged(
     connection: &mut redis::aio::MultiplexedConnection,
     namespace: &str,
-    request: &halo::harbor::net::Request,
+    request: &harbor::net::Request,
     stats: &str,
 ) {
     let state = redis::cmd("HGET")

@@ -1,4 +1,4 @@
-use halo::harbor::{Scheduler, payload};
+use harbor::{Scheduler, payload};
 
 use super::{
     fixture::{close, open_run},
@@ -8,12 +8,12 @@ use super::{
 
 pub(super) async fn request_retry_limit_is_enforced<S>(scheduler: S)
 where
-    S: Scheduler + halo::harbor::scheduler::Init,
+    S: Scheduler + harbor::scheduler::Init,
 {
     open_run(&scheduler).await;
 
     let mut accepted = request("retry-limit", "https://example.com/retry-limit");
-    accepted.max_retry_count = halo::harbor::net::request::MAX_RETRY_COUNT;
+    accepted.max_retry_count = harbor::net::request::MAX_RETRY_COUNT;
     scheduler
         .push(payload::Payload::new().requests(vec![accepted]))
         .await
@@ -21,12 +21,12 @@ where
     let claimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     assert_eq!(
         claimed.max_retry_count,
-        halo::harbor::net::request::MAX_RETRY_COUNT
+        harbor::net::request::MAX_RETRY_COUNT
     );
     succeed(&scheduler, &claimed).await;
 
     let mut rejected = request("retry-overflow", "https://example.com/retry-overflow");
-    rejected.max_retry_count = halo::harbor::net::request::MAX_RETRY_COUNT + 1;
+    rejected.max_retry_count = harbor::net::request::MAX_RETRY_COUNT + 1;
     assert!(
         scheduler
             .push(payload::Payload::new().requests(vec![rejected]))

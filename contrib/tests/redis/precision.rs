@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use halo::harbor::scheduler::Init;
-use halo::harbor::{Scheduler, payload, stats, trace};
+use harbor::scheduler::Init;
+use harbor::{Scheduler, payload, stats, trace};
 
 use super::{key, request, server, settlement};
 
