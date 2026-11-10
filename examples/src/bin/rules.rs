@@ -64,4 +64,16 @@ mod tests {
         halo::harbor::config::Config::from_yaml(include_str!("../../rules-newspaper.yaml"))
             .unwrap();
     }
+
+    #[test]
+    fn eastmoney_fund_rules_are_valid() {
+        halo::harbor::config::Config::from_yaml(include_str!(
+            "../../rules-eastmoney-funds-daily.yaml"
+        ))
+        .unwrap();
+        halo::harbor::config::Config::from_yaml(include_str!(
+            "../../rules-eastmoney-funds-history.yaml"
+        ))
+        .unwrap();
+    }
 }

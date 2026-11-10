@@ -1,0 +1,305 @@
+# Harbor only executes this graph. The daily schedule is owned by Master/Cron, which creates one
+# Task per day. The list endpoint returns JavaScript data, so the list node uses generic regex rules;
+# the detail pages use the Browser Downloader because their tables are rendered by page scripts.
+spider:
+  name: eastmoney_fund_daily
+  allowed_domains:
+    - fund.eastmoney.com
+    - fundf10.eastmoney.com
+  start:
+    - node: ranking
+      url: "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0&sc=1nzf&st=desc&sd=2025-11-07&ed=2026-11-07&qdii=&tabSubtype=,,,,,&pi=1&pn=50&dx=1"
+      method: GET
+      download_mode: http
+      headers:
+        Referer: "https://fund.eastmoney.com/data/fundranking.html"
+      vals:
+        page: 1
+
+graph:
+  nodes:
+    ranking:
+      fields:
+        fund_codes:
+          default: []
+          extractors:
+            - kind: regex
+              expr: "([0-9]{6}),"
+        fund_names:
+          default: []
+          extractors:
+            - kind: regex
+              expr: "[0-9]{6},([^,]+),"
+        rank_dates:
+          default: []
+          extractors:
+            - kind: regex
+              expr: "[0-9]{6},[^,]*,[^,]*,([^,]*),"
+        rank_unit_nav:
+          default: []
+          extractors:
+            - kind: regex
+              expr: "[0-9]{6},[^,]*,[^,]*,[^,]*,([^,]*),"
+        rank_cumulative_nav:
+          default: []
+          extractors:
+            - kind: regex
+              expr: "[0-9]{6},[^,]*,[^,]*,[^,]*,[^,]*,([^,]*),"
+        rank_daily_growth:
+          default: []
+          extractors:
+            - kind: regex
+              expr: "[0-9]{6},[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,([^,]*),"
+      binds:
+        fund_codes:
+          kind: pipeline
+          from: "$fields.fund_codes"
+        next_page:
+          kind: pipeline
+          from: "$vals.page"
+          transforms:
+            - kind: add
+              value: 1
+        next_url:
+          kind: template
+          template: "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0&sc=1nzf&st=desc&sd=2025-11-07&ed=2026-11-07&qdii=&tabSubtype=,,,,,&pi={page}&pn=50&dx=1"
+          vars:
+            page:
+              from: "$binds.next_page"
+        overview_urls:
+          kind: template
+          template: "https://fundf10.eastmoney.com/jbgk_{fund_code}.html"
+          vars:
+            fund_code:
+              from: "$binds.fund_codes"
+        holdings_urls:
+          kind: template
+          template: "https://fundf10.eastmoney.com/ccmx_{fund_code}.html"
+          vars:
+            fund_code:
+              from: "$binds.fund_codes"
+        industry_urls:
+          kind: template
+          template: "https://fundf10.eastmoney.com/hytz_{fund_code}.html"
+          vars:
+            fund_code:
+              from: "$binds.fund_codes"
+
+    overview:
+      fields:
+        fund_name:
+          default: ""
+          extractors:
+            - kind: css
+              expr: "table.info tr:nth-child(1) td:nth-of-type(2)::text"
+        fund_type:
+          default: ""
+          extractors:
+            - kind: css
+              expr: "table.info tr:nth-child(2) td:nth-of-type(2)::text"
+        manager:
+          default: ""
+          extractors:
+            - kind: css
+              expr: "table.info tr:nth-child(6) td:nth-of-type(1)::text"
+        manager_company:
+          default: ""
+          extractors:
+            - kind: css
+              expr: "table.info tr:nth-child(5) td:nth-of-type(1)::text"
+        net_asset:
+          default: ""
+          extractors:
+            - kind: css
+              expr: "table.info tr:nth-child(4) td:nth-of-type(1)::text"
+      binds:
+        fund_name:
+          kind: pipeline
+          from: "$fields.fund_name"
+        fund_type:
+          kind: pipeline
+          from: "$fields.fund_type"
+        manager:
+          kind: pipeline
+          from: "$fields.manager"
+        manager_company:
+          kind: pipeline
+          from: "$fields.manager_company"
+        net_asset:
+          kind: pipeline
+          from: "$fields.net_asset"
+
+    holdings:
+      fields:
+        rows:
+          default: []
+          extractors:
+            - kind: css
+              expr: "#cctable table tbody tr td::text"
+      binds:
+        rows:
+          kind: pipeline
+          from: "$fields.rows"
+
+    industry:
+      fields:
+        rows:
+          default: []
+          extractors:
+            - kind: css
+              expr: "#hypztable table tbody tr td::text"
+      binds:
+        rows:
+          kind: pipeline
+          from: "$fields.rows"
+
+  edges:
+    - from: ranking
+      kind: request
+      when:
+        from: "$fields.fund_codes"
+        op: present
+      request:
+        node: ranking
+        url:
+          from: "$binds.next_url"
+        method: GET
+        download_mode: http
+        headers:
+          Referer: "https://fund.eastmoney.com/data/fundranking.html"
+        vals:
+          page:
+            from: "$binds.next_page"
+
+    - from: ranking
+      kind: item
+      vals:
+        source:
+          value: "ranking"
+        rank_codes:
+          from: "$binds.fund_codes"
+        rank_names:
+          from: "$fields.fund_names"
+        rank_dates:
+          from: "$fields.rank_dates"
+        rank_unit_nav:
+          from: "$fields.rank_unit_nav"
+        rank_cumulative_nav:
+          from: "$fields.rank_cumulative_nav"
+        rank_daily_growth:
+          from: "$fields.rank_daily_growth"
+
+    - from: ranking
+      kind: request
+      request:
+        node: overview
+        url:
+          from: "$binds.overview_urls"
+        method: GET
+        download_mode: browser
+        wait_selector: "table.info"
+        vals:
+          fund_code:
+            from: "$binds.fund_codes"
+          source:
+            value: "overview"
+
+    - from: ranking
+      kind: request
+      request:
+        node: holdings
+        url:
+          from: "$binds.holdings_urls"
+        method: GET
+        download_mode: browser
+        wait_selector: "#cctable table"
+        vals:
+          fund_code:
+            from: "$binds.fund_codes"
+          source:
+            value: "holdings"
+
+    - from: ranking
+      kind: request
+      request:
+        node: industry
+        url:
+          from: "$binds.industry_urls"
+        method: GET
+        download_mode: browser
+        wait_selector: "#hypztable table"
+        vals:
+          fund_code:
+            from: "$binds.fund_codes"
+          source:
+            value: "industry"
+
+    - from: overview
+      kind: item
+      vals:
+        fund_code:
+          from: "$vals.fund_code"
+        source:
+          from: "$vals.source"
+        fund_name:
+          from: "$binds.fund_name"
+        fund_type:
+          from: "$binds.fund_type"
+        manager:
+          from: "$binds.manager"
+        manager_company:
+          from: "$binds.manager_company"
+        net_asset:
+          from: "$binds.net_asset"
+
+    - from: holdings
+      kind: item
+      vals:
+        fund_code:
+          from: "$vals.fund_code"
+        source:
+          from: "$vals.source"
+        rows:
+          from: "$binds.rows"
+
+    - from: industry
+      kind: item
+      vals:
+        fund_code:
+          from: "$vals.fund_code"
+        source:
+          from: "$vals.source"
+        rows:
+          from: "$binds.rows"
+
+item:
+  schema:
+    fields:
+      source:
+        type: string
+      fund_code:
+        type: string
+      fund_name:
+        type: string
+      fund_type:
+        type: string
+      manager:
+        type: string
+      manager_company:
+        type: string
+      net_asset:
+        type: string
+      rank_codes:
+        type: array
+      rank_names:
+        type: array
+      rank_dates:
+        type: array
+      rank_unit_nav:
+        type: array
+      rank_cumulative_nav:
+        type: array
+      rank_daily_growth:
+        type: array
+      rows:
+        type: array

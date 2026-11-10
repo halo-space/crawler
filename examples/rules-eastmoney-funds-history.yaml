@@ -1,0 +1,149 @@
+# One-time historical Task. Run this configuration once to collect historical net values; keep it
+# separate from the daily Task so a daily schedule never replays the complete history.
+spider:
+  name: eastmoney_fund_history
+  allowed_domains:
+    - fund.eastmoney.com
+    - fundf10.eastmoney.com
+  start:
+    - node: ranking
+      url: "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0&sc=1nzf&st=desc&sd=2025-11-07&ed=2026-11-07&qdii=&tabSubtype=,,,,,&pi=1&pn=50&dx=1"
+      method: GET
+      download_mode: http
+      headers:
+        Referer: "https://fund.eastmoney.com/data/fundranking.html"
+      vals:
+        page: 1
+
+graph:
+  nodes:
+    ranking:
+      fields:
+        fund_codes:
+          default: []
+          extractors:
+            - kind: regex
+              expr: "([0-9]{6}),"
+      binds:
+        fund_codes:
+          kind: pipeline
+          from: "$fields.fund_codes"
+        next_page:
+          kind: pipeline
+          from: "$vals.page"
+          transforms:
+            - kind: add
+              value: 1
+        next_url:
+          kind: template
+          template: "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0&sc=1nzf&st=desc&sd=2025-11-07&ed=2026-11-07&qdii=&tabSubtype=,,,,,&pi={page}&pn=50&dx=1"
+          vars:
+            page:
+              from: "$binds.next_page"
+        history_urls:
+          kind: template
+          template: "https://fundf10.eastmoney.com/jjjz_{fund_code}.html"
+          vars:
+            fund_code:
+              from: "$binds.fund_codes"
+
+    history:
+      fields:
+        nav_dates:
+          default: []
+          extractors:
+            - kind: css
+              expr: "#jztable table.lsjz tbody tr td:nth-child(1)::text"
+        unit_nav:
+          default: []
+          extractors:
+            - kind: css
+              expr: "#jztable table.lsjz tbody tr td:nth-child(2)::text"
+        cumulative_nav:
+          default: []
+          extractors:
+            - kind: css
+              expr: "#jztable table.lsjz tbody tr td:nth-child(3)::text"
+        daily_growth:
+          default: []
+          extractors:
+            - kind: css
+              expr: "#jztable table.lsjz tbody tr td:nth-child(4)::text"
+      binds:
+        nav_dates:
+          kind: pipeline
+          from: "$fields.nav_dates"
+        unit_nav:
+          kind: pipeline
+          from: "$fields.unit_nav"
+        cumulative_nav:
+          kind: pipeline
+          from: "$fields.cumulative_nav"
+        daily_growth:
+          kind: pipeline
+          from: "$fields.daily_growth"
+
+  edges:
+    - from: ranking
+      kind: request
+      when:
+        from: "$fields.fund_codes"
+        op: present
+      request:
+        node: ranking
+        url:
+          from: "$binds.next_url"
+        method: GET
+        download_mode: http
+        headers:
+          Referer: "https://fund.eastmoney.com/data/fundranking.html"
+        vals:
+          page:
+            from: "$binds.next_page"
+
+    - from: ranking
+      kind: request
+      request:
+        node: history
+        url:
+          from: "$binds.history_urls"
+        method: GET
+        download_mode: browser
+        wait_selector: "#jztable table.lsjz"
+        vals:
+          fund_code:
+            from: "$binds.fund_codes"
+          source:
+            value: "history"
+
+    - from: history
+      kind: item
+      vals:
+        fund_code:
+          from: "$vals.fund_code"
+        source:
+          from: "$vals.source"
+        nav_dates:
+          from: "$binds.nav_dates"
+        unit_nav:
+          from: "$binds.unit_nav"
+        cumulative_nav:
+          from: "$binds.cumulative_nav"
+        daily_growth:
+          from: "$binds.daily_growth"
+
+item:
+  schema:
+    fields:
+      fund_code:
+        type: string
+      source:
+        type: string
+      nav_dates:
+        type: array
+      unit_nav:
+        type: array
+      cumulative_nav:
+        type: array
+      daily_growth:
+        type: array

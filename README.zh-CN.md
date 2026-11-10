@@ -31,6 +31,10 @@ cargo run -p examples --bin basic
 cargo run -p examples --bin rules
 ```
 
+示例中还包含一个真实基金数据流程：`examples/rules-eastmoney-funds-daily.yaml` 抓取带分页的
+基金排行以及每日详情，`examples/rules-eastmoney-funds-history.yaml` 用于首次执行的历史净值抓取。
+每天一次或只执行一次由外部 Scheduler/Master 创建 Task，Rules DSL 只描述 Request 图。
+
 运行独立 Worker 服务，默认使用 Memory Scheduler：
 
 ```bash

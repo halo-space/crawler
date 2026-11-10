@@ -35,6 +35,12 @@ Run the Rules example:
 cargo run -p examples --bin rules
 ```
 
+The examples also include a real fund data graph: `examples/rules-eastmoney-funds-daily.yaml`
+collects the paged ranking plus daily detail pages, while
+`examples/rules-eastmoney-funds-history.yaml` is intended for one initial historical-net-value
+run. The daily/one-time schedule is created by the external Scheduler or Master; the Rules DSL
+only describes the Request graph.
+
 Run the standalone Worker service with the default in-memory Scheduler:
 
 ```bash
