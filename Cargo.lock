@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "halo-harbor-contrib",
  "halo-harbor-macros",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "halo-harbor-contrib"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1215,11 +1215,10 @@ dependencies = [
 
 [[package]]
 name = "halo-harbor-worker"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "halo-harbor-contrib",
  "rustls",
- "serde",
  "thiserror",
  "tokio",
 ]

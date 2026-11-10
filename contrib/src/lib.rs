@@ -1,6 +1,8 @@
 mod browser;
 mod middleware;
 mod scheduler;
+#[path = "worker.rs"]
+mod worker_runtime;
 
 /// Core Harbor APIs exposed through the public `halo` facade.
 pub mod harbor {
@@ -20,4 +22,9 @@ pub mod contrib {
     pub mod scheduler {
         pub use crate::scheduler::*;
     }
+}
+
+/// Standalone Worker configuration and process runner.
+pub mod worker {
+    pub use crate::worker_runtime::*;
 }

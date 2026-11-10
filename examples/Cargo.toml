@@ -1,6 +1,6 @@
 [package]
 name = "examples"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -10,5 +10,5 @@ publish = false
 macros = { package = "halo-harbor-macros", path = "../macros" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-halo = { package = "halo-harbor-contrib", path = "../contrib", version = "0.2.1" }
+halo = { package = "halo-harbor-contrib", path = "../contrib", version = "0.2.2" }
 tokio = { workspace = true }
