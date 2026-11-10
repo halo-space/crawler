@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "halo-harbor",
  "halo-harbor-macros",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "halo-harbor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-openai",
  "bytes",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "halo-harbor-contrib"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "halo-harbor-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "halo-harbor-worker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "halo-harbor",
  "halo-harbor-contrib",
