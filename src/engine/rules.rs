@@ -5,21 +5,16 @@ use crate::harbor::tx;
 use crate::{config, downloader, harbor, middleware, scheduler};
 
 /// Rules 模式装配完成后的 Engine 类型。
-pub type Runtime<S, D, F, O = crate::item::Jsonl> = super::runtime::Runtime<
-    S,
-    D,
-    super::executor::Executor<<F as harbor::SpiderFactory>::Spider>,
-    Init,
-    O,
->;
+pub type Runtime<S, D, P, O = crate::item::Jsonl> =
+    super::runtime::Runtime<S, D, super::executor::Executor<P>, Init, O>;
 
 #[doc(hidden)]
 pub mod executor;
 
-pub struct Builder<S, D, F, O = crate::item::Jsonl> {
+pub struct Builder<S, D, P, O = crate::item::Jsonl> {
     pub(super) scheduler: S,
     pub(super) downloader: D,
-    pub(super) spider_factory: F,
+    pub(super) spider: Box<dyn FnOnce(tx::Tx) -> P + Send>,
     pub(super) store: O,
     pub(super) config: config::Config,
     pub(super) registry: middleware::Registry,
@@ -28,12 +23,15 @@ pub struct Builder<S, D, F, O = crate::item::Jsonl> {
     pub(super) middlewares: Vec<middleware::Spec>,
 }
 
-impl<S, D, F, O> Builder<S, D, F, O> {
-    pub fn with_spider<NextF>(self, spider_factory: NextF) -> Builder<S, D, NextF, O> {
+impl<S, D, P, O> Builder<S, D, P, O> {
+    pub fn with_spider<NextP, F>(self, spider: F) -> Builder<S, D, NextP, O>
+    where
+        F: FnOnce(tx::Tx) -> NextP + Send + 'static,
+    {
         Builder {
             scheduler: self.scheduler,
             downloader: self.downloader,
-            spider_factory,
+            spider: Box::new(spider),
             store: self.store,
             config: self.config,
             registry: self.registry,
@@ -43,11 +41,11 @@ impl<S, D, F, O> Builder<S, D, F, O> {
         }
     }
 
-    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Builder<NextS, D, F, O> {
+    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Builder<NextS, D, P, O> {
         Builder {
             scheduler,
             downloader: self.downloader,
-            spider_factory: self.spider_factory,
+            spider: self.spider,
             store: self.store,
             config: self.config,
             registry: self.registry,
@@ -57,11 +55,11 @@ impl<S, D, F, O> Builder<S, D, F, O> {
         }
     }
 
-    pub fn with_downloader<NextD>(self, downloader: NextD) -> Builder<S, NextD, F, O> {
+    pub fn with_downloader<NextD>(self, downloader: NextD) -> Builder<S, NextD, P, O> {
         Builder {
             scheduler: self.scheduler,
             downloader,
-            spider_factory: self.spider_factory,
+            spider: self.spider,
             store: self.store,
             config: self.config,
             registry: self.registry,
@@ -71,11 +69,11 @@ impl<S, D, F, O> Builder<S, D, F, O> {
         }
     }
 
-    pub fn with_store<NextO>(self, store: NextO) -> Builder<S, D, F, NextO> {
+    pub fn with_store<NextO>(self, store: NextO) -> Builder<S, D, P, NextO> {
         Builder {
             scheduler: self.scheduler,
             downloader: self.downloader,
-            spider_factory: self.spider_factory,
+            spider: self.spider,
             store,
             config: self.config,
             registry: self.registry,
@@ -113,17 +111,16 @@ impl<S, D, F, O> Builder<S, D, F, O> {
     }
 }
 
-impl<S, D, F, O> Builder<S, D, F, O>
+impl<S, D, P, O> Builder<S, D, P, O>
 where
     S: scheduler::Scheduler + scheduler::Init + 'static,
     D: downloader::Download + 'static,
-    F: harbor::SpiderFactory,
-    F::Spider: std::any::Any + harbor::Spider + 'static,
+    P: std::any::Any + harbor::Spider + 'static,
     O: crate::item::Store + 'static,
 {
-    pub fn build(self) -> Runtime<S, D, F, O> {
+    pub fn build(self) -> Runtime<S, D, P, O> {
         let (tx, events) = tx::channel(MAX_EVENTS);
-        let spider = self.spider_factory.build(tx);
+        let spider = (self.spider)(tx);
         let validation_error = validate_ai(&self.config, self.ai.as_deref())
             .or_else(|| validate_item_functions(&spider, &self.config));
         let config = Arc::new(self.config);

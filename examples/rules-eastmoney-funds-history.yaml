@@ -5,6 +5,7 @@ spider:
   allowed_domains:
     - fund.eastmoney.com
     - fundf10.eastmoney.com
+    - fundact.eastmoney.com
   start:
     - node: ranking
       url: "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0&sc=1nzf&st=desc&sd=2025-11-07&ed=2026-11-07&qdii=&tabSubtype=,,,,,&pi=1&pn=50&dx=1"

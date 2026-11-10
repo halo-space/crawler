@@ -18,7 +18,7 @@ pub mod trace;
 mod utils;
 
 pub use error::Error;
-pub use harbor::{Spider, SpiderFactory, Tx};
+pub use harbor::{Spider, Tx};
 pub use item::Item;
 pub use net::{Request, Response};
 pub use payload::{Payload, State};

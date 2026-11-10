@@ -62,9 +62,3 @@ where
 {
     Box::pin(spider.item(item))
 }
-
-pub trait SpiderFactory {
-    type Spider: Spider + 'static;
-
-    fn build(self, tx: Tx) -> Self::Spider;
-}

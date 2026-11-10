@@ -21,12 +21,12 @@ impl SchemaKey {
 
 pub enum Output {
     Valid,
-    Invalid(Vec<halo_validator::FieldError>),
+    Invalid(Vec<halo_validator::validator::FieldError>),
 }
 
 #[derive(Default)]
 pub struct Store {
-    validators: RwLock<HashMap<SchemaKey, Arc<halo_validator::Validator>>>,
+    validators: RwLock<HashMap<SchemaKey, Arc<halo_validator::validator::Validator>>>,
 }
 
 impl Store {
@@ -39,10 +39,13 @@ impl Store {
         if self.read().contains_key(&key) {
             return Ok(key);
         }
-        let schema = halo_validator::Schema::from_json(schema.to_string())
+        let schema = halo_validator::validator::Schema::from_json(schema.to_string())
             .map_err(|error| crate::item::Error::Message(error.to_string()))?;
-        let validator = Arc::new(halo_validator::Validator::with_schema(schema));
-        if let Err(error) = validator.validate_map(&serde_json::json!({}))
+        let validator = Arc::new(
+            halo_validator::validator::Validator::try_with_schema(schema)
+                .map_err(|error| crate::item::Error::Message(error.to_string()))?,
+        );
+        if let Err(error) = futures_executor::block_on(validator.check_map(&serde_json::json!({})))
             && !error.is_failed()
         {
             return Err(crate::item::Error::Message(error.to_string()));
@@ -51,11 +54,15 @@ impl Store {
         Ok(key)
     }
 
-    pub fn validate(&self, key: SchemaKey, value: &Value) -> Result<Output, crate::item::Error> {
+    pub async fn validate(
+        &self,
+        key: SchemaKey,
+        value: &Value,
+    ) -> Result<Output, crate::item::Error> {
         let validator = self.read().get(&key).cloned().ok_or_else(|| {
             crate::item::Error::Message(format!("item schema is not registered: {}", key.as_hex()))
         })?;
-        match validator.validate_map(value) {
+        match validator.check_map(value).await {
             Ok(()) => Ok(Output::Valid),
             Err(error) if error.is_failed() => {
                 Ok(Output::Invalid(error.into_fields().unwrap_or_default()))
@@ -64,13 +71,17 @@ impl Store {
         }
     }
 
-    fn read(&self) -> RwLockReadGuard<'_, HashMap<SchemaKey, Arc<halo_validator::Validator>>> {
+    fn read(
+        &self,
+    ) -> RwLockReadGuard<'_, HashMap<SchemaKey, Arc<halo_validator::validator::Validator>>> {
         self.validators
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn write(&self) -> RwLockWriteGuard<'_, HashMap<SchemaKey, Arc<halo_validator::Validator>>> {
+    fn write(
+        &self,
+    ) -> RwLockWriteGuard<'_, HashMap<SchemaKey, Arc<halo_validator::validator::Validator>>> {
         self.validators
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

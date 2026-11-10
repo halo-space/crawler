@@ -108,6 +108,7 @@ impl Middleware for Validate {
                 match self
                     .schemas
                     .validate(key, &value)
+                    .await
                     .map_err(|error| crate::middleware::Error::Message(error.to_string()))?
                 {
                     crate::item::schema::Output::Valid => {}

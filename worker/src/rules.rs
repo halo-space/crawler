@@ -1,5 +1,5 @@
 use harbor::item::Map;
-use harbor::{Error as HarborError, Spider, SpiderFactory, Tx};
+use harbor::{Error as HarborError, Spider, Tx};
 
 #[derive(Clone)]
 pub struct RulesSpider {
@@ -22,12 +22,6 @@ impl Spider for RulesSpider {
     }
 }
 
-pub struct RulesSpiderFactory;
-
-impl SpiderFactory for RulesSpiderFactory {
-    type Spider = RulesSpider;
-
-    fn build(self, tx: Tx) -> Self::Spider {
-        RulesSpider { tx }
-    }
+pub(crate) fn rules(tx: Tx) -> RulesSpider {
+    RulesSpider { tx }
 }

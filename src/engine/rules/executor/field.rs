@@ -59,7 +59,7 @@ pub(super) async fn parse(
             };
             match selection {
                 Ok(values) if !values.is_empty() => {
-                    let selected = collapse(values);
+                    let selected = collapse(values, field.default.as_ref());
                     if value::is_empty(&selected) {
                         continue;
                     }
@@ -99,10 +99,17 @@ fn css_value(node: scrape_core::Tag<'_>, output: graph::rules::CssOutput<'_>) ->
     }
 }
 
-fn collapse(mut values: Vec<Value>) -> Value {
+fn collapse(mut values: Vec<Value>, default: Option<&Value>) -> Value {
     match values.len() {
         0 => Value::Null,
-        1 => values.pop().unwrap_or(Value::Null),
+        1 => {
+            let value = values.pop().unwrap_or(Value::Null);
+            if default.is_some_and(Value::is_array) && !value.is_array() {
+                Value::Array(vec![value])
+            } else {
+                value
+            }
+        }
         _ => Value::Array(values),
     }
 }
@@ -195,6 +202,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fields["title"], Value::from("Recovered"));
+    }
+
+    #[tokio::test]
+    async fn array_defaults_preserve_array_shape_for_one_match() {
+        let spec = graph::rules::FieldsConfig {
+            fields: IndexMap::from([(
+                "codes".to_string(),
+                graph::rules::Field {
+                    kind: crate::item::config::Kind::Text,
+                    download: false,
+                    required: false,
+                    default: Some(Value::Array(Vec::new())),
+                    extractors: vec![graph::rules::Extractor::regex(r"([0-9]{6})")],
+                },
+            )]),
+        };
+        let fields = parse(&spec.fields, &response("002910")).await.unwrap();
+
+        assert_eq!(fields["codes"], serde_json::json!(["002910"]));
     }
 
     #[tokio::test]

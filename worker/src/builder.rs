@@ -4,53 +4,54 @@ use harbor::downloader::{self, Downloader};
 use harbor::item::Jsonl;
 use harbor::middleware::{self, Spec};
 use harbor::scheduler::{Init, Scheduler};
-use harbor::{Spider, SpiderFactory, engine};
+use harbor::{Spider, Tx, engine};
 
 use crate::config::Config;
-use crate::error::Error;
-use crate::rules::RulesSpiderFactory;
+use crate::rules::{RulesSpider, rules};
 
-pub struct Builder<S = harbor::scheduler::Memory, D = Downloader, F = RulesSpiderFactory, O = Jsonl>
-{
+pub struct Builder<S = harbor::scheduler::Memory, D = Downloader, P = RulesSpider, O = Jsonl> {
     config: Config,
-    engine: engine::Builder<S, D, F, O>,
+    engine: engine::Builder<S, D, P, O>,
 }
 
-impl Builder<harbor::scheduler::Memory, Downloader, RulesSpiderFactory, Jsonl> {
+impl Builder<harbor::scheduler::Memory, Downloader, RulesSpider, Jsonl> {
     pub fn new(config: Config) -> Self {
         Self {
             config: config.clone(),
             engine: engine::Builder::new()
                 .with_downloader(default_downloader(&config))
                 .with_store(Jsonl::with_dir(&config.store_dir))
-                .with_spider(RulesSpiderFactory),
+                .with_spider(rules),
         }
     }
 }
 
-impl<S, D, F, O> Builder<S, D, F, O> {
-    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Builder<NextS, D, F, O> {
+impl<S, D, P, O> Builder<S, D, P, O> {
+    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Builder<NextS, D, P, O> {
         Builder {
             config: self.config,
             engine: self.engine.with_scheduler(scheduler),
         }
     }
 
-    pub fn with_downloader<NextD>(self, downloader: NextD) -> Builder<S, NextD, F, O> {
+    pub fn with_downloader<NextD>(self, downloader: NextD) -> Builder<S, NextD, P, O> {
         Builder {
             config: self.config,
             engine: self.engine.with_downloader(downloader),
         }
     }
 
-    pub fn with_spider<NextF>(self, spider: NextF) -> Builder<S, D, NextF, O> {
+    pub fn with_spider<NextP, F>(self, spider: F) -> Builder<S, D, NextP, O>
+    where
+        F: FnOnce(Tx) -> NextP + Send + 'static,
+    {
         Builder {
             config: self.config,
             engine: self.engine.with_spider(spider),
         }
     }
 
-    pub fn with_store<NextO>(self, store: NextO) -> Builder<S, D, F, NextO> {
+    pub fn with_store<NextO>(self, store: NextO) -> Builder<S, D, P, NextO> {
         Builder {
             config: self.config,
             engine: self.engine.with_store(store),
@@ -77,7 +78,7 @@ impl<S, D, F, O> Builder<S, D, F, O> {
         }
     }
 
-    pub fn with_spider_middleware(self, spec: Spec) -> Self {
+    pub fn with_middleware_spec(self, spec: Spec) -> Self {
         Builder {
             config: self.config,
             engine: self.engine.with_spider_middleware(spec),
@@ -85,25 +86,24 @@ impl<S, D, F, O> Builder<S, D, F, O> {
     }
 }
 
-impl<S, D, F, O> Builder<S, D, F, O>
+impl<S, D, P, O> Builder<S, D, P, O>
 where
     S: Scheduler + Init + 'static,
     D: harbor::downloader::Download + 'static,
-    F: SpiderFactory,
-    F::Spider: Any + Spider + 'static,
+    P: Any + Spider + 'static,
     O: harbor::item::Store + 'static,
 {
-    pub async fn run(self) -> Result<(), Error> {
+    pub async fn run(self) -> Result<(), harbor::Error> {
         let mut runtime = self
             .engine
             .build()
             .with_concurrency(self.config.concurrency)
             .with_claim_limit(self.config.claim_limit);
-        runtime.start().await.map_err(Error::Runtime)
+        runtime.start().await
     }
 }
 
-pub async fn run(config: Config) -> Result<(), Error> {
+pub async fn run(config: Config) -> Result<(), harbor::Error> {
     Builder::new(config).run().await
 }
 

@@ -3,7 +3,6 @@ use syn::{Fields, FieldsNamed, ItemStruct, parse_quote};
 
 pub(super) fn structure(mut item: ItemStruct) -> proc_macro2::TokenStream {
     let ident = item.ident.clone();
-    let factory = syn::Ident::new(&format!("__{ident}Factory"), proc_macro2::Span::call_site());
     let generics = item.generics.clone();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -17,33 +16,17 @@ pub(super) fn structure(mut item: ItemStruct) -> proc_macro2::TokenStream {
     }
 
     let constructor_args = fields.iter().map(|(ident, ty)| quote!(#ident: #ty));
-    let factory_fields = fields.iter().map(|(ident, ty)| quote!(#ident: #ty));
     let constructor_fields = fields.iter().map(|(ident, _)| quote!(#ident));
-    let build_fields = fields.iter().map(|(ident, _)| quote!(#ident: self.#ident));
 
     quote! {
         #item
 
-        struct #factory #generics #where_clause {
-            #(#factory_fields,)*
-        }
-
         impl #impl_generics #ident #ty_generics #where_clause {
             pub fn new(
                 #(#constructor_args,)*
-            ) -> impl ::halo::harbor::SpiderFactory<Spider = Self> {
-                #factory {
+            ) -> impl ::core::ops::FnOnce(::halo::harbor::Tx) -> Self {
+                move |tx| Self {
                     #(#constructor_fields,)*
-                }
-            }
-        }
-
-        impl #impl_generics ::halo::harbor::SpiderFactory for #factory #ty_generics #where_clause {
-            type Spider = #ident #ty_generics;
-
-            fn build(self, tx: ::halo::harbor::Tx) -> Self::Spider {
-                #ident {
-                    #(#build_fields,)*
                     tx,
                 }
             }

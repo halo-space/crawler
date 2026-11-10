@@ -131,6 +131,9 @@ pub(super) fn item(
                 value = replacement;
             }
         }
+        if value.is_null() {
+            continue;
+        }
         let kind = fields_config
             .get(name)
             .map(|field| field.kind)

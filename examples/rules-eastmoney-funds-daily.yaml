@@ -6,6 +6,7 @@ spider:
   allowed_domains:
     - fund.eastmoney.com
     - fundf10.eastmoney.com
+    - fundact.eastmoney.com
   start:
     - node: ranking
       url: "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0&sc=1nzf&st=desc&sd=2025-11-07&ed=2026-11-07&qdii=&tabSubtype=,,,,,&pi=1&pn=50&dx=1"
@@ -90,28 +91,28 @@ graph:
         fund_name:
           default: ""
           extractors:
-            - kind: css
-              expr: "table.info tr:nth-child(1) td:nth-of-type(2)::text"
+            - kind: regex
+              expr: '基金全称\s*</th>\s*<td[^>]*>\s*([^<]+)'
         fund_type:
           default: ""
           extractors:
-            - kind: css
-              expr: "table.info tr:nth-child(2) td:nth-of-type(2)::text"
+            - kind: regex
+              expr: '基金类型\s*</th>\s*<td[^>]*>\s*([^<]+)'
         manager:
           default: ""
           extractors:
-            - kind: css
-              expr: "table.info tr:nth-child(6) td:nth-of-type(1)::text"
+            - kind: regex
+              expr: '(?s:基金经理人\s*</th>\s*<td[^>]*>.*?>\s*([^<]+)</a>)'
         manager_company:
           default: ""
           extractors:
-            - kind: css
-              expr: "table.info tr:nth-child(5) td:nth-of-type(1)::text"
+            - kind: regex
+              expr: '(?s:基金管理人\s*</th>\s*<td[^>]*>.*?>\s*([^<]+)</a>)'
         net_asset:
           default: ""
           extractors:
-            - kind: css
-              expr: "table.info tr:nth-child(4) td:nth-of-type(1)::text"
+            - kind: regex
+              expr: '净资产规模\s*</th>\s*<td[^>]*>\s*([^<]+)'
       binds:
         fund_name:
           kind: pipeline

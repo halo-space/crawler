@@ -2,9 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use harbor::scheduler::Init;
-use harbor::{
-    Scheduler, Spider, SpiderFactory, Tx, downloader, engine, net, payload, scheduler, trace,
-};
+use harbor::{Scheduler, Spider, Tx, downloader, engine, net, payload, scheduler, trace};
 
 /// A Rules trace is observable only when the Scheduler restores its Trace Snapshot onto a claim.
 /// Without that attachment, Engine treats the Request as code mode and never evaluates the edge.
@@ -34,7 +32,7 @@ graph:
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
         .with_rules(config)
-        .with_spider(LocalSpiderFactory)
+        .with_spider(|tx| LocalSpider { tx })
         .with_downloader(Download {
             fetched: fetched.clone(),
         })
@@ -82,9 +80,14 @@ graph:
     let indexed = Arc::new(AtomicUsize::new(0));
     let mut engine = engine::Builder::new()
         .with_scheduler(scheduler)
-        .with_spider(RemoteSpiderFactory {
-            started: started.clone(),
-            indexed: indexed.clone(),
+        .with_spider({
+            let started = started.clone();
+            let indexed = indexed.clone();
+            move |tx| RemoteSpider {
+                tx,
+                started,
+                indexed,
+            }
         })
         .with_downloader(Download {
             fetched: fetched.clone(),
@@ -100,16 +103,6 @@ graph:
 
 struct LocalSpider {
     tx: Tx,
-}
-
-struct LocalSpiderFactory;
-
-impl SpiderFactory for LocalSpiderFactory {
-    type Spider = LocalSpider;
-
-    fn build(self, tx: Tx) -> Self::Spider {
-        LocalSpider { tx }
-    }
 }
 
 impl Spider for LocalSpider {
@@ -209,23 +202,6 @@ struct RemoteSpider {
     tx: Tx,
     started: Arc<AtomicUsize>,
     indexed: Arc<AtomicUsize>,
-}
-
-struct RemoteSpiderFactory {
-    started: Arc<AtomicUsize>,
-    indexed: Arc<AtomicUsize>,
-}
-
-impl SpiderFactory for RemoteSpiderFactory {
-    type Spider = RemoteSpider;
-
-    fn build(self, tx: Tx) -> Self::Spider {
-        RemoteSpider {
-            tx,
-            started: self.started,
-            indexed: self.indexed,
-        }
-    }
 }
 
 impl Spider for RemoteSpider {
