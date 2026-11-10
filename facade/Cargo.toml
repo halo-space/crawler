@@ -1,6 +1,6 @@
 [package]
 name = "halo-harbor-facade"
-version = "0.2.3"
+version = "0.2.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,4 +14,4 @@ name = "halo"
 [dependencies]
 harbor = { package = "halo-harbor", path = "..", version = "0.1.2" }
 contrib = { package = "halo-harbor-contrib", path = "../contrib", version = "0.2.3" }
-worker = { package = "halo-harbor-worker", path = "../worker", version = "0.2.3" }
+worker = { package = "halo-harbor-worker", path = "../worker", version = "0.2.4" }
