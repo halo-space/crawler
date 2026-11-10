@@ -1,5 +1,5 @@
 [package]
-name = "halo"
+name = "halo-harbor-facade"
 version = "0.2.3"
 edition.workspace = true
 rust-version.workspace = true

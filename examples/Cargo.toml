@@ -10,5 +10,5 @@ publish = false
 macros = { package = "halo-harbor-macros", path = "../macros" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-halo = { package = "halo", path = "../facade", version = "0.2.3" }
+halo = { package = "halo-harbor-facade", path = "../facade", version = "0.2.3" }
 tokio = { workspace = true }
