@@ -272,7 +272,7 @@ impl Spider for RulesWorker {
     type Item = Map;
 
     fn name(&self) -> &str {
-        "harbor-worker"
+        "halo-harbor-worker"
     }
 
     fn tx(&self) -> &Tx {

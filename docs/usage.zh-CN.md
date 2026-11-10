@@ -23,10 +23,10 @@ cargo run -p examples --bin rules
 ```toml
 [dependencies]
 # Harbor 提供 Engine、Request、Response、Item 和 Rules。
-harbor = { path = "../harbor" }
+halo = { package = "halo-harbor", path = ".." }
 
 # macros 提供 #[macros::harbor] 和 #[derive(macros::Item)]。
-macros = { path = "../harbor/macros" }
+macros = { package = "halo-harbor-macros", path = "../macros" }
 
 # Tokio 用于运行异步 Spider。
 tokio = { version = "1", features = ["macros", "rt", "fs", "signal"] }

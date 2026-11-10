@@ -532,17 +532,17 @@ not change Scheduler, Downloader, Spider, Item Store, or business `trace_id` sem
 
 ### Enable the Dependencies
 
-The executable must enable `spider/runtime-tracing` and depend directly on `fastrace` so that it can
+The executable must enable `halo/runtime-tracing` and depend directly on `fastrace` so that it can
 install a Reporter:
 
 ```toml
 [dependencies]
 fastrace = { version = "0.7.18", default-features = false, features = ["enable"] }
-spider = { path = "..", features = ["runtime-tracing"] }
+halo = { package = "halo-harbor", path = "..", features = ["runtime-tracing"] }
 ```
 
 When using the API Scheduler, enable `halo_harbor_contrib/runtime-tracing` instead. It also enables
-`spider/runtime-tracing` and allows the API Scheduler to propagate tracing context to a trusted
+`halo/runtime-tracing` and allows the API Scheduler to propagate tracing context to a trusted
 Master:
 
 ```toml
