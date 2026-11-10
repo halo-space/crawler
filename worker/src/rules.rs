@@ -2,11 +2,11 @@ use harbor::item::Map;
 use harbor::{Error as HarborError, Spider, SpiderFactory, Tx};
 
 #[derive(Clone)]
-pub struct RulesWorker {
+pub struct RulesSpider {
     tx: Tx,
 }
 
-impl Spider for RulesWorker {
+impl Spider for RulesSpider {
     type Item = Map;
 
     fn name(&self) -> &str {
@@ -22,12 +22,12 @@ impl Spider for RulesWorker {
     }
 }
 
-pub struct RulesWorkerFactory;
+pub struct RulesSpiderFactory;
 
-impl SpiderFactory for RulesWorkerFactory {
-    type Spider = RulesWorker;
+impl SpiderFactory for RulesSpiderFactory {
+    type Spider = RulesSpider;
 
     fn build(self, tx: Tx) -> Self::Spider {
-        RulesWorker { tx }
+        RulesSpider { tx }
     }
 }

@@ -1,15 +1,14 @@
 [package]
 name = "halo-harbor-worker"
-version = "0.2.4"
+version = "0.2.5"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Executable worker for Harbor crawler applications."
+description = "Generic worker runtime for Harbor crawler applications."
 repository = "https://github.com/halo-space/harbor"
 
-[[bin]]
-name = "halo-harbor-worker"
-path = "src/main.rs"
+[lib]
+name = "worker"
 
 [dependencies]
 harbor = { package = "halo-harbor", path = "..", version = "0.1.2" }

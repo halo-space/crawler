@@ -8,22 +8,22 @@ use harbor::{Spider, SpiderFactory, engine};
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::rules::RulesWorkerFactory;
+use crate::rules::RulesSpiderFactory;
 
-pub struct Builder<S = harbor::scheduler::Memory, D = Downloader, F = RulesWorkerFactory, O = Jsonl>
+pub struct Builder<S = harbor::scheduler::Memory, D = Downloader, F = RulesSpiderFactory, O = Jsonl>
 {
     config: Config,
     engine: engine::Builder<S, D, F, O>,
 }
 
-impl Builder<harbor::scheduler::Memory, Downloader, RulesWorkerFactory, Jsonl> {
+impl Builder<harbor::scheduler::Memory, Downloader, RulesSpiderFactory, Jsonl> {
     pub fn new(config: Config) -> Self {
         Self {
             config: config.clone(),
             engine: engine::Builder::new()
                 .with_downloader(default_downloader(&config))
                 .with_store(Jsonl::with_dir(&config.store_dir))
-                .with_spider(RulesWorkerFactory),
+                .with_spider(RulesSpiderFactory),
         }
     }
 }

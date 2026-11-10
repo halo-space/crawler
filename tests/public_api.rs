@@ -9,7 +9,7 @@ struct Article {
 }
 
 #[test]
-fn public_facade_supports_the_item_macro_contract() {
+fn public_api_supports_the_item_macro_contract() {
     let mut item = Article::from_values(Values::from([(
         "title".to_string(),
         serde_json::Value::from("Rust"),

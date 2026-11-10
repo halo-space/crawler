@@ -861,9 +861,9 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
- "halo-harbor-facade",
+ "halo-harbor",
  "halo-harbor-macros",
  "serde",
  "serde_json",
@@ -1203,15 +1203,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "halo-harbor-facade"
-version = "0.2.4"
-dependencies = [
- "halo-harbor",
- "halo-harbor-contrib",
- "halo-harbor-worker",
-]
-
-[[package]]
 name = "halo-harbor-macros"
 version = "0.1.2"
 dependencies = [
@@ -1224,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "halo-harbor-worker"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "halo-harbor",
  "rustls",
