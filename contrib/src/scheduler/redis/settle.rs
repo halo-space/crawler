@@ -1,4 +1,4 @@
-use halo::harbor::{net, payload, scheduler, stats};
+use harbor::{net, payload, scheduler, stats};
 use serde::Serialize;
 
 use super::Redis;
@@ -6,12 +6,12 @@ use super::error::redis as redis_error;
 use super::key;
 use super::validate;
 
-fn state(value: halo::harbor::net::State) -> &'static str {
+fn state(value: harbor::net::State) -> &'static str {
     match value {
-        halo::harbor::net::State::Pending => "pending",
-        halo::harbor::net::State::Processing => "processing",
-        halo::harbor::net::State::Done => "done",
-        halo::harbor::net::State::Failed => "failed",
+        harbor::net::State::Pending => "pending",
+        harbor::net::State::Processing => "processing",
+        harbor::net::State::Done => "done",
+        harbor::net::State::Failed => "failed",
     }
 }
 

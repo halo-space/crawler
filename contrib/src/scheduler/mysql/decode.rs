@@ -1,4 +1,4 @@
-use halo::harbor::scheduler;
+use harbor::scheduler;
 use sqlx::Row as _;
 use sqlx::mysql::MySqlRow;
 

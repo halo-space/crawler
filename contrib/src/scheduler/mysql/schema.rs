@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use halo::harbor::scheduler;
+use harbor::scheduler;
 use sqlx::{MySqlPool, Row as _};
 
 use super::decode;

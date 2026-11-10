@@ -1,4 +1,4 @@
-use halo::harbor::{net, payload, scheduler, trace};
+use harbor::{net, payload, scheduler, trace};
 
 use super::super::{Api, wire};
 

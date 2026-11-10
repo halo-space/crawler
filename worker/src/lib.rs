@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use halo::contrib::scheduler::{api::Api, mysql::MySql, redis::Redis};
 use halo::harbor::downloader::{self, Downloader};
 use halo::harbor::item::{Jsonl, Map};
 use halo::harbor::net::{self, Mode};
 use halo::harbor::scheduler::{Init, Scheduler};
 use halo::harbor::{Error as HarborError, Memory, Spider, SpiderFactory, Tx, engine};
-use halo_harbor_contrib::scheduler::{api::Api, mysql::MySql, redis::Redis};
 
 /// Selects the Scheduler used by the Worker process.
 #[derive(Clone, Debug, Eq, PartialEq)]

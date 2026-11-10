@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use halo::contrib::scheduler::mysql::MySql;
 use halo::harbor::scheduler::Init as _;
 use halo::harbor::{Scheduler as _, net, payload, trace};
-use halo_harbor_contrib::scheduler::mysql::MySql;
 
 pub(super) const TASK_ID: &str = "mysql-test-task";
 pub(super) const TRACE_ID: &str = "mysql-test-trace";

@@ -1,4 +1,4 @@
-use halo::harbor::scheduler;
+use harbor::scheduler;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;

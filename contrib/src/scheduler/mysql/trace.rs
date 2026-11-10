@@ -1,4 +1,4 @@
-use halo::harbor::{net, scheduler, trace};
+use harbor::{net, scheduler, trace};
 use sqlx::Row as _;
 
 use super::MySql;
@@ -73,7 +73,7 @@ impl MySql {
                 "all initial requests must reference the Trace Snapshot task_id".to_string(),
             ));
         }
-        let payload = halo::harbor::payload::Payload::new().requests(requests);
+        let payload = harbor::payload::Payload::new().requests(requests);
         payload.validate_push().map_err(scheduler::Error::Message)?;
         let requests = Self::prepare_requests(payload.requests)?;
         let encoded = serde_json::to_value(&snapshot)

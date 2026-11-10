@@ -1,4 +1,4 @@
-use halo::harbor::{scheduler, trace};
+use harbor::{scheduler, trace};
 use redis::AsyncCommands as _;
 
 use super::Redis;

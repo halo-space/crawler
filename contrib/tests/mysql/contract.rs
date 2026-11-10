@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use halo::contrib::scheduler::mysql::MySql;
 use halo::harbor::scheduler::Lease;
-use halo_harbor_contrib::scheduler::mysql::MySql;
 
 use super::{conformance, server};
 

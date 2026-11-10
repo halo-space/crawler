@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use halo::contrib::scheduler::redis::Redis;
 use halo::harbor::scheduler::Init;
 use halo::harbor::{Scheduler, payload, stats, trace};
-use halo_harbor_contrib::scheduler::redis::Redis;
 use tracing::instrument::WithSubscriber;
 
 use super::{key, request, server, settlement, worker};

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use halo::contrib::middleware::rate_limit::Redis;
 use halo::harbor::middleware::{Middleware as _, Next, Spec};
 use halo::harbor::net::Request;
-use halo_harbor_contrib::middleware::rate_limit::Redis;
 
 #[allow(dead_code)]
 #[path = "redis/server.rs"]

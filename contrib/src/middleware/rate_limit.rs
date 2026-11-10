@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use base64::Engine as _;
-use halo::harbor::middleware::{BoxFuture, Middleware, Next, Spec};
-use halo::harbor::net::Request;
+use harbor::middleware::{BoxFuture, Middleware, Next, Spec};
+use harbor::net::Request;
 
 use super::connection::Connection;
 
@@ -17,7 +17,7 @@ pub struct Redis {
 
 impl Redis {
     /// Creates a shared RateLimit. The connection is established on its first operation.
-    pub fn new(url: impl Into<String>) -> Result<Self, halo::harbor::middleware::Error> {
+    pub fn new(url: impl Into<String>) -> Result<Self, harbor::middleware::Error> {
         let connection = Connection::new(url).map_err(redis_error)?;
         let script = redis::Script::new(include_str!("rate_limit/reserve.lua"));
         Ok(Self { connection, script })
@@ -27,7 +27,7 @@ impl Redis {
         &self,
         group: &str,
         interval: Duration,
-    ) -> Result<Duration, halo::harbor::middleware::Error> {
+    ) -> Result<Duration, harbor::middleware::Error> {
         let interval = interval_micros(interval)?;
         let mut connection = self.connection.manager().await.map_err(redis_error)?;
         let (status, delay) = self
@@ -65,7 +65,7 @@ impl Middleware for Redis {
         spec: &'a Spec,
     ) -> BoxFuture<'a, Next<Request>> {
         Box::pin(async move {
-            let config = halo::harbor::middleware::rate_limit::Config::from_spec(spec)?;
+            let config = harbor::middleware::rate_limit::Config::from_spec(spec)?;
             let delay = self
                 .reserve(&config.group(&request)?, config.interval())
                 .await?;
@@ -77,7 +77,7 @@ impl Middleware for Redis {
     }
 }
 
-fn interval_micros(interval: Duration) -> Result<u64, halo::harbor::middleware::Error> {
+fn interval_micros(interval: Duration) -> Result<u64, harbor::middleware::Error> {
     let nanos = interval.as_nanos();
     if nanos < 1_000 {
         return Err(invalid("qps exceeds the Redis timer precision"));
@@ -94,19 +94,19 @@ fn key(group: &str) -> String {
     format!("rate_limit:{group}")
 }
 
-fn redis_error(error: redis::RedisError) -> halo::harbor::middleware::Error {
+fn redis_error(error: redis::RedisError) -> harbor::middleware::Error {
     message(format!("Redis RateLimit operation failed: {error}"))
 }
 
-fn invalid(message: impl Into<String>) -> halo::harbor::middleware::Error {
-    halo::harbor::middleware::Error::InvalidConfig {
+fn invalid(message: impl Into<String>) -> harbor::middleware::Error {
+    harbor::middleware::Error::InvalidConfig {
         name: "rate_limit".to_string(),
         message: message.into(),
     }
 }
 
-fn message(message: impl Into<String>) -> halo::harbor::middleware::Error {
-    halo::harbor::middleware::Error::Message(message.into())
+fn message(message: impl Into<String>) -> harbor::middleware::Error {
+    harbor::middleware::Error::Message(message.into())
 }
 
 #[cfg(test)]
@@ -117,7 +117,7 @@ mod tests {
     fn rejects_sub_microsecond_intervals_and_rounds_larger_values_up() {
         assert!(matches!(
             interval_micros(Duration::from_nanos(999)),
-            Err(halo::harbor::middleware::Error::InvalidConfig { name, message })
+            Err(harbor::middleware::Error::InvalidConfig { name, message })
                 if name == "rate_limit" && message.contains("timer precision")
         ));
         assert_eq!(interval_micros(Duration::from_nanos(1_000)).unwrap(), 1);
