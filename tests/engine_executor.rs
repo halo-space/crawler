@@ -706,6 +706,118 @@ impl downloader::Download for RulesDownload {
     }
 }
 
+struct KeywordDownload {
+    bodies: Arc<Mutex<Vec<Value>>>,
+}
+
+impl KeywordDownload {
+    fn new(bodies: Arc<Mutex<Vec<Value>>>) -> Self {
+        Self { bodies }
+    }
+}
+
+impl downloader::Download for KeywordDownload {
+    async fn open(&self) -> Result<(), downloader::Error> {
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), downloader::Error> {
+        Ok(())
+    }
+
+    async fn fetch(&self, request: net::Request) -> Result<net::Response, downloader::Error> {
+        let net::Body::Json(body) = &request.body else {
+            return Err(downloader::Error::UnsupportedMode(
+                "expected a JSON POST body".to_string(),
+            ));
+        };
+        self.bodies.lock().unwrap().push(body.clone());
+
+        let mut response = net::Response::new(
+            request,
+            net::StatusCode(200),
+            r#"{"data":{"items":[{"title":"returned from POST"}]}}"#,
+        );
+        response.reason = Some("OK".to_string());
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn rules_post_body_uses_vals_and_parses_returned_data() {
+    let config = halo::harbor::config::Config::from_yaml(
+        r#"
+spider:
+  name: keyword-post
+  start:
+    - node: search
+      url: https://example.com/search
+      method: POST
+      vals: {keyword: Rust}
+      body:
+        kind: json
+        data:
+          query: "{vals.keyword}"
+    - node: search
+      url: https://example.com/search
+      method: POST
+      vals: {keyword: OpenAI}
+      body:
+        kind: json
+        data:
+          query: "{vals.keyword}"
+
+graph:
+  nodes:
+    search:
+      fields:
+        title:
+          required: true
+          extractors:
+            - kind: json
+              expr: "$.data.items[0].title"
+  edges:
+    - from: search
+      kind: item
+      vals:
+        keyword: {from: "$vals.keyword"}
+        title: {from: "$fields.title"}
+
+item:
+  schema:
+    fields:
+      keyword:
+        type: string
+        rules: [required]
+      title:
+        type: string
+        rules: [required]
+"#,
+    )
+    .unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let stored = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = engine::Builder::new()
+        .with_rules(config)
+        .with_spider(RulesSpider::new())
+        .with_downloader(KeywordDownload::new(bodies.clone()))
+        .with_store(RecordingStore::new(stored.clone()))
+        .build();
+
+    engine.start_until_idle().await.unwrap();
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.as_slice(),
+        [
+            serde_json::json!({"query": "Rust"}),
+            serde_json::json!({"query": "OpenAI"}),
+        ]
+    );
+    assert_eq!(stored.lock().unwrap().len(), 2);
+    assert_eq!(engine.scheduler().done_len(), 2);
+}
+
 #[tokio::test]
 async fn rules_mode_expands_list_requests_and_submits_items() {
     let config = halo::harbor::config::Config::from_yaml(

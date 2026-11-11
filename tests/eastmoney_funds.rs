@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use halo::harbor::config::Config;
 use halo::harbor::downloader::{Download, Downloader, browser::Browser, http::Http};
 use halo::harbor::item::{Jsonl, Map};
-use halo::harbor::net::{Mode, Request};
+use halo::harbor::net::{Body, Method, Mode, Request};
 use halo::harbor::selector;
 use halo::harbor::{Error, Memory, Spider, Tx, engine};
+use serde_json::Value;
 
 struct EastMoneySpider {
     tx: Tx,
@@ -152,4 +153,21 @@ async fn eastmoney_fund_rules_run_full_graph() {
     );
 
     tokio::fs::remove_dir_all(output_dir).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires the public httpbin service"]
+async fn real_http_keyword_post_round_trip() {
+    let request = Request::follow("https://httpbin.org/post")
+        .unwrap()
+        .method(Method::Post)
+        .header("Content-Type", "application/json")
+        .unwrap()
+        .body(Body::Json(serde_json::json!({"query": "Rust"})));
+    let response = Http::new().fetch(request).await.unwrap();
+    assert_eq!(response.status.0, 200);
+
+    let document: Value = response.json().unwrap();
+    assert_eq!(document["json"]["query"], "Rust");
+    println!("real POST response: {}", document["json"]);
 }
