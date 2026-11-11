@@ -12,6 +12,15 @@ pub(super) fn check(
         ));
     }
     if config
+        .topic
+        .as_deref()
+        .is_some_and(|topic| topic.trim().is_empty())
+    {
+        return Err(config::Error::Message(
+            "spider.topic must not be empty when provided".to_string(),
+        ));
+    }
+    if config
         .version
         .as_deref()
         .is_some_and(|version| version.trim().is_empty())
@@ -58,6 +67,11 @@ pub(super) fn check(
         if spec.vals.contains_key("idx") {
             return Err(config::Error::Message(
                 "spider.start vals must not define reserved key: idx".to_string(),
+            ));
+        }
+        if spec.vals.contains_key("topic") {
+            return Err(config::Error::Message(
+                "spider.start vals must not define reserved key: topic".to_string(),
             ));
         }
         for value in spec.vals.values() {

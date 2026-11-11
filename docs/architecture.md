@@ -726,7 +726,7 @@ Windows-1252; those adjustments do not alter BOM or HTTP-header selections.
 `Response::json<T>()` decodes through `Response::text()` before deserialization. Deterministic local
 HTTP fixtures provide required regression coverage; live Internet access is not a CI prerequisite.
 
-Each Request execution owns one shared `stats::Delta`, accumulating `total / done / filter / dedup / validate / download` counters by node or `items`. A directly awaited Tx call uses the current task-local Request context and updates that delta. A Tx clone moved to a detached task retains only Trace identity; its output neither changes the settled Request nor delays settlement. The Worker attaches the delta snapshot to the final Payload, and the Scheduler merges it into Trace statistics only on the first `success / failure` settlement; idempotent replay does not double-count it.
+Each Request execution owns one shared `stats::Delta`, accumulating `total / done / filter / dedup / validate / download` counters by node or `items`. A directly awaited Tx call uses the current task-local Request context and updates that delta. A Tx clone moved to a detached task retains Trace identity and the complete business `vals`, but no Request execution identity or stats context; its output neither changes the settled Request nor delays settlement. The Worker attaches the delta snapshot to the final Payload, and the Scheduler merges it into Trace statistics only on the first `success / failure` settlement; idempotent replay does not double-count it.
 
 ## 8. Two Execution Modes
 

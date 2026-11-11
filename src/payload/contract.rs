@@ -13,6 +13,7 @@ pub struct Payload {
     pub version: i64,
     pub worker_id: String,
     pub node: String,
+    pub vals: HashMap<String, Value>,
 
     pub state: State,
     pub error: Option<String>,
@@ -39,6 +40,7 @@ impl Payload {
             version: 0,
             worker_id: String::new(),
             node: String::new(),
+            vals: HashMap::new(),
             state: State::Done,
             error: None,
             stats: HashMap::new(),
@@ -57,6 +59,7 @@ impl Payload {
             version: request.version,
             worker_id: worker_id.into(),
             node: request.node_key().to_string(),
+            vals: routing_vals(&request.vals),
             state: State::Done,
             error: None,
             stats: HashMap::new(),
@@ -230,6 +233,13 @@ impl Payload {
             || self.start_time.is_some()
             || self.end_time.is_some()
     }
+}
+
+pub(crate) fn routing_vals(vals: &HashMap<String, Value>) -> HashMap<String, Value> {
+    vals.get("topic")
+        .cloned()
+        .map(|topic| HashMap::from([(String::from("topic"), topic)]))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -470,6 +480,23 @@ mod tests {
 
         payload.trace_id = "trace-1".to_string();
         assert!(payload.validate_store().is_ok());
+    }
+
+    #[test]
+    fn request_payload_preserves_only_topic_for_store_routing() {
+        let mut request = request("https://example.com");
+        request
+            .vals
+            .insert("topic".to_string(), Value::from("x-posts"));
+        request.vals.insert("page".to_string(), Value::from(1));
+        request
+            .vals
+            .insert("secret".to_string(), Value::from("must-stay-in-request"));
+
+        let payload = Payload::for_request(&request, "worker-1");
+
+        assert_eq!(payload.vals["topic"], "x-posts");
+        assert_eq!(payload.vals.len(), 1);
     }
 
     #[test]

@@ -243,6 +243,9 @@ spider:
   # Rules 任务名称。
   name: article
 
+  # 可选存储主题。未配置时默认使用 name。
+  topic: article
+
   # 可选配置版本。
   version: "1"
 
@@ -265,6 +268,11 @@ spider:
       vals:
         source: homepage
 ```
+
+`spider.topic` 与 `spider.name` 同级，是当前 Spider 的统一存储主题。框架会把它写入初始
+Request 的 `vals.topic`，后续 Request 自动继承；Item Store 从 Item Payload 的
+`Payload.vals.topic` 读取它进行路由。Payload 只携带这个存储路由值，不会复制其他 Request `vals`。
+`start` 和 Request edge 不能覆盖这个值。
 
 `start` 中可以配置完整 Request：
 

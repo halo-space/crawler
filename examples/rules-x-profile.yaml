@@ -2,6 +2,7 @@
 # new Trace and runs these account start Requests together.
 spider:
   name: x_public_accounts
+  topic: x_posts
   allowed_domains:
     - x.com
   start:

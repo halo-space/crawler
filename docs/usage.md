@@ -363,6 +363,12 @@ When a bind-template variable resolves to an array, the template renders once pe
 returns a URL array; multiple array variables must have the same length, while scalar variables are
 broadcast to every rendered value. This is the batching form used when one list page fans out to
 several detail-page requests per row.
+
+`spider.topic` is configured alongside `spider.name` and defines the Spider's storage topic. Harbor
+writes it to the initial Request's `vals.topic`, carries it through descendant Requests, and exposes it
+as the routing value `Payload.vals["topic"]` to the Item Store. Other Request `vals` are not copied
+into the Payload. `start` and Request edges cannot override this reserved value. When omitted, the
+topic defaults to `spider.name`.
 For every Rules Request, the shared Executor first calls the Rust Spider's `index(response.clone())`
 business entry and then interprets the DSL node selected by `Request.node`; this is one Executor path,
 not a Code/Rules Executor swap.

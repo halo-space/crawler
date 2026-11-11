@@ -636,7 +636,7 @@ HTML meta 遵循 Web prescan 规则：UTF-16 label 选择 UTF-8，`x-user-define
 `Response::json<T>()` 在反序列化前也必须经过 `Response::text()`。必需回归使用确定性的本地 HTTP
 fixture，默认 CI 不依赖公网可用性。
 
-每条 Request 执行使用一个共享 `stats::Delta`，按 node 或 `items` 累积 `total / done / filter / dedup / validate / download` 计数。当前 Request task 内直接等待的 Tx 调用使用 task-local Context，并写入这份增量；移入独立 task 的 Tx clone 只保留 Trace 身份，其输出不改变已经结算的 Request，也不延迟该 Request 结算。Worker 在最终 Payload 中附带增量快照，Scheduler 只在 `success / failure` 首次结算时合并到 Trace 统计，幂等重放不会重复累计。
+每条 Request 执行使用一个共享 `stats::Delta`，按 node 或 `items` 累积 `total / done / filter / dedup / validate / download` 计数。当前 Request task 内直接等待的 Tx 调用使用 task-local Context，并写入这份增量；移入独立 task 的 Tx clone 保留 Trace 身份和完整业务 `vals`，但不保留 Request 执行身份或 stats 上下文，其输出不改变已经结算的 Request，也不延迟该 Request 结算。Worker 在最终 Payload 中附带增量快照，Scheduler 只在 `success / failure` 首次结算时合并到 Trace 统计，幂等重放不会重复累计。
 
 ## 8. 两种执行模式
 

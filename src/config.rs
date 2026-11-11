@@ -63,6 +63,12 @@ impl Config {
 
         let task_id = task_id.into();
         let trace_id = trace_id.into();
+        let topic = self
+            .spider
+            .topic
+            .as_deref()
+            .unwrap_or(self.spider.name.as_str())
+            .to_string();
         self.spider
             .start
             .iter()
@@ -73,6 +79,9 @@ impl Config {
                 request.task_id.clone_from(&task_id);
                 request.trace_id.clone_from(&trace_id);
                 request.vals.clone_from(&vals);
+                request
+                    .vals
+                    .insert("topic".to_string(), Value::String(topic.clone()));
                 for (name, value) in &spec.vals {
                     request
                         .vals
@@ -530,6 +539,7 @@ item:
     #[test]
     fn initial_request_templates_render_from_start_vals() {
         let rules = RULES
+            .replace("  name: books", "  name: books\n  topic: x-posts")
             .replace("Accept: text/html", "Accept: \"{content_type}\"")
             .replace("region: cn", "region: \"{region}\"")
             .replace("page: 1", "page: \"{page}\"");
@@ -541,6 +551,8 @@ item:
         ]);
 
         let requests = config.initial_requests("task-1", "trace-1", vals).unwrap();
+
+        assert_eq!(requests[0].vals["topic"], "x-posts");
 
         assert_eq!(
             requests[0].headers.get("Accept").unwrap(),

@@ -209,6 +209,7 @@ struct PayloadRecord {
     version: i64,
     worker_id: String,
     node: String,
+    vals: HashMap<String, Value>,
     state: payload::State,
     has_start_time: bool,
     has_end_time: bool,
@@ -223,6 +224,7 @@ impl PayloadRecord {
             version: payload.version,
             worker_id: payload.worker_id.clone(),
             node: payload.node.clone(),
+            vals: payload.vals.clone(),
             state: payload.state,
             has_start_time: payload.start_time.is_some(),
             has_end_time: payload.end_time.is_some(),
@@ -3412,12 +3414,17 @@ async fn stale_empty_claim_is_rechecked_after_detached_output() {
 }
 
 #[tokio::test]
-async fn detached_rules_output_keeps_only_the_trace_identity() {
+async fn detached_rules_output_keeps_trace_identity_and_topic() {
     let config = halo::harbor::config::Config::from_yaml(
         r#"
 spider:
   name: rules-late-event
-  start: [{node: index, url: https://example.com/source}]
+  topic: rules-late-topic
+  start:
+    - node: index
+      url: https://example.com/source
+      vals:
+        account: account-001
 graph:
   nodes:
     index: {}
@@ -3455,12 +3462,15 @@ graph:
         .unwrap();
     assert_eq!(emitted[0].task_id, "rules-late-event");
     assert!(!emitted[0].trace_id.is_empty());
+    assert_eq!(emitted[0].vals["account"], "account-001");
+    assert_eq!(emitted[0].vals["topic"], "rules-late-topic");
     let trace_id = emitted[0].trace_id.clone();
     drop(pushed_requests);
 
     let items = pushed_items.lock().unwrap();
     assert_eq!(items[0].task_id, "rules-late-event");
     assert_eq!(items[0].trace_id, trace_id);
+    assert_eq!(items[0].vals["topic"], "rules-late-topic");
     assert!(items[0].id.is_empty());
     assert!(items[0].worker_id.is_empty());
     assert!(items[0].node.is_empty());
@@ -3802,6 +3812,7 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
             version: 1,
             worker_id: "local".to_string(),
             node: "index".to_string(),
+            vals: HashMap::new(),
             state: payload::State::Done,
             has_start_time: false,
             has_end_time: false,

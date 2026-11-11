@@ -74,6 +74,12 @@ pub(super) fn check(config: &graph::Config, item_configured: bool) -> Result<(),
                         edge.from
                     )));
                 }
+                if request.vals.contains_key("topic") {
+                    return Err(config::Error::Message(format!(
+                        "request edge from {} must not define reserved val: topic",
+                        edge.from
+                    )));
+                }
                 if !edge.vals.is_empty() {
                     return Err(config::Error::Message(format!(
                         "request edge from {} must define vals inside request",

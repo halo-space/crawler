@@ -3,6 +3,8 @@
 pub struct Config {
     pub name: String,
     #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
     pub version: Option<String>,
     #[serde(default)]
     pub priority: Option<i32>,

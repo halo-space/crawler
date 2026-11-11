@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use crate::{Error, error::spider::Error as SpiderError, item, net};
@@ -28,9 +29,10 @@ pub struct Tx {
 }
 
 #[derive(Clone)]
-struct Trace {
-    task_id: String,
-    trace_id: String,
+pub(crate) struct Trace {
+    pub(crate) task_id: String,
+    pub(crate) trace_id: String,
+    pub(crate) vals: HashMap<String, serde_json::Value>,
 }
 
 pub(crate) fn channel(buffer: usize) -> (Tx, Events) {
@@ -57,7 +59,7 @@ impl Clone for Tx {
             capacity: self.capacity.clone(),
             trace: self.trace.clone(),
             detached: context::current()
-                .map(|context| Trace::new(context.task_id(), context.trace_id()))
+                .map(|context| Trace::from_context(&context))
                 .or_else(|| self.detached.clone()),
             _registration: Some(Registration::new(self.activity.clone())),
         }
@@ -107,6 +109,12 @@ impl Tx {
                 }
                 if request.trace_id.is_empty() {
                     request.trace_id = context.trace_id().to_string();
+                }
+                for (name, value) in &context.trace.vals {
+                    request
+                        .vals
+                        .entry(name.clone())
+                        .or_insert_with(|| value.clone());
                 }
             }
         }
@@ -165,11 +173,24 @@ impl Trace {
         Self {
             task_id: task_id.into(),
             trace_id: trace_id.into(),
+            vals: HashMap::new(),
+        }
+    }
+
+    fn from_context(context: &Context) -> Self {
+        Self {
+            task_id: context.trace.task_id.clone(),
+            trace_id: context.trace.trace_id.clone(),
+            vals: context.trace.vals.clone(),
         }
     }
 
     fn context(&self) -> Context {
-        Context::trace(self.task_id.clone(), self.trace_id.clone())
+        Context::trace_with_vals(
+            self.task_id.clone(),
+            self.trace_id.clone(),
+            self.vals.clone(),
+        )
     }
 }
 

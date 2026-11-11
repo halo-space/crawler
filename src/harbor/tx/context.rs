@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
 use crate::{net, payload, stats};
 
-use super::identity;
+use super::{Trace, identity};
 
 tokio::task_local! {
     static CURRENT: Context;
@@ -11,9 +12,8 @@ tokio::task_local! {
 
 #[derive(Clone)]
 pub(crate) struct Context {
+    pub(crate) trace: Trace,
     id: String,
-    task_id: String,
-    trace_id: String,
     version: i64,
     worker_id: String,
     node: String,
@@ -25,9 +25,12 @@ pub(crate) struct Context {
 impl Context {
     fn new(request: &net::Request, stats: Arc<stats::Delta>) -> Self {
         Self {
+            trace: Trace {
+                task_id: request.task_id.clone(),
+                trace_id: request.trace_id.clone(),
+                vals: request.vals.clone(),
+            },
             id: request.id.clone(),
-            task_id: request.task_id.clone(),
-            trace_id: request.trace_id.clone(),
             version: request.version,
             worker_id: request.leased_by.clone(),
             node: request.node_key().to_string(),
@@ -48,11 +51,23 @@ impl Context {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn trace(task_id: impl Into<String>, trace_id: impl Into<String>) -> Self {
+        Self::trace_with_vals(task_id, trace_id, HashMap::new())
+    }
+
+    pub(crate) fn trace_with_vals(
+        task_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        vals: HashMap<String, serde_json::Value>,
+    ) -> Self {
         Self {
+            trace: Trace {
+                task_id: task_id.into(),
+                trace_id: trace_id.into(),
+                vals,
+            },
             id: String::new(),
-            task_id: task_id.into(),
-            trace_id: trace_id.into(),
             version: 0,
             worker_id: String::new(),
             node: String::new(),
@@ -65,11 +80,12 @@ impl Context {
     pub(crate) fn payload(&self) -> payload::Payload {
         payload::Payload {
             id: self.id.clone(),
-            task_id: self.task_id.clone(),
-            trace_id: self.trace_id.clone(),
+            task_id: self.trace.task_id.clone(),
+            trace_id: self.trace.trace_id.clone(),
             version: self.version,
             worker_id: self.worker_id.clone(),
             node: self.node.clone(),
+            vals: payload::routing_vals(&self.trace.vals),
             ..payload::Payload::new()
         }
     }
@@ -83,11 +99,11 @@ impl Context {
     }
 
     pub(crate) fn task_id(&self) -> &str {
-        &self.task_id
+        &self.trace.task_id
     }
 
     pub(crate) fn trace_id(&self) -> &str {
-        &self.trace_id
+        &self.trace.trace_id
     }
 
     pub(crate) fn node(&self) -> &str {

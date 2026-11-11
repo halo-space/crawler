@@ -1,6 +1,6 @@
 [package]
 name = "halo-harbor-worker"
-version = "0.2.5"
+version = "0.2.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ repository = "https://github.com/halo-space/harbor"
 name = "worker"
 
 [dependencies]
-harbor = { package = "halo-harbor", path = "..", version = "0.1.3" }
+harbor = { package = "halo-harbor", path = "..", version = "0.1.4" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 rustls = { workspace = true }
