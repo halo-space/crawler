@@ -1,0 +1,146 @@
+# Harbor only executes this graph. The daily schedule belongs to Master/Cron, which creates a
+# new Trace and runs these account start Requests together.
+spider:
+  name: x_public_accounts
+  allowed_domains:
+    - x.com
+  start:
+    - node: profile
+      url: "https://x.com/caiziboshi"
+      download_mode: browser
+      wait_selector: "article"
+      timeout: 60000
+      scroll:
+        max_rounds: 3
+        wait_ms: 500
+        stable_rounds: 2
+      vals:
+        account: "caiziboshi"
+
+    - node: profile
+      url: "https://x.com/openai"
+      download_mode: browser
+      wait_selector: "article"
+      timeout: 60000
+      scroll:
+        max_rounds: 3
+        wait_ms: 500
+        stable_rounds: 2
+      vals:
+        account: "openai"
+
+    - node: profile
+      url: "https://x.com/rustlang"
+      download_mode: browser
+      wait_selector: "article"
+      timeout: 60000
+      scroll:
+        max_rounds: 3
+        wait_ms: 500
+        stable_rounds: 2
+      vals:
+        account: "rustlang"
+
+graph:
+  nodes:
+    profile:
+      fields:
+        post_hrefs:
+          default: []
+          extractors:
+            - kind: css
+              expr: "article a[href*='/status/']:not([href*='/photo/'])::attr(href)"
+      binds:
+        post_urls:
+          kind: pipeline
+          from: "$fields.post_hrefs"
+          transforms:
+            - kind: url_join
+              base_url: "$response.url"
+
+    post:
+      fields:
+        text:
+          default: ""
+          extractors:
+            - kind: css
+              expr: "article:first-of-type [data-testid='tweetText']::text"
+        created_time:
+          default: ""
+          extractors:
+            - kind: css
+              expr: "article:first-of-type time::attr(datetime)"
+        images:
+          kind: image
+          default: []
+          download: false
+          extractors:
+            - kind: css
+              expr: "article:first-of-type div[data-testid='tweetPhoto'] img::attr(src)"
+        videos:
+          kind: video
+          default: []
+          download: false
+          extractors:
+            - kind: css
+              expr: "article:first-of-type video::attr(src)"
+
+  edges:
+    - from: profile
+      kind: request
+      request:
+        node: post
+        url:
+          from: "$binds.post_urls"
+        download_mode: browser
+        wait_selector: "article"
+        timeout: 60000
+        vals:
+          account:
+            from: "$vals.account"
+
+    - from: post
+      kind: item
+      vals:
+        account:
+          from: "$vals.account"
+        post_url:
+          from: "$response.url"
+        text:
+          from: "$fields.text"
+        created_time:
+          from: "$fields.created_time"
+        images:
+          from: "$fields.images"
+        videos:
+          from: "$fields.videos"
+
+item:
+  schema:
+    fields:
+      account: {type: string}
+      post_url: {type: string}
+      text: {type: string}
+      created_time: {type: string}
+      images:
+        type: array
+        fields:
+          name: {type: string}
+          url: {type: string}
+          src: {type: string}
+          width: {type: int}
+          height: {type: int}
+          size: {type: int}
+          ext: {type: string}
+          alt: {type: string}
+      videos:
+        type: array
+        fields:
+          name: {type: string}
+          url: {type: string}
+          src: {type: string}
+          width: {type: int}
+          height: {type: int}
+          size: {type: int}
+          ext: {type: string}
+          alt: {type: string}
