@@ -9,6 +9,7 @@ pub(super) struct Context<'a> {
     pub(super) response: &'a net::Response,
     pub(super) fields: &'a IndexMap<String, Value>,
     pub(super) binds: &'a IndexMap<String, Value>,
+    pub(super) item: Option<&'a Value>,
 }
 
 pub(super) fn resolve(value_ref: &ValueRef, context: &Context<'_>) -> Result<Value, crate::Error> {
@@ -59,6 +60,10 @@ pub(super) fn resolve_optional_path(
             "node" => Some(Value::String(context.request.node_key().to_string())),
             _ => None,
         },
+        "item" => context
+            .item
+            .and_then(Value::as_object)
+            .and_then(|item| item.get(name).cloned()),
         _ => None,
     };
     Ok(value)

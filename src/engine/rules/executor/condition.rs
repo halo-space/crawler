@@ -89,6 +89,7 @@ mod tests {
             response,
             fields,
             binds,
+            item: None,
         }
     }
 

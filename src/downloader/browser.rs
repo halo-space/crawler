@@ -471,6 +471,13 @@ impl<C: CookieStore> Browser<C> {
                     .map_err(driver_error)?;
             }
 
+            if let Some(scroll) = request.scroll.as_ref() {
+                scroll
+                    .validate()
+                    .map_err(|error| downloader::Error::InvalidConfig(error.to_string()))?;
+                scroll_to_end(&fetch_driver, scroll).await?;
+            }
+
             let source = fetch_driver.source().await.map_err(driver_error)?;
             let body = source.into_bytes();
             let limit = request.max_body_bytes.unwrap_or(64 * 1024 * 1024);
@@ -556,6 +563,45 @@ impl<C: CookieStore> Browser<C> {
             }
         }
     }
+}
+
+async fn scroll_to_end(driver: &WebDriver, config: &net::Scroll) -> Result<(), downloader::Error> {
+    let mut previous_height = document_height(driver).await?;
+    let mut stable_rounds = 0;
+
+    for _ in 0..config.max_rounds {
+        driver
+            .execute(
+                "window.scrollTo(0, document.documentElement.scrollHeight);",
+                Vec::new(),
+            )
+            .await
+            .map_err(driver_error)?;
+        tokio::time::sleep(Duration::from_millis(config.wait_ms)).await;
+
+        let current_height = document_height(driver).await?;
+        if current_height <= previous_height {
+            stable_rounds += 1;
+            if stable_rounds >= config.stable_rounds {
+                break;
+            }
+        } else {
+            stable_rounds = 0;
+            previous_height = current_height;
+        }
+    }
+
+    Ok(())
+}
+
+async fn document_height(driver: &WebDriver) -> Result<u64, downloader::Error> {
+    let value = driver
+        .execute("return document.documentElement.scrollHeight;", Vec::new())
+        .await
+        .map_err(driver_error)?;
+    value.json().as_u64().ok_or_else(|| {
+        downloader::Error::InvalidConfig("Browser returned an invalid document height".to_string())
+    })
 }
 
 impl<C: CookieStore> downloader::Download for Browser<C> {

@@ -42,6 +42,7 @@ struct View<'a> {
     timeout: Option<u64>,
     max_body_bytes: Option<u64>,
     wait_selector: &'a str,
+    scroll: &'a Option<net::Scroll>,
     proxy: &'a Option<net::ProxyConfig>,
     tls: &'a Option<net::TlsConfig>,
     middlewares: Specs<'a>,
@@ -76,6 +77,7 @@ impl<'a> View<'a> {
             timeout,
             max_body_bytes,
             wait_selector,
+            scroll,
             proxy,
             tls,
             middlewares,
@@ -107,6 +109,7 @@ impl<'a> View<'a> {
             timeout: *timeout,
             max_body_bytes: *max_body_bytes,
             wait_selector,
+            scroll,
             proxy,
             tls,
             middlewares: Specs(middlewares),
@@ -313,6 +316,13 @@ mod tests {
         });
         assert_changed(&base, "max_body_bytes", |snapshot| {
             snapshot.max_body_bytes = Some(1_024);
+        });
+        assert_changed(&base, "scroll", |snapshot| {
+            snapshot.scroll = Some(net::Scroll {
+                max_rounds: 3,
+                wait_ms: 100,
+                stable_rounds: 1,
+            });
         });
         assert_changed(&base, "proxy", |snapshot| {
             snapshot.proxy = Some(net::ProxyConfig {

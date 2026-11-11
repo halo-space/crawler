@@ -57,6 +57,8 @@ pub struct Spec {
     pub from: String,
     pub kind: Kind,
     #[serde(default)]
+    pub each: Option<String>,
+    #[serde(default)]
     pub request: Option<crate::graph::request::Spec>,
     #[serde(default)]
     pub vals: IndexMap<String, crate::graph::rules::ValueRef>,

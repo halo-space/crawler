@@ -762,6 +762,26 @@ Cookies are reused in Worker memory by `login_key + origin`; inject
 `contrib::browser::RedisCookieStore` explicitly when Workers must share them. `ttl` and `refresh_after` are milliseconds.
 Login failures use the existing `error_download.retry`. Browser is headless by default; manual QR or challenge
 flows require a visible remote WebDriver or `Browser::with_headless(false)`.
+
+Browser Requests may also configure generic page scrolling:
+
+```yaml
+spider:
+  start:
+    - node: list
+      url: https://example.com/list
+      download_mode: browser
+      scroll:
+        max_rounds: 10
+        wait_ms: 500
+        stable_rounds: 2
+```
+
+`max_rounds` limits scroll attempts, `wait_ms` waits after each scroll, and `stable_rounds` stops when
+the document height has not grown for that many rounds. Without `scroll`, Browser performs one navigation.
+`scroll` is Browser-only; HTTP rejects it during configuration or download rather than silently ignoring it.
+HTML next-page links remain ordinary Rules pagination: extract the link with a CSS field and create the
+next Request through `when` and a Request edge. API pagination uses the same edge flow with JSON fields.
 Memory uses the internal identity `local`, defaults to HTTP mode, and can replace its capability set
 with `Memory::with_modes(...)`; it does not register or heartbeat. Redis, MySQL, and API require stable Worker
 ID, host, and version values on the Scheduler, while `with_modes(...)` freezes their download

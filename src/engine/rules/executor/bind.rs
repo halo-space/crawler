@@ -21,6 +21,7 @@ pub(super) fn evaluate(
             response,
             fields,
             binds: &bind,
+            item: None,
         };
         let value = match spec {
             Bind::Pipeline { from, transforms } => {
@@ -204,6 +205,7 @@ mod tests {
             response: &response,
             fields: &fields,
             binds: &binds,
+            item: None,
         };
 
         let literal = Transform {

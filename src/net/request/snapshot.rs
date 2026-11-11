@@ -29,6 +29,7 @@ pub struct Snapshot {
     pub timeout: Option<u64>,
     pub max_body_bytes: Option<u64>,
     pub wait_selector: String,
+    pub scroll: Option<net::Scroll>,
     pub proxy: Option<net::ProxyConfig>,
     pub tls: Option<net::TlsConfig>,
     pub middlewares: Vec<middleware::Spec>,
@@ -64,6 +65,7 @@ impl fmt::Debug for Snapshot {
             .field("timeout", &self.timeout)
             .field("max_body_bytes", &self.max_body_bytes)
             .field("wait_selector", &self.wait_selector)
+            .field("scroll", &self.scroll)
             .field("proxy", &self.proxy)
             .field("tls", &self.tls)
             .field("middlewares_len", &self.middlewares.len())
@@ -103,6 +105,7 @@ impl TryFrom<net::Request> for Snapshot {
             timeout: request.timeout,
             max_body_bytes: request.max_body_bytes,
             wait_selector: request.wait_selector,
+            scroll: request.scroll,
             proxy: request.proxy,
             tls: request.tls,
             middlewares: request.middlewares,
@@ -174,6 +177,14 @@ impl Snapshot {
         if !self.wait_selector.is_empty() {
             scrape_core::CompiledSelector::compile(&self.wait_selector)
                 .map_err(|error| format!("Request Snapshot wait_selector is invalid: {error}"))?;
+        }
+        if let Some(scroll) = &self.scroll {
+            scroll
+                .validate()
+                .map_err(|error| format!("Request Snapshot {error}"))?;
+            if self.mode != net::Mode::Browser {
+                return Err("Request Snapshot scroll requires browser mode".to_string());
+            }
         }
         if self.state != net::State::Pending {
             return Err("queued Request Snapshot state must be pending".to_string());
@@ -261,6 +272,7 @@ impl Snapshot {
         request.timeout = self.timeout;
         request.max_body_bytes = self.max_body_bytes;
         request.wait_selector = self.wait_selector;
+        request.scroll = self.scroll;
         request.proxy = self.proxy;
         request.tls = self.tls;
         request.middlewares = self.middlewares;
@@ -317,6 +329,12 @@ graph:
         request.priority = 7;
         request.timeout = Some(3_000);
         request.max_body_bytes = Some(1_048_576);
+        request.mode = net::Mode::Browser;
+        request.scroll = Some(net::Scroll {
+            max_rounds: 3,
+            wait_ms: 100,
+            stable_rounds: 1,
+        });
         request.headers.try_append("X-Test", "one").unwrap();
         request.headers.try_append("x-test", "two").unwrap();
         request
@@ -332,7 +350,7 @@ graph:
         let encoded = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(encoded["protocol"], "http");
         assert_eq!(encoded["method"], "GET");
-        assert_eq!(encoded["mode"], "http");
+        assert_eq!(encoded["mode"], "browser");
         assert_eq!(encoded["state"], "pending");
         assert_eq!(
             encoded["headers"]["x-test"],
@@ -352,6 +370,14 @@ graph:
         assert_eq!(restored.priority, 7);
         assert_eq!(restored.timeout, Some(3_000));
         assert_eq!(restored.max_body_bytes, Some(1_048_576));
+        assert_eq!(
+            restored.scroll,
+            Some(net::Scroll {
+                max_rounds: 3,
+                wait_ms: 100,
+                stable_rounds: 1,
+            })
+        );
         assert_eq!(
             restored
                 .headers

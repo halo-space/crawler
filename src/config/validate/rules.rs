@@ -12,14 +12,28 @@ pub(super) fn check(config: &graph::Config) -> Result<(), Error> {
             .nodes
             .get(&edge.from)
             .ok_or_else(|| Error::Message(format!("edge source does not exist: {}", edge.from)))?;
+        if let Some(each) = &edge.each {
+            if edge.kind != graph::edge::Kind::Item {
+                return Err(Error::Message(format!(
+                    "request edge from {} must not define each",
+                    edge.from
+                )));
+            }
+            check_reference(
+                &edge.from,
+                each,
+                &source.fields,
+                &source.binds.keys().map(String::as_str).collect(),
+            )?;
+        }
         if let Some(request) = &edge.request {
-            check_value(&edge.from, &request.url, source)?;
+            check_value(&edge.from, &request.url, source, false)?;
             for value_ref in request.vals.values() {
-                check_value(&edge.from, value_ref, source)?;
+                check_value(&edge.from, value_ref, source, false)?;
             }
         }
         for value_ref in edge.vals.values() {
-            check_value(&edge.from, value_ref, source)?;
+            check_value(&edge.from, value_ref, source, edge.each.is_some())?;
         }
         if let Some(when) = &edge.when {
             check_condition(
@@ -56,7 +70,7 @@ fn check_condition(
                     let value = predicate.value.as_ref().ok_or_else(|| {
                         Error::Message(format!("edge from {node} condition requires value"))
                     })?;
-                    check_value(node, value, source)?;
+                    check_value(node, value, source, false)?;
                 }
             }
         }
@@ -285,8 +299,18 @@ fn check_value(
     node: &str,
     value: &graph::rules::ValueRef,
     source: &graph::node::Config,
+    allow_item: bool,
 ) -> Result<(), Error> {
     match (&value.from, &value.value) {
+        (Some(from), None) if allow_item && from.starts_with("$item.") => {
+            if from.trim_start_matches("$item.").is_empty() {
+                Err(Error::Message(format!(
+                    "node {node} contains invalid item value reference: {from}"
+                )))
+            } else {
+                Ok(())
+            }
+        }
         (Some(from), None) => check_reference(
             node,
             from,

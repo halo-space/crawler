@@ -604,6 +604,34 @@ edges:
         from: "$fields.next_url"
 ```
 
+如果 HTML 页面通过 CSS 选择器提供下一页链接，HTTP 和 Browser 都使用同一套字段与 Request
+edge 规则。HTTP 不需要执行滚动，只需提取链接并生成下一条 Request：
+
+```yaml
+graph:
+  nodes:
+    list:
+      fields:
+        next_href:
+          required: false
+          extractors:
+            - kind: css
+              expr: "a.next::attr(href)"
+  edges:
+    - from: list
+      kind: request
+      when:
+        from: "$fields.next_href"
+        op: present
+      request:
+        node: list
+        url:
+          from: "$fields.next_href"
+```
+
+`scroll` 不是通用分页配置。它只属于 Browser Downloader，用于触发页面滚动并等待动态 DOM
+继续增长；接口分页、下一页链接和页码分页仍然通过字段、绑定、条件和 Request edge 完成。
+
 ## 9. Item Schema
 
 `item.schema` 描述最终 Item 的字段类型和校验规则：
@@ -787,7 +815,24 @@ spider:
       wait_selector: "main.content"
 ```
 
-Browser 第一版支持 GET 页面导航、渲染后的 DOM、Cookie Session 复用和 CSS 等待。不支持在 Rules 中配置点击、滚动、表单操作或多 Tab 流程。
+Browser 第一版支持 GET 页面导航、渲染后的 DOM、Cookie Session 复用、CSS 等待和页面滚动：
+
+```yaml
+spider:
+  start:
+    - node: list
+      url: "https://example.com/list"
+      download_mode: browser
+      scroll:
+        max_rounds: 10
+        wait_ms: 500
+        stable_rounds: 2
+```
+
+`max_rounds` 是最多滚动次数，`wait_ms` 是每次滚动后的等待时间，`stable_rounds` 是页面高度
+连续不增长后停止所需的次数。未配置 `scroll` 时只导航一次。`scroll` 只能与
+`download_mode: browser` 一起使用；HTTP 配置了 `scroll` 会直接校验失败。Browser 第一版仍不支持
+在 Rules 中配置点击、表单操作或多 Tab 流程。
 
 ## 13. Item 输出目录
 

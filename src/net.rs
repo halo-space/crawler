@@ -15,6 +15,6 @@ pub use handler::{BoxFuture, Handler, HandlerFn};
 pub use headers::Headers;
 pub use method::Method;
 pub use protocol::Protocol;
-pub use request::{Mode, ProxyConfig, Request, Snapshot, State, TlsConfig};
+pub use request::{Mode, ProxyConfig, Request, Scroll, Snapshot, State, TlsConfig};
 pub use response::{HttpVersion, Response};
 pub use status::StatusCode;

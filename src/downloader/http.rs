@@ -151,6 +151,11 @@ impl downloader::Download for Http {
     }
 
     async fn fetch(&self, request: net::Request) -> Result<net::Response, downloader::Error> {
+        if request.scroll.is_some() {
+            return Err(downloader::Error::InvalidConfig(
+                "HTTP Downloader does not support scroll; use browser mode".to_string(),
+            ));
+        }
         let body_limit = self.body_limit(&request)?;
         let Some(timeout) = request.timeout else {
             return self.download(request, body_limit).await;
@@ -288,6 +293,20 @@ mod tests {
         }
 
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejects_browser_scroll_configuration() {
+        let request = net::Request::follow("https://example.com")
+            .unwrap()
+            .scroll(net::Scroll::default());
+        let error = Http::new().fetch(request).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            downloader::Error::InvalidConfig(message)
+                if message.contains("does not support scroll")
+        ));
     }
 
     fn header<'a>(request: &'a str, name: &str) -> Option<&'a str> {

@@ -38,6 +38,54 @@ pub struct TlsConfig {
     pub accept_invalid_certs: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scroll {
+    #[serde(default = "default_scroll_max_rounds")]
+    pub max_rounds: u32,
+    #[serde(default = "default_scroll_wait_ms")]
+    pub wait_ms: u64,
+    #[serde(default = "default_scroll_stable_rounds")]
+    pub stable_rounds: u32,
+}
+
+impl Default for Scroll {
+    fn default() -> Self {
+        Self {
+            max_rounds: default_scroll_max_rounds(),
+            wait_ms: default_scroll_wait_ms(),
+            stable_rounds: default_scroll_stable_rounds(),
+        }
+    }
+}
+
+impl Scroll {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.max_rounds == 0 {
+            return Err("scroll.max_rounds must be positive".to_string());
+        }
+        if self.wait_ms == 0 {
+            return Err("scroll.wait_ms must be positive".to_string());
+        }
+        if self.stable_rounds == 0 {
+            return Err("scroll.stable_rounds must be positive".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn default_scroll_max_rounds() -> u32 {
+    10
+}
+
+fn default_scroll_wait_ms() -> u64 {
+    500
+}
+
+fn default_scroll_stable_rounds() -> u32 {
+    2
+}
+
 #[derive(Clone)]
 pub struct Request {
     pub id: String,
@@ -62,6 +110,7 @@ pub struct Request {
     pub timeout: Option<u64>,
     pub max_body_bytes: Option<u64>,
     pub wait_selector: String,
+    pub scroll: Option<Scroll>,
     pub proxy: Option<ProxyConfig>,
     pub tls: Option<TlsConfig>,
 
@@ -115,6 +164,7 @@ impl Request {
             timeout: None,
             max_body_bytes: None,
             wait_selector: String::new(),
+            scroll: None,
             proxy: None,
             tls: None,
             middlewares: Vec::new(),
@@ -231,6 +281,11 @@ impl Request {
         self
     }
 
+    pub fn scroll(mut self, scroll: Scroll) -> Self {
+        self.scroll = Some(scroll);
+        self
+    }
+
     pub fn vals(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.vals.insert(key.into(), value.into());
         self
@@ -318,6 +373,14 @@ impl Request {
                 super::snapshot::MAX_RETRY_COUNT
             ));
         }
+        if let Some(scroll) = &self.scroll {
+            scroll
+                .validate()
+                .map_err(|error| format!("new Request has invalid scroll: {error}"))?;
+            if self.mode != Mode::Browser {
+                return Err("new Request scroll requires browser mode".to_string());
+            }
+        }
         for spec in &self.middlewares {
             middleware::check(spec)
                 .map_err(|error| format!("new Request has invalid middleware: {error}"))?;
@@ -392,6 +455,7 @@ impl fmt::Debug for Request {
             .field("timeout", &self.timeout)
             .field("max_body_bytes", &self.max_body_bytes)
             .field("wait_selector", &self.wait_selector)
+            .field("scroll", &self.scroll)
             .field("proxy", &self.proxy)
             .field("tls", &self.tls)
             .field("middlewares_len", &self.middlewares.len())

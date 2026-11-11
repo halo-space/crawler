@@ -32,10 +32,11 @@ where
         response,
         fields: &fields,
         binds: &bind,
+        item: None,
     };
 
     let mut requests = Vec::new();
-    let mut output = None;
+    let mut output = Vec::new();
     for edge in config
         .graph
         .edges
@@ -54,16 +55,37 @@ where
                     crate::Error::message("item edge requires top-level item config")
                 })?;
                 let schema = schemas.register(&item.schema).map_err(crate::Error::Item)?;
-                if output.is_some() {
+                if !output.is_empty() {
                     return Err(crate::Error::message(format!(
                         "rules node {node_key} has more than one item edge"
                     )));
                 }
-                output = Some((
-                    build::item(&node.fields, item, edge, &context)?,
-                    schema,
-                    edge.function.as_deref().unwrap_or("item"),
-                ));
+                if let Some(each) = &edge.each {
+                    let values = value::resolve_path(each, &context)?;
+                    let values = values.as_array().ok_or_else(|| {
+                        crate::Error::message(format!("item.each must resolve to an array: {each}"))
+                    })?;
+                    for value in values {
+                        let item_context = value::Context {
+                            request: context.request,
+                            response: context.response,
+                            fields: context.fields,
+                            binds: context.binds,
+                            item: Some(value),
+                        };
+                        output.push((
+                            build::item(&node.fields, item, edge, &item_context)?,
+                            schema,
+                            edge.function.as_deref().unwrap_or("item"),
+                        ));
+                    }
+                } else {
+                    output.push((
+                        build::item(&node.fields, item, edge, &context)?,
+                        schema,
+                        edge.function.as_deref().unwrap_or("item"),
+                    ));
+                }
             }
         }
     }
@@ -71,7 +93,7 @@ where
     if !requests.is_empty() {
         spider.tx().request(requests).await?;
     }
-    if let Some((values, schema, function)) = output {
+    for (values, schema, function) in output {
         let mut item =
             <P::Item as crate::item::Item>::from_values(values).map_err(crate::Error::Item)?;
         crate::item::Item::state_mut(&mut item)
@@ -168,6 +190,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
 
         let requests = build::requests(&config, &config.graph.edges[0], &context).unwrap();
@@ -225,6 +248,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
 
         let mut requests = build::requests(&config, &config.graph.edges[0], &context).unwrap();
@@ -290,6 +314,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
 
         let requests = build::requests(&config, &config.graph.edges[0], &context).unwrap();
@@ -345,6 +370,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
 
         let error = build::requests(&config, &config.graph.edges[0], &context).unwrap_err();
@@ -389,6 +415,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
 
         let requests = build::requests(&config, &config.graph.edges[0], &context).unwrap();
@@ -442,6 +469,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
 
         let values = build::item(&IndexMap::new(), &config, &edge, &context).unwrap();
@@ -485,6 +513,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
 
         let values = build::item(&IndexMap::new(), &config, &edge, &context).unwrap();
@@ -576,6 +605,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
         let vars = serde_json::from_value::<IndexMap<String, ValueRef>>(serde_json::json!({
             "slug": {"from": "$fields.slug"},
@@ -600,6 +630,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
         let vars = serde_json::from_value::<IndexMap<String, ValueRef>>(serde_json::json!({
             "code": {"from": "$fields.code"}
@@ -629,6 +660,7 @@ graph:
             response: &response,
             fields: &fields,
             binds: &bind,
+            item: None,
         };
         let vars = serde_json::from_value::<IndexMap<String, ValueRef>>(serde_json::json!({
             "first": {"value": "{second}"},

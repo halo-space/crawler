@@ -7,7 +7,7 @@ use std::time::Duration;
 use halo::harbor::downloader::Download;
 use halo::harbor::downloader::Downloader;
 use halo::harbor::downloader::browser::Browser;
-use halo::harbor::net::{Mode, Request, Response};
+use halo::harbor::net::{Mode, Request, Response, Scroll};
 use halo::harbor::{Error, engine};
 use macros::harbor;
 
@@ -24,6 +24,37 @@ fn local_page() -> (String, thread::JoinHandle<()>) {
 <html><body><div id="app">loading</div>
 <script>setTimeout(() => document.querySelector('#app').textContent = 'rendered', 25)</script>
 </body></html>"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    (format!("http://{address}/"), handle)
+}
+
+fn scroll_page() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        let body = r#"<!doctype html>
+<html><body><div style="height: 2000px"></div>
+<script>
+window.addEventListener('scroll', () => {
+  if (!document.querySelector('#loaded')) {
+    const node = document.createElement('div');
+    node.id = 'loaded';
+    node.textContent = 'loaded-after-scroll';
+    document.body.appendChild(node);
+  }
+});
+</script></body></html>"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -279,6 +310,31 @@ async fn browser_returns_rendered_dom_when_enabled() {
         error,
         halo::harbor::downloader::Error::InvalidConfig(message) if message.contains("not open")
     ));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn browser_scrolls_until_the_page_stops_growing() {
+    if std::env::var_os("BROWSER_TESTS").is_none() {
+        return;
+    }
+
+    let (url, server) = scroll_page();
+    let browser = Browser::new();
+    browser.open().await.unwrap();
+
+    let request = Request::follow(url)
+        .unwrap()
+        .mode(Mode::Browser)
+        .scroll(Scroll {
+            max_rounds: 4,
+            wait_ms: 100,
+            stable_rounds: 2,
+        });
+    let response = browser.fetch(request).await.unwrap();
+
+    assert!(String::from_utf8_lossy(response.body()).contains("loaded-after-scroll"));
+    browser.close().await.unwrap();
     server.join().unwrap();
 }
 
