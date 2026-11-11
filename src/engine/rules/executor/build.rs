@@ -104,6 +104,7 @@ pub(super) fn requests(
                         }),
                 })
                 .map_err(crate::Error::Config)?;
+            request.scroll = spec.scroll.clone();
             Ok(request)
         })
         .collect()

@@ -90,6 +90,10 @@ pub(super) fn check(config: &graph::Config, item_configured: bool) -> Result<(),
                     &format!("request edge from {} to {}", edge.from, request.node),
                     |reference| valid_template(reference, &config.nodes[&edge.from]),
                 )?;
+                super::harbor::validate_scroll(
+                    &format!("request edge from {} to {}", edge.from, request.node),
+                    request,
+                )?;
             }
             graph::edge::Kind::Item => {
                 if edge.request.is_some() {

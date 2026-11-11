@@ -13,5 +13,7 @@ pub struct Spec {
     #[serde(flatten)]
     pub transport: crate::net::request::Config,
     #[serde(default)]
+    pub scroll: Option<crate::net::Scroll>,
+    #[serde(default)]
     pub vals: IndexMap<String, ValueRef>,
 }

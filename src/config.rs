@@ -90,6 +90,7 @@ impl Config {
                         .strip_prefix("vals.")
                         .and_then(|name| request_vals.get(name).cloned()),
                 })?;
+                request.scroll = spec.scroll.clone();
                 Ok(request)
             })
             .collect()

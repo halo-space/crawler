@@ -67,6 +67,30 @@ pub(super) fn check(
             &format!("spider.start node {}", spec.node),
             valid_start_template,
         )?;
+        validate_scroll(&format!("spider.start node {}", spec.node), spec)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_scroll(
+    location: &str,
+    spec: &graph::request::Spec,
+) -> Result<(), config::Error> {
+    let Some(scroll) = &spec.scroll else {
+        return Ok(());
+    };
+    scroll
+        .validate()
+        .map_err(|error| config::Error::Message(format!("{location} {error}")))?;
+    if !spec
+        .transport
+        .download_mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("browser"))
+    {
+        return Err(config::Error::Message(format!(
+            "{location} scroll requires download_mode browser"
+        )));
     }
     Ok(())
 }

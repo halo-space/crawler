@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::config::Error;
 use crate::middleware;
-use crate::net::{Method, Mode, Request, Scroll};
+use crate::net::{Method, Mode, Request};
 
 use super::{body, template, transport};
 
@@ -24,8 +24,6 @@ pub struct Config {
     pub max_body_bytes: Option<u64>,
     #[serde(default)]
     pub wait_selector: String,
-    #[serde(default)]
-    pub scroll: Option<Scroll>,
     #[serde(default)]
     pub dont_filter: Option<bool>,
     #[serde(default)]
@@ -52,7 +50,6 @@ impl fmt::Debug for Config {
             .field("timeout", &self.timeout)
             .field("max_body_bytes", &self.max_body_bytes)
             .field("wait_selector", &self.wait_selector)
-            .field("scroll", &self.scroll)
             .field("dont_filter", &self.dont_filter)
             .field("headers_len", &self.headers.len())
             .field("cookies_len", &self.cookies.len())
@@ -97,20 +94,6 @@ impl Config {
             scrape_core::CompiledSelector::compile(&self.wait_selector).map_err(|error| {
                 Error::Message(format!("node {node} has invalid wait_selector: {error}"))
             })?;
-        }
-        if let Some(scroll) = &self.scroll {
-            scroll.validate().map_err(|error| {
-                Error::Message(format!("node {node} has invalid scroll: {error}"))
-            })?;
-            if self
-                .download_mode
-                .as_deref()
-                .is_some_and(|mode| mode.eq_ignore_ascii_case("http"))
-            {
-                return Err(Error::Message(format!(
-                    "node {node} scroll requires download_mode browser"
-                )));
-            }
         }
         let mut header_names = HashSet::with_capacity(self.headers.len());
         for (name, value) in &self.headers {
@@ -192,7 +175,6 @@ impl Config {
         request.timeout = self.timeout;
         request.max_body_bytes = self.max_body_bytes;
         request.wait_selector.clone_from(&self.wait_selector);
-        request.scroll.clone_from(&self.scroll);
         request.dont_filter = self.dont_filter.unwrap_or(false);
         if let Some(mode) = self.download_mode.as_deref() {
             request.mode = match mode.to_ascii_lowercase().as_str() {
@@ -351,50 +333,6 @@ mod tests {
         config.apply_with(&mut request, |_| None).unwrap();
 
         assert_eq!(request.max_body_bytes, Some(4_096));
-    }
-
-    #[test]
-    fn validates_and_applies_browser_scroll() {
-        let config = serde_json::from_value::<Config>(serde_json::json!({
-            "download_mode": "browser",
-            "scroll": {"max_rounds": 3}
-        }))
-        .unwrap();
-
-        config.validate("detail").unwrap();
-        let mut request = Request::follow("https://example.com").unwrap();
-        config.apply_with(&mut request, |_| None).unwrap();
-
-        assert_eq!(
-            request.scroll,
-            Some(crate::net::Scroll {
-                max_rounds: 3,
-                wait_ms: 500,
-                stable_rounds: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_browser_scroll() {
-        let config = serde_json::from_value::<Config>(serde_json::json!({
-            "scroll": {"stable_rounds": 0}
-        }))
-        .unwrap();
-
-        assert!(config.validate("detail").is_err());
-    }
-
-    #[test]
-    fn rejects_http_scroll_configuration() {
-        let config = serde_json::from_value::<Config>(serde_json::json!({
-            "download_mode": "http",
-            "scroll": {}
-        }))
-        .unwrap();
-
-        let error = config.validate("detail").unwrap_err();
-        assert!(error.to_string().contains("requires download_mode browser"));
     }
 
     #[test]
