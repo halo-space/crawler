@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use contrib::scheduler::redis::Redis;
+use halo::contrib::scheduler::redis::Redis;
 use harbor::scheduler::Lease;
 
 use super::{conformance, server::Handle};

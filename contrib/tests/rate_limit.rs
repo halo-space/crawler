@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use contrib::middleware::rate_limit::Redis;
+use halo::contrib::middleware::rate_limit::Redis;
 use harbor::middleware::{Middleware as _, Next, Spec};
 use harbor::net::Request;
 

@@ -1,0 +1,149 @@
+use harbor::{item, payload};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+
+/// A Redis-backed Item Store.
+///
+/// Each submitted Item is serialized as one JSON message and appended to the
+/// configured Redis list. The Store only produces queue messages; consuming
+/// and acknowledging them belongs to the downstream application.
+pub struct Redis {
+    client: redis::Client,
+    connection: Mutex<Option<redis::aio::ConnectionManager>>,
+    key: String,
+}
+
+/// The message written to the Redis Item queue.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Record {
+    pub id: String,
+    pub task_id: String,
+    pub trace_id: String,
+    pub request_id: String,
+    pub node: String,
+    pub data: serde_json::Value,
+}
+
+impl Redis {
+    /// Creates a Redis Item Store for the caller-provided Redis list key.
+    pub fn new(url: impl Into<String>, key: impl Into<String>) -> Result<Self, redis::RedisError> {
+        let key = key.into();
+        validate_key(&key)?;
+        Ok(Self {
+            client: redis::Client::open(url.into())?,
+            connection: Mutex::new(None),
+            key,
+        })
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    async fn manager(&self) -> Result<redis::aio::ConnectionManager, item::Error> {
+        self.connection
+            .lock()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| item::Error::Message("Redis Item Store is not open".to_string()))
+    }
+}
+
+impl item::Store for Redis {
+    async fn open(&self) -> Result<(), item::Error> {
+        let mut active = self.connection.lock().await;
+        if active.is_some() {
+            return Ok(());
+        }
+
+        let mut connection = redis::aio::ConnectionManager::new(self.client.clone())
+            .await
+            .map_err(redis_error)?;
+        let _: String = redis::cmd("PING")
+            .query_async(&mut connection)
+            .await
+            .map_err(redis_error)?;
+        *active = Some(connection);
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), item::Error> {
+        self.connection.lock().await.take();
+        Ok(())
+    }
+
+    async fn submit(&self, payload: &payload::Payload) -> Result<(), item::Error> {
+        payload
+            .validate_store()
+            .map_err(|message| item::Error::Message(message.to_string()))?;
+        if payload.items.is_empty() {
+            return Ok(());
+        }
+
+        let mut connection = self.manager().await?;
+        let mut messages = Vec::with_capacity(payload.items.len());
+        for value in &payload.items {
+            let record = Record {
+                id: value.id().to_string(),
+                task_id: payload.task_id.clone(),
+                trace_id: payload.trace_id.clone(),
+                request_id: payload.id.clone(),
+                node: payload.node.clone(),
+                data: serde_json::to_value(value.as_ref())?,
+            };
+            messages.push(serde_json::to_string(&record)?);
+        }
+
+        let mut command = redis::cmd("RPUSH");
+        command.arg(&self.key);
+        for message in messages {
+            command.arg(message);
+        }
+        let _: i64 = command
+            .query_async(&mut connection)
+            .await
+            .map_err(redis_error)?;
+        Ok(())
+    }
+}
+
+fn validate_key(value: &str) -> Result<(), redis::RedisError> {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "invalid Redis Item Store key",
+            "key must be non-empty and contain no control characters".to_string(),
+        )));
+    }
+    Ok(())
+}
+
+fn redis_error(error: redis::RedisError) -> item::Error {
+    item::Error::Message(format!("Redis Item Store operation failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_uses_the_caller_provided_key() {
+        let store = Redis::new("redis://127.0.0.1/", "items").unwrap();
+        assert_eq!(store.key(), "items");
+    }
+
+    #[test]
+    fn record_round_trips_as_json() {
+        let record = Record {
+            id: "item-1".to_string(),
+            task_id: "task-1".to_string(),
+            trace_id: "trace-1".to_string(),
+            request_id: "request-1".to_string(),
+            node: "detail".to_string(),
+            data: serde_json::json!({"title": "百度词条"}),
+        };
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert_eq!(serde_json::from_str::<Record>(&encoded).unwrap(), record);
+    }
+}

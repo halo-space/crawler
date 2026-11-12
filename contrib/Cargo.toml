@@ -9,7 +9,7 @@ repository = "https://github.com/halo-space/harbor"
 readme = "../README.md"
 
 [lib]
-name = "contrib"
+name = "halo"
 
 [features]
 default = []

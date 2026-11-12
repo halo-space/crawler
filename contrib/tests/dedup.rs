@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use base64::Engine as _;
-use contrib::middleware::dedup::{Options, Redis as Dedup};
+use halo::contrib::middleware::dedup::{Options, Redis as Dedup};
 use harbor::middleware::{Middleware as _, Next, Spec};
 use harbor::net::Request;
 

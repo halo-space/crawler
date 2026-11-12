@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use contrib::scheduler::redis::Redis;
+use halo::contrib::scheduler::redis::Redis;
 use harbor::scheduler::Init;
 use harbor::{Scheduler, payload, stats, trace};
 use tracing::instrument::WithSubscriber;

@@ -22,8 +22,8 @@ cargo run -p examples --bin rules
 
 ```toml
 [dependencies]
-# Harbor 提供 Engine、Request、Response、Item 和 Rules。
-halo = { package = "halo-harbor", path = ".." }
+# Harbor 公共入口提供 Engine、Request、Response、Item、Rules 和 contrib 扩展。
+halo = { package = "halo-harbor-contrib", path = "../contrib" }
 
 # macros 提供 #[macros::harbor] 和 #[derive(macros::Item)]。
 macros = { package = "halo-harbor-macros", path = "../macros" }
@@ -868,6 +868,30 @@ engine.start().await?;
 ./crawler-data/data/items/output/<task_id>/<yyyy-mm-dd-HH>.jsonl
 ```
 
+如果要把 Item 写入 Redis 队列，可以替换 Store：
+
+```rust
+use halo::contrib::store::redis::Redis;
+use halo::harbor::engine;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // "items" 是使用方传入的 Redis List Key，框架不会自动拼接业务名称。
+    let store = Redis::new("redis://127.0.0.1:6379", "items")?;
+
+    let mut engine = engine::Engine::new()
+        .with_spider(ExampleSpider::new())
+        .with_store(store)
+        .build();
+
+    engine.start().await?;
+    Ok(())
+}
+```
+
+Redis Store 只负责把 Item 写入使用方指定的 Redis Key，业务消费者通过 Redis 的 `BRPOP` 等命令读取；Request
+调度仍由 Scheduler 负责。
+
 ## 14. 选择 Scheduler
 
 默认使用内存 Scheduler：
@@ -882,7 +906,7 @@ let engine = halo::harbor::engine::Engine::new()
 Redis、MySQL 和 Master API Scheduler 通过替换 Scheduler 装配；Spider、Rules 和 Item 配置不需要改变。
 
 ```rust
-use contrib::scheduler::redis::Redis;
+use halo::contrib::scheduler::redis::Redis;
 use halo::harbor::{engine, net};
 
 #[tokio::main]

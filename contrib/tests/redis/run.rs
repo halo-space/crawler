@@ -1,4 +1,4 @@
-use contrib::scheduler::redis::Redis;
+use halo::contrib::scheduler::redis::Redis;
 use harbor::scheduler::Init;
 use harbor::{Scheduler, trace};
 
