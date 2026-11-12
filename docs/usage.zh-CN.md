@@ -876,8 +876,9 @@ use halo::harbor::engine;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // "items" 是使用方传入的 Redis List Key，框架不会自动拼接业务名称。
-    let store = Redis::new("redis://127.0.0.1:6379", "items")?;
+    // namespace 和 topic 组合成 harbor:items，框架不拼接业务名称。
+    let store = Redis::with_namespace("redis://127.0.0.1:6379", "harbor")?
+        .with_topic("items")?;
 
     let mut engine = engine::Engine::new()
         .with_spider(ExampleSpider::new())

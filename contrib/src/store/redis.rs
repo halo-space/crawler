@@ -2,6 +2,9 @@ use harbor::{item, payload};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+const DEFAULT_NAMESPACE: &str = "crawler";
+const DEFAULT_TOPIC: &str = "items";
+
 /// A Redis-backed Item Store.
 ///
 /// Each submitted Item is serialized as one JSON message and appended to the
@@ -10,7 +13,8 @@ use tokio::sync::Mutex;
 pub struct Redis {
     client: redis::Client,
     connection: Mutex<Option<redis::aio::ConnectionManager>>,
-    key: String,
+    namespace: String,
+    topic: String,
 }
 
 /// The message written to the Redis Item queue.
@@ -25,19 +29,44 @@ pub struct Record {
 }
 
 impl Redis {
-    /// Creates a Redis Item Store for the caller-provided Redis list key.
-    pub fn new(url: impl Into<String>, key: impl Into<String>) -> Result<Self, redis::RedisError> {
-        let key = key.into();
-        validate_key(&key)?;
+    /// Creates a Redis Item Store with the default `crawler:items` topic.
+    pub fn new(url: impl Into<String>) -> Result<Self, redis::RedisError> {
+        Self::with_namespace(url, DEFAULT_NAMESPACE)
+    }
+
+    /// Creates a Redis Item Store with a caller-provided namespace.
+    pub fn with_namespace(
+        url: impl Into<String>,
+        namespace: impl Into<String>,
+    ) -> Result<Self, redis::RedisError> {
+        let namespace = namespace.into();
+        validate_key_part(&namespace, "namespace")?;
         Ok(Self {
             client: redis::Client::open(url.into())?,
             connection: Mutex::new(None),
-            key,
+            namespace,
+            topic: DEFAULT_TOPIC.to_string(),
         })
     }
 
-    pub fn key(&self) -> &str {
-        &self.key
+    /// Selects the topic used for Item messages.
+    pub fn with_topic(mut self, topic: impl Into<String>) -> Result<Self, redis::RedisError> {
+        let topic = topic.into();
+        validate_key_part(&topic, "topic")?;
+        self.topic = topic;
+        Ok(self)
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    pub fn topic_key(&self) -> String {
+        format!("{}:{}", self.namespace, self.topic)
     }
 
     async fn manager(&self) -> Result<redis::aio::ConnectionManager, item::Error> {
@@ -96,7 +125,7 @@ impl item::Store for Redis {
         }
 
         let mut command = redis::cmd("RPUSH");
-        command.arg(&self.key);
+        command.arg(self.topic_key());
         for message in messages {
             command.arg(message);
         }
@@ -108,12 +137,12 @@ impl item::Store for Redis {
     }
 }
 
-fn validate_key(value: &str) -> Result<(), redis::RedisError> {
+fn validate_key_part(value: &str, part: &str) -> Result<(), redis::RedisError> {
     if value.trim().is_empty() || value.chars().any(char::is_control) {
         return Err(redis::RedisError::from((
             redis::ErrorKind::InvalidClientConfig,
             "invalid Redis Item Store key",
-            "key must be non-empty and contain no control characters".to_string(),
+            format!("{part} must be non-empty and contain no control characters"),
         )));
     }
     Ok(())
@@ -128,9 +157,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn store_uses_the_caller_provided_key() {
-        let store = Redis::new("redis://127.0.0.1/", "items").unwrap();
-        assert_eq!(store.key(), "items");
+    fn topic_key_uses_only_namespace_and_topic() {
+        let store = Redis::with_namespace("redis://127.0.0.1/", "harbor")
+            .unwrap()
+            .with_topic("items")
+            .unwrap();
+        assert_eq!(store.topic_key(), "harbor:items");
     }
 
     #[test]

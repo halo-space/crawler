@@ -411,7 +411,8 @@ To write Items to a Redis queue, replace the Store:
 use halo::contrib::store::redis::Redis;
 use halo::harbor::engine;
 
-let store = Redis::new("redis://127.0.0.1:6379", "items")?;
+let store = Redis::with_namespace("redis://127.0.0.1:6379", "harbor")?
+    .with_topic("items")?;
 
 let engine = engine::Engine::new()
     .with_spider(ExampleSpider::new())
