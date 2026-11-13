@@ -21,7 +21,7 @@ cargo run -p examples --bin basic
 ```
 
 The `halo-harbor-worker` crate provides a generic Worker library. The application injects a
-Scheduler with `Builder::with_scheduler(...)`; the Worker does not select a backend or read
+Scheduler with `Engine::with_scheduler(...)`; the Worker does not select a backend or read
 Scheduler settings from environment variables. Registration, heartbeat, claiming, recovery, and
 settlement belong to the injected Scheduler backend.
 

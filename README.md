@@ -42,7 +42,7 @@ run. The daily/one-time schedule is created by the external Scheduler or Master;
 only describes the Request graph.
 
 `halo-harbor-worker` is a generic Worker library. The application assembles it with a concrete
-Scheduler through `Builder::with_scheduler(...)`; Memory, Redis, MySQL, and Master API are
+Scheduler through `Engine::with_scheduler(...)`; Memory, Redis, MySQL, and Master API are
 replaceable Scheduler implementations and are not selected through Worker environment variables.
 Each Scheduler owns its own registration, heartbeat, claiming, recovery, and settlement behavior.
 
