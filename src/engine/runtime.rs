@@ -14,6 +14,14 @@ pub const MAX_EVENTS: usize = 32;
 pub const DEFAULT_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 type ShutdownSignal = Pin<Box<dyn Future<Output = Result<(), crate::Error>> + Send>>;
+pub(super) type Seed<S> = Arc<
+    dyn Fn(
+            Arc<S>,
+            crate::load::Message,
+        ) -> Pin<Box<dyn Future<Output = Result<(), crate::Error>> + Send>>
+        + Send
+        + Sync,
+>;
 
 pub(super) struct Setup<S, D, E, O> {
     pub(super) scheduler: S,
@@ -23,6 +31,8 @@ pub(super) struct Setup<S, D, E, O> {
     pub(super) events: Events,
     pub(super) registry: middleware::Registry,
     pub(super) middlewares: Vec<middleware::Spec>,
+    pub(super) load: Option<Arc<dyn crate::load::Load>>,
+    pub(super) seed: Option<Seed<S>>,
 }
 
 pub struct Runtime<S, D, E, N = engine::NoInit, O = crate::item::Jsonl> {
@@ -33,6 +43,8 @@ pub struct Runtime<S, D, E, N = engine::NoInit, O = crate::item::Jsonl> {
     events: Option<Events>,
     registry: Arc<middleware::Registry>,
     middlewares: Arc<Vec<middleware::Spec>>,
+    load: Option<Arc<dyn crate::load::Load>>,
+    seed: Option<Seed<S>>,
     concurrency: usize,
     claim_limit: Option<usize>,
     event_limit: usize,
@@ -54,6 +66,8 @@ where
             events: Some(setup.events),
             registry: Arc::new(setup.registry),
             middlewares: Arc::new(setup.middlewares),
+            load: setup.load,
+            seed: setup.seed,
             concurrency: MAX_REQUEST_CONCURRENCY,
             claim_limit: None,
             event_limit: MAX_EVENTS,
@@ -74,6 +88,8 @@ impl<S, D, E, N, O> Runtime<S, D, E, N, O> {
             events: self.events,
             registry: self.registry,
             middlewares: self.middlewares,
+            load: self.load,
+            seed: self.seed,
             concurrency: self.concurrency,
             claim_limit: self.claim_limit,
             event_limit: self.event_limit,
@@ -348,6 +364,15 @@ where
         let actor_ref = prepared.actor_ref().clone();
         events.bind(actor_ref.clone().reply_recipient::<Event>())?;
         let mut handle = prepared.spawn((actor, init));
+        let load_task = match (self.load.as_ref(), self.seed.as_ref()) {
+            (Some(load), Some(seed)) => {
+                let scheduler = self.scheduler.clone();
+                let load = Arc::clone(load);
+                let seed = Arc::clone(seed);
+                Some(tokio::spawn(load_runs(scheduler, load, seed)))
+            }
+            _ => None,
+        };
         let stopped = tokio::select! {
             stopped = &mut handle => stopped,
             signal = shutdown.as_mut() => {
@@ -361,6 +386,10 @@ where
                 stopped
             }
         };
+        if let Some(load_task) = load_task {
+            load_task.abort();
+            let _ = load_task.await;
+        }
         let (actor, reason) = stopped
             .map_err(|error| crate::Error::message(error.to_string()))?
             .map_err(|error| crate::Error::message(error.to_string()))?;
@@ -389,6 +418,64 @@ where
         }
         Ok(())
     }
+}
+
+async fn load_runs<S>(scheduler: Arc<S>, load: Arc<dyn crate::load::Load>, seed: Seed<S>)
+where
+    S: scheduler::Scheduler + 'static,
+{
+    loop {
+        match load.load().await {
+            Ok(Some(message)) => {
+                if let Err(error) = seed(Arc::clone(&scheduler), message).await {
+                    tracing::error!(error = %error, "failed to seed a loaded crawler task");
+                }
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to load a crawler task configuration");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+pub(super) async fn seed_run<S>(
+    scheduler: Arc<S>,
+    message: crate::load::Message,
+) -> Result<(), crate::Error>
+where
+    S: scheduler::Scheduler + scheduler::Init + 'static,
+{
+    message
+        .validate()
+        .map_err(|error| crate::Error::message(error.to_string()))?;
+    let config = message
+        .snapshot
+        .dsl
+        .as_ref()
+        .ok_or_else(|| crate::Error::message("loaded task configuration must contain DSL"))?;
+    let requests = config
+        .initial_requests(
+            message.task_id.clone(),
+            message.trace_id.clone(),
+            message.snapshot.params.clone(),
+        )
+        .map_err(crate::Error::Config)?;
+    scheduler
+        .init(message.trace_id, message.snapshot, requests)
+        .await
+        .map_err(crate::Error::Scheduler)
+}
+
+pub(super) fn seed_callback<S>(
+    scheduler: Arc<S>,
+    message: crate::load::Message,
+) -> Pin<Box<dyn Future<Output = Result<(), crate::Error>> + Send>>
+where
+    S: scheduler::Scheduler + scheduler::Init + 'static,
+{
+    Box::pin(seed_run(scheduler, message))
 }
 
 fn lifecycle_result(

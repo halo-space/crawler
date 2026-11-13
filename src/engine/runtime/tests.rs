@@ -441,6 +441,35 @@ async fn signal_is_listened_for_before_open_starts() {
 }
 
 #[tokio::test]
+async fn loaded_rules_message_seeds_one_trace_and_its_initial_requests() {
+    let config = crate::config::Config::from_yaml(
+        r#"
+spider:
+  name: books
+  start:
+    - node: index
+      url: https://example.com/books
+graph:
+  nodes:
+    index: {}
+  edges: []
+"#,
+    )
+    .unwrap();
+    let message = crate::load::Message::new(
+        "task-1",
+        "trace-1",
+        crate::trace::Snapshot::rules("task-1", config),
+    );
+    let scheduler = Arc::new(scheduler::Memory::new());
+
+    seed_run(Arc::clone(&scheduler), message).await.unwrap();
+
+    assert_eq!(scheduler.trace_ids(), vec!["trace-1"]);
+    assert_eq!(scheduler.queued_len(), 1);
+}
+
+#[tokio::test]
 async fn startup_signal_waits_for_open_to_finish() {
     let listening = Arc::new(AtomicBool::new(false));
     let signal_listening = Arc::clone(&listening);
@@ -624,6 +653,8 @@ async fn signal_during_init_preserves_the_seed_without_starting_the_actor() {
         events,
         registry: middleware::Registry::new(),
         middlewares: Vec::new(),
+        load: None,
+        seed: None,
     })
     .with_init(BlockingInit {
         started: Arc::clone(&started),
@@ -702,6 +733,8 @@ async fn signal_drains_every_request_from_an_active_claim_without_claiming_again
         events,
         registry: middleware::Registry::new(),
         middlewares: Vec::new(),
+        load: None,
+        seed: None,
     });
     let (send_signal, received) = oneshot::channel::<()>();
     let mut shutdown: ShutdownSignal = Box::pin(async move {
@@ -745,6 +778,8 @@ async fn start_until_idle_uses_the_configured_idle_interval() {
         events,
         registry: middleware::Registry::new(),
         middlewares: Vec::new(),
+        load: None,
+        seed: None,
     })
     .with_idle_interval(interval);
 
@@ -773,6 +808,8 @@ async fn close_returns_the_first_error_and_logs_later_failures() {
         events,
         registry: middleware::Registry::new(),
         middlewares: Vec::new(),
+        load: None,
+        seed: None,
     });
     let recorded = Arc::new(Mutex::new(Vec::new()));
 
@@ -811,6 +848,8 @@ async fn lifecycle_returns_the_first_error_and_logs_cleanup_failures() {
         events,
         registry,
         middlewares: vec![middleware::Spec::new("failing-lifecycle")],
+        load: None,
+        seed: None,
     });
     let mut shutdown: ShutdownSignal = Box::pin(std::future::pending());
     let recorded = Arc::new(Mutex::new(Vec::new()));

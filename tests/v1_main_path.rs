@@ -652,7 +652,7 @@ async fn payload_contains_request_and_item_stats() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(ItemSpider::new())
@@ -684,7 +684,7 @@ async fn default_validate_filters_response_before_parse_and_records_stats() {
         .await
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 404 })
         .with_spider(NoopSpider::new(calls.clone()))
@@ -711,7 +711,7 @@ async fn download_retry_recovers_without_recording_final_download_failure() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(FlakyDownload {
             attempts: attempts.clone(),
@@ -738,7 +738,7 @@ async fn final_download_failure_records_download_stats() {
         .push(payload::Payload::new().requests(vec![bound_request("https://example.com")]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(FlakyDownload {
             attempts: Arc::new(AtomicUsize::new(0)),
@@ -761,7 +761,7 @@ async fn final_download_failure_records_download_stats() {
 async fn dedup_skips_duplicate_request_and_memory_accumulates_stats() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(records);
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(DedupSpider::new())
@@ -786,7 +786,7 @@ async fn item_validate_skip_does_not_fail_current_request() {
         .push(payload::Payload::new().requests(vec![bound_request("https://example.com")]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(ValidateItemSpider::new())
@@ -811,7 +811,7 @@ async fn request_validate_skip_does_not_fail_current_request() {
         .push(payload::Payload::new().requests(vec![bound_request("https://example.com")]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(ValidateRequestSpider::new())
@@ -839,7 +839,7 @@ async fn parse_retry_reinvokes_handler_until_it_succeeds() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(ParseRetrySpider::new(attempts.clone()))
@@ -862,7 +862,7 @@ async fn parse_retry_reinvokes_handler_until_it_succeeds() {
 async fn queue_retry_replays_the_same_child_request() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let attempts = Arc::new(AtomicUsize::new(0));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(RecordingScheduler::new(records))
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(QueueRetrySpider::new(attempts.clone()))
@@ -898,7 +898,7 @@ async fn item_retry_removes_failure_snapshot_after_recovery() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_store(store)
         .with_downloader(StatusDownload { status: 200 })
@@ -937,7 +937,7 @@ async fn final_item_failure_keeps_complete_local_snapshot() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_store(store)
         .with_downloader(StatusDownload { status: 200 })
@@ -991,7 +991,7 @@ async fn snapshot_write_failure_preserves_original_submit_error() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_store(store)
         .with_downloader(StatusDownload { status: 200 })
@@ -1014,7 +1014,7 @@ async fn snapshot_write_failure_preserves_original_submit_error() {
 async fn spider_lifecycle_wraps_start_and_request_processing() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(Arc::new(Mutex::new(Vec::new())));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(LifecycleSpider::new(calls.clone()))
@@ -1040,7 +1040,7 @@ async fn spider_lifecycle_wraps_start_and_request_processing() {
 async fn after_spider_runs_when_before_spider_fails() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(Arc::new(Mutex::new(Vec::new())));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(StatusDownload { status: 200 })
         .with_spider(LifecycleSpider::new(calls.clone()))

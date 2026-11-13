@@ -142,7 +142,7 @@ async fn x_account_rules_fetch_real_posts_and_follow_next_token() {
     let config = Config::from_yaml(&RULES.replace("{username}", &username)).unwrap();
     let output_dir = std::env::temp_dir().join(format!("harbor-x-account-{}", std::process::id()));
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(Memory::new())
         .with_middleware("x_auth", XAuth { token })
         .with_rules(config)

@@ -8,6 +8,7 @@ pub mod error;
 pub mod graph;
 pub mod harbor;
 pub mod item;
+pub mod load;
 pub mod middleware;
 pub mod net;
 pub mod payload;

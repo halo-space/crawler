@@ -73,7 +73,7 @@ impl AcceptanceSpider {
 async fn default_code_mode_decodes_legacy_http_page_and_writes_jsonl() {
     let (start_url, server) = serve_pages();
     let runtime_dir = temp_dir();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_store(halo::harbor::item::Jsonl::with_dir(&runtime_dir))
         .with_spider(AcceptanceSpider::new(start_url))
         .build()
@@ -135,7 +135,7 @@ graph:
 "#
     .replace("START_URL", &start_url);
     let config = halo::harbor::config::Config::from_yaml(&rules).unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(RulesCookieSpider::new())
         .build()

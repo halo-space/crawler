@@ -314,7 +314,7 @@ async fn claim_limit_fills_concurrency_in_multiple_single_claims() {
         .unwrap();
     let active = Arc::new(AtomicUsize::new(0));
     let max_active = Arc::new(AtomicUsize::new(0));
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active,
@@ -351,7 +351,7 @@ async fn scheduler_can_raise_the_runtime_claim_limit_after_startup() {
         .await
         .unwrap();
 
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(ai_downloader())
         .with_spider(EmptySpider::new())
@@ -373,7 +373,7 @@ async fn scheduler_owns_request_modes() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -391,7 +391,7 @@ async fn scheduler_owns_request_modes() {
 
 #[tokio::test]
 async fn scheduler_open_receives_frozen_request_concurrency() {
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(ClaimScheduler::new(0))
         .with_spider(EmptySpider::new())
         .build()
@@ -425,7 +425,7 @@ graph:
 "#,
     )
     .unwrap();
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_spider(EmptySpider::new())
         .with_rules(config)
         .with_scheduler(ClaimScheduler::new(0).with_modes([net::Mode::Browser]))
@@ -450,7 +450,7 @@ async fn transient_claim_failure_is_retried_without_losing_requests() {
         .push(payload::Payload::new().requests(requests(1)))
         .await
         .unwrap();
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -478,7 +478,7 @@ async fn request_concurrency_above_the_default_is_not_clamped() {
         .await
         .unwrap();
     let max_active = Arc::new(AtomicUsize::new(0));
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -502,7 +502,7 @@ async fn remote_scheduler_consumes_existing_requests_without_creating_a_seed() {
         .await
         .unwrap();
     let starts = Arc::new(AtomicUsize::new(0));
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -538,7 +538,7 @@ async fn remote_rules_trace_uses_worker_openai_without_persisting_it() {
     ] {
         assert!(!encoded.contains(sentinel), "{sentinel}");
     }
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_ai(openai)
         .with_downloader(ai_downloader())
@@ -566,7 +566,7 @@ async fn remote_rules_trace_uses_worker_openai_without_persisting_it() {
 #[tokio::test]
 async fn remote_rules_trace_without_worker_openai_records_the_failure() {
     let scheduler = remote_rules(&ai_rules()).await;
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(ai_downloader())
         .with_spider(EmptySpider::new())
@@ -589,7 +589,7 @@ async fn remote_rules_trace_without_worker_openai_records_the_failure() {
 
 #[tokio::test]
 async fn zero_runtime_limits_are_rejected_before_startup() {
-    let mut concurrency = engine::Builder::new()
+    let mut concurrency = engine::Engine::new()
         .with_spider(EmptySpider::new())
         .build()
         .with_concurrency(0);
@@ -602,7 +602,7 @@ async fn zero_runtime_limits_are_rejected_before_startup() {
             .contains("concurrency must be positive")
     );
 
-    let mut claim = engine::Builder::new()
+    let mut claim = engine::Engine::new()
         .with_spider(EmptySpider::new())
         .build()
         .with_claim_limit(0);
@@ -615,7 +615,7 @@ async fn zero_runtime_limits_are_rejected_before_startup() {
             .contains("claim limit must be positive")
     );
 
-    let mut events = engine::Builder::new()
+    let mut events = engine::Engine::new()
         .with_spider(EmptySpider::new())
         .build()
         .with_event_limit(0);
@@ -628,7 +628,7 @@ async fn zero_runtime_limits_are_rejected_before_startup() {
             .contains("Event limit must be positive")
     );
 
-    let mut idle = engine::Builder::new()
+    let mut idle = engine::Engine::new()
         .with_spider(EmptySpider::new())
         .build()
         .with_idle_interval(std::time::Duration::ZERO);

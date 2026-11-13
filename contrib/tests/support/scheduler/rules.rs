@@ -29,7 +29,7 @@ graph:
     )
     .unwrap();
     let fetched = Arc::new(AtomicUsize::new(0));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_rules(config)
         .with_spider(|tx| LocalSpider { tx })
@@ -78,7 +78,7 @@ graph:
     let fetched = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(AtomicUsize::new(0));
     let indexed = Arc::new(AtomicUsize::new(0));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_spider({
             let started = started.clone();

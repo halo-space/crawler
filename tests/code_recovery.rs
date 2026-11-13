@@ -77,7 +77,7 @@ async fn released_code_request_resolves_its_stable_node_again() {
     release.state = net::State::Processing;
     scheduler.release(&release).await.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(Download)
         .with_spider(RecoverySpider::new(calls.clone()))
@@ -93,7 +93,7 @@ async fn released_code_request_resolves_its_stable_node_again() {
 async fn missing_code_node_uses_request_failure_settlement() {
     let scheduler = halo::harbor::Memory::new();
     traced_request(&scheduler, "missing").await;
-    let mut runtime = engine::Builder::new()
+    let mut runtime = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(Download)
         .with_spider(RecoverySpider::new(Arc::new(AtomicUsize::new(0))))

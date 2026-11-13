@@ -266,7 +266,7 @@ async fn engine_download_retry_starts_with_a_fresh_timeout_budget() {
         delayed.join().unwrap();
     });
     let parses = Arc::new(AtomicUsize::new(0));
-    let mut engine = halo::harbor::engine::Builder::new()
+    let mut engine = halo::harbor::engine::Engine::new()
         .with_spider(RetrySpider::new(url, Arc::clone(&parses)))
         .build()
         .with_concurrency(1);

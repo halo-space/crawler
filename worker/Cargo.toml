@@ -12,6 +12,4 @@ name = "worker"
 
 [dependencies]
 harbor = { package = "halo-harbor", path = "..", version = "0.1.5" }
-thiserror = { workspace = true }
 tokio = { workspace = true }
-rustls = { workspace = true }

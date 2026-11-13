@@ -7,6 +7,15 @@ pub mod contrib {
         pub use crate::middleware::*;
     }
 
+    pub mod load {
+        pub use crate::load::Memory;
+        pub use harbor::load::{Error, Load, Message};
+
+        pub mod redis {
+            pub use crate::load::redis::Redis;
+        }
+    }
+
     pub mod scheduler {
         pub use crate::scheduler::*;
     }
@@ -17,6 +26,7 @@ pub mod contrib {
 }
 
 mod browser;
+mod load;
 mod middleware;
 mod scheduler;
 mod store;

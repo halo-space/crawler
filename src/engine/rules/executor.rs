@@ -107,9 +107,11 @@ where
             .collect::<Vec<_>>();
         crate::item::Item::state_mut(&mut item).set_download_fields(download_fields);
         crate::item::Item::state_mut(&mut item).set_schema(Some(schema));
-        let function = spider.item_fn(function).unwrap_or_else(|| {
-            panic!("Rules item function is not registered by current Spider: {function}")
-        });
+        let function = spider.item_fn(function).ok_or_else(|| {
+            crate::Error::message(format!(
+                "Rules item function is not registered by current Spider: {function}"
+            ))
+        })?;
         function.call(spider, item).await?;
     }
     Ok(())

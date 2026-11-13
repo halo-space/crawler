@@ -5,12 +5,8 @@ use super::runtime::{MAX_EVENTS, Runtime};
 use crate::harbor::tx;
 use crate::{config, downloader, engine, harbor, middleware, scheduler};
 
-pub struct Builder<
-    S = scheduler::Memory,
-    D = downloader::Downloader,
-    P = (),
-    O = crate::item::Jsonl,
-> {
+pub struct Engine<S = scheduler::Memory, D = downloader::Downloader, P = (), O = crate::item::Jsonl>
+{
     pub(super) scheduler: S,
     pub(super) downloader: D,
     pub(super) spider: Box<dyn FnOnce(tx::Tx) -> P + Send>,
@@ -20,9 +16,10 @@ pub struct Builder<
     pub(super) ai: Option<Arc<crate::ai::OpenAI>>,
     pub(super) middlewares: Vec<middleware::Spec>,
     pub(super) attachment: Option<crate::item::attachment::Config>,
+    pub(super) load: Option<Arc<dyn crate::load::Load>>,
 }
 
-impl Builder<scheduler::Memory, downloader::Downloader, (), crate::item::Jsonl> {
+impl Engine<scheduler::Memory, downloader::Downloader, (), crate::item::Jsonl> {
     pub fn new() -> Self {
         let schemas = Arc::new(crate::item::schema::Store::new());
         Self {
@@ -35,19 +32,20 @@ impl Builder<scheduler::Memory, downloader::Downloader, (), crate::item::Jsonl> 
             ai: None,
             middlewares: Vec::new(),
             attachment: None,
+            load: None,
         }
     }
 }
 
-impl Default for Builder<scheduler::Memory, downloader::Downloader, ()> {
+impl Default for Engine<scheduler::Memory, downloader::Downloader, ()> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S, D, P, O> Builder<S, D, P, O> {
-    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Builder<NextS, D, P, O> {
-        Builder {
+impl<S, D, P, O> Engine<S, D, P, O> {
+    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Engine<NextS, D, P, O> {
+        Engine {
             scheduler,
             downloader: self.downloader,
             spider: self.spider,
@@ -57,11 +55,12 @@ impl<S, D, P, O> Builder<S, D, P, O> {
             ai: self.ai,
             middlewares: self.middlewares,
             attachment: self.attachment,
+            load: self.load,
         }
     }
 
-    pub fn with_downloader<NextD>(self, downloader: NextD) -> Builder<S, NextD, P, O> {
-        Builder {
+    pub fn with_downloader<NextD>(self, downloader: NextD) -> Engine<S, NextD, P, O> {
+        Engine {
             scheduler: self.scheduler,
             downloader,
             spider: self.spider,
@@ -71,14 +70,15 @@ impl<S, D, P, O> Builder<S, D, P, O> {
             ai: self.ai,
             middlewares: self.middlewares,
             attachment: self.attachment,
+            load: self.load,
         }
     }
 
-    pub fn with_spider<NextP, F>(self, spider: F) -> Builder<S, D, NextP, O>
+    pub fn with_spider<NextP, F>(self, spider: F) -> Engine<S, D, NextP, O>
     where
         F: FnOnce(tx::Tx) -> NextP + Send + 'static,
     {
-        Builder {
+        Engine {
             scheduler: self.scheduler,
             downloader: self.downloader,
             spider: Box::new(spider),
@@ -88,11 +88,12 @@ impl<S, D, P, O> Builder<S, D, P, O> {
             ai: self.ai,
             middlewares: self.middlewares,
             attachment: self.attachment,
+            load: self.load,
         }
     }
 
-    pub fn with_rules(self, config: config::Config) -> super::rules::Builder<S, D, P, O> {
-        super::rules::Builder {
+    pub fn with_rules(self, config: config::Config) -> super::rules::Rules<S, D, P, O> {
+        super::rules::Rules {
             scheduler: self.scheduler,
             downloader: self.downloader,
             spider: self.spider,
@@ -102,11 +103,12 @@ impl<S, D, P, O> Builder<S, D, P, O> {
             schemas: self.schemas,
             ai: self.ai,
             middlewares: self.middlewares,
+            load: self.load,
         }
     }
 
-    pub fn with_store<NextO>(self, store: NextO) -> Builder<S, D, P, NextO> {
-        Builder {
+    pub fn with_store<NextO>(self, store: NextO) -> Engine<S, D, P, NextO> {
+        Engine {
             scheduler: self.scheduler,
             downloader: self.downloader,
             spider: self.spider,
@@ -116,7 +118,16 @@ impl<S, D, P, O> Builder<S, D, P, O> {
             ai: self.ai,
             middlewares: self.middlewares,
             attachment: self.attachment,
+            load: self.load,
         }
+    }
+
+    pub fn with_load<L>(mut self, load: L) -> Self
+    where
+        L: crate::load::Load + 'static,
+    {
+        self.load = Some(Arc::new(load));
+        self
     }
 
     /// Selects the Worker-local OpenAI provider used by every parsed Response.
@@ -152,7 +163,7 @@ impl<S, D, P, O> Builder<S, D, P, O> {
     }
 }
 
-impl<S, D, P, O> Builder<S, D, P, O>
+impl<S, D, P, O> Engine<S, D, P, O>
 where
     S: scheduler::Scheduler + scheduler::Init + 'static,
     D: downloader::Download + 'static,
@@ -162,13 +173,17 @@ where
     pub fn build(self) -> Runtime<S, D, engine::executor::Executor<P>, engine::code::Init, O> {
         let (tx, events) = tx::channel(MAX_EVENTS);
         let spider = (self.spider)(tx);
-        let seed = self.scheduler.initializes_run().then(|| {
+        let run_seed = (self.load.is_none() && self.scheduler.initializes_run()).then(|| {
             let task_id = spider.name().to_string();
             let trace_id = crate::trace::next_id();
             spider.tx().set_trace(task_id.clone(), trace_id.clone());
             (task_id, trace_id, self.attachment.clone())
         });
         let executor = engine::executor::Executor::new(Arc::new(spider), self.schemas, self.ai);
+        let load_seed = self
+            .load
+            .as_ref()
+            .map(|_| Arc::new(super::runtime::seed_callback::<S>) as super::runtime::Seed<S>);
 
         Runtime::new(super::runtime::Setup {
             scheduler: self.scheduler,
@@ -178,7 +193,9 @@ where
             events,
             registry: self.registry,
             middlewares: self.middlewares,
+            load: self.load,
+            seed: load_seed,
         })
-        .with_init(engine::code::Init::new(seed))
+        .with_init(engine::code::Init::new(run_seed))
     }
 }

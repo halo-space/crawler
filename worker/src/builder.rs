@@ -9,16 +9,16 @@ use harbor::{Spider, Tx, engine};
 use crate::config::Config;
 use crate::rules::{RulesSpider, rules};
 
-pub struct Builder<S = harbor::scheduler::Memory, D = Downloader, P = RulesSpider, O = Jsonl> {
+pub struct Engine<S = harbor::scheduler::Memory, D = Downloader, P = RulesSpider, O = Jsonl> {
     config: Config,
-    engine: engine::Builder<S, D, P, O>,
+    engine: engine::Engine<S, D, P, O>,
 }
 
-impl Builder<harbor::scheduler::Memory, Downloader, RulesSpider, Jsonl> {
+impl Engine<harbor::scheduler::Memory, Downloader, RulesSpider, Jsonl> {
     pub fn new(config: Config) -> Self {
         Self {
             config: config.clone(),
-            engine: engine::Builder::new()
+            engine: engine::Engine::new()
                 .with_downloader(default_downloader(&config))
                 .with_store(Jsonl::with_dir(&config.store_dir))
                 .with_spider(rules),
@@ -26,33 +26,43 @@ impl Builder<harbor::scheduler::Memory, Downloader, RulesSpider, Jsonl> {
     }
 }
 
-impl<S, D, P, O> Builder<S, D, P, O> {
-    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Builder<NextS, D, P, O> {
-        Builder {
+impl<S, D, P, O> Engine<S, D, P, O> {
+    pub fn with_scheduler<NextS>(self, scheduler: NextS) -> Engine<NextS, D, P, O> {
+        Engine {
             config: self.config,
             engine: self.engine.with_scheduler(scheduler),
         }
     }
 
-    pub fn with_downloader<NextD>(self, downloader: NextD) -> Builder<S, NextD, P, O> {
-        Builder {
+    pub fn with_downloader<NextD>(self, downloader: NextD) -> Engine<S, NextD, P, O> {
+        Engine {
             config: self.config,
             engine: self.engine.with_downloader(downloader),
         }
     }
 
-    pub fn with_spider<NextP, F>(self, spider: F) -> Builder<S, D, NextP, O>
+    pub fn with_load<L>(self, load: L) -> Self
+    where
+        L: harbor::load::Load + 'static,
+    {
+        Engine {
+            config: self.config,
+            engine: self.engine.with_load(load),
+        }
+    }
+
+    pub fn with_spider<NextP, F>(self, spider: F) -> Engine<S, D, NextP, O>
     where
         F: FnOnce(Tx) -> NextP + Send + 'static,
     {
-        Builder {
+        Engine {
             config: self.config,
             engine: self.engine.with_spider(spider),
         }
     }
 
-    pub fn with_store<NextO>(self, store: NextO) -> Builder<S, D, P, NextO> {
-        Builder {
+    pub fn with_store<NextO>(self, store: NextO) -> Engine<S, D, P, NextO> {
+        Engine {
             config: self.config,
             engine: self.engine.with_store(store),
         }
@@ -62,7 +72,7 @@ impl<S, D, P, O> Builder<S, D, P, O> {
     where
         M: middleware::Middleware + 'static,
     {
-        Builder {
+        Engine {
             config: self.config,
             engine: self.engine.with_middleware(name, middleware),
         }
@@ -72,21 +82,21 @@ impl<S, D, P, O> Builder<S, D, P, O> {
     where
         A: harbor::item::attachment::AttachmentDownloader + 'static,
     {
-        Builder {
+        Engine {
             config: self.config,
             engine: self.engine.with_attachment_downloader(downloader),
         }
     }
 
     pub fn with_middleware_spec(self, spec: Spec) -> Self {
-        Builder {
+        Engine {
             config: self.config,
             engine: self.engine.with_spider_middleware(spec),
         }
     }
 }
 
-impl<S, D, P, O> Builder<S, D, P, O>
+impl<S, D, P, O> Engine<S, D, P, O>
 where
     S: Scheduler + Init + 'static,
     D: harbor::downloader::Download + 'static,
@@ -104,7 +114,7 @@ where
 }
 
 pub async fn run(config: Config) -> Result<(), harbor::Error> {
-    Builder::new(config).run().await
+    Engine::new(config).run().await
 }
 
 fn default_downloader(config: &Config) -> Downloader {

@@ -104,7 +104,7 @@ async fn eastmoney_fund_rules_run_full_graph() {
     let browser = Browser::new().with_webdriver_url(webdriver_url);
     let downloader = Downloader::new().with_browser(browser);
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(Memory::new().with_modes([Mode::Http, Mode::Browser]))
         .with_downloader(downloader)
         .with_rules(config)

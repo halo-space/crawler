@@ -351,7 +351,7 @@ async fn engine_routes_http_and_browser_requests_together() {
         .unwrap();
     let downloader = Downloader::new().with_browser(browser);
     let scheduler = halo::harbor::Memory::new().with_modes([Mode::Http, Mode::Browser]);
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_spider(HybridSpider::new(http_url, browser_url, responses.clone()))

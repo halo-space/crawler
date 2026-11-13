@@ -487,7 +487,7 @@ fn ai_test_lease() -> halo::harbor::scheduler::Lease {
 
 #[tokio::test]
 async fn rules_ai_without_a_provider_returns_a_startup_error() {
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(ai_rules())
         .with_spider(RulesSpider::new())
         .build();
@@ -522,7 +522,7 @@ async fn code_parse_retry_keeps_openai_after_scheduler_replacement() {
     let value = Arc::new(Mutex::new(None));
     let scheduler =
         LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))).with_lease(ai_test_lease());
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_ai(openai)
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
@@ -548,7 +548,7 @@ async fn rules_code_and_declarative_parsers_share_engine_openai() {
     let openai =
         halo::harbor::ai::OpenAI::new(provider.base_url(), "engine-secret", "engine-model")
             .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_ai(openai)
         .with_rules(ai_rules())
         .with_spider(AiRulesSpider::new())
@@ -572,7 +572,7 @@ async fn rules_builder_keeps_openai_after_scheduler_replacement() {
             .unwrap();
     let scheduler =
         LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))).with_lease(ai_test_lease());
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(ai_rules())
         .with_ai(openai)
         .with_scheduler(scheduler)
@@ -608,7 +608,7 @@ graph:
     )
     .unwrap();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(TestDownload)
@@ -665,7 +665,7 @@ graph:
 "#,
     )
     .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_middleware("reject-seed-admission", RejectSeedAdmission)
         .with_spider(RulesSpider::new())
@@ -797,7 +797,7 @@ item:
     .unwrap();
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let stored = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(KeywordDownload::new(bodies.clone()))
@@ -884,7 +884,7 @@ item:
 "#,
     )
     .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(RulesDownload)
@@ -918,7 +918,7 @@ item:
     )
     .unwrap();
     let attempts = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_store(RetryOnceStore::new(attempts.clone()))
         .with_spider(RetryingRulesStoreSpider::new())
@@ -971,7 +971,7 @@ item:
     .unwrap();
     let called = Arc::new(AtomicBool::new(false));
     let dir = std::env::temp_dir().join(format!("crawler-typed-{}", uuid::Uuid::now_v7()));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_store(halo::harbor::item::Jsonl::with_dir(&dir))
         .with_rules(config)
         .with_spider(TypedRulesSpider::new(called.clone()))
@@ -998,7 +998,7 @@ async fn code_parse_retry_reuses_the_emitted_request_id() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(RetryingRequestSpider::new(attempts.clone()))
@@ -1068,7 +1068,7 @@ item:
     let records = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(pushed_requests.clone(), records);
     let attempts = Arc::new(AtomicUsize::new(0));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_rules(config)
         .with_spider(RetryingRulesSpider::new(attempts.clone()))
@@ -1113,7 +1113,7 @@ item:
     )
     .unwrap();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(TypedRulesSpider::new(Arc::new(AtomicBool::new(false))))
         .build();
@@ -1311,7 +1311,7 @@ item:
     )
     .unwrap();
     let dir = std::env::temp_dir().join(format!("crawler-media-{}", uuid::Uuid::now_v7()));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_store(halo::harbor::item::Jsonl::with_dir(&dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
@@ -1348,7 +1348,7 @@ async fn rules_attachment_download_runs_before_store_and_preserves_src() {
     let output_dir = root.join("output");
     let media_dir = root.join("media");
     let config = media_download_rules("rules-attachment", &media_dir, &source, 0);
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_store(halo::harbor::item::Jsonl::with_dir(&output_dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
@@ -1397,7 +1397,7 @@ async fn exhausted_attachment_download_retries_keep_request_successful() {
         "https://example.com/cover.jpg",
         2,
     );
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_store(halo::harbor::item::Jsonl::with_dir(&output_dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
@@ -1447,7 +1447,7 @@ async fn rules_node_can_skip_item_download_middleware() {
         "    index:\n      middlewares:\n        - hook: before_item\n          name: download\n          skip: true\n      fields:",
     );
     let config = halo::harbor::config::Config::from_yaml(&rules).unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_store(halo::harbor::item::Jsonl::with_dir(&output_dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
@@ -1485,7 +1485,7 @@ graph:
 "#,
     )
     .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(RulesDownload)
@@ -1551,7 +1551,7 @@ graph:
 "#,
     )
     .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(PagingDownload)
@@ -1606,7 +1606,7 @@ graph:
 "#,
     )
     .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(IsolatedRulesDownload)
@@ -1663,7 +1663,7 @@ graph:
     .unwrap();
     let active = Arc::new(AtomicUsize::new(0));
     let max_active = Arc::new(AtomicUsize::new(0));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_rules(config)
         .with_spider(RulesSpider::new())
         .with_downloader(ConcurrentRulesDownload {
@@ -3017,7 +3017,7 @@ async fn engine_open_opens_scheduler_downloader_and_store() {
         calls: calls.clone(),
     };
 
-    let engine = engine::Builder::new()
+    let engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(LifecycleStore::new(calls.clone()))
@@ -3041,7 +3041,7 @@ async fn engine_close_closes_downloader_store_and_scheduler() {
         calls: calls.clone(),
     };
 
-    let engine = engine::Builder::new()
+    let engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(LifecycleStore::new(calls.clone()))
@@ -3066,7 +3066,7 @@ async fn engine_close_attempts_every_component_when_cleanup_fails() {
     let downloader = FailingCloseDownload {
         calls: calls.clone(),
     };
-    let engine = engine::Builder::new()
+    let engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(LifecycleStore::fail_close(calls.clone()))
@@ -3089,7 +3089,7 @@ async fn engine_start_opens_runs_and_closes_resources() {
         calls: calls.clone(),
     };
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(LifecycleStore::new(calls.clone()))
@@ -3119,7 +3119,7 @@ async fn engine_runs_request_response_and_item_middleware_hooks_in_order() {
     let middleware = LifecycleMiddleware {
         calls: calls.clone(),
     };
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(halo::harbor::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(MiddlewareSpider::new())
@@ -3149,7 +3149,7 @@ async fn engine_start_closes_resources_when_spider_start_fails() {
         calls: calls.clone(),
     };
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(LifecycleStore::new(calls.clone()))
@@ -3180,7 +3180,7 @@ async fn start_item_store_failure_keeps_store_error_and_closes_resources() {
     let downloader = LifecycleDownload {
         calls: calls.clone(),
     };
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(LifecycleStore::fail_submit(calls.clone()))
@@ -3214,7 +3214,7 @@ async fn start_item_store_failure_keeps_store_error_and_closes_resources() {
 
 #[tokio::test]
 async fn engine_reports_start_task_panic_without_hanging() {
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(halo::harbor::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(PanicStartSpider::new())
@@ -3231,7 +3231,7 @@ async fn engine_reports_start_task_panic_without_hanging() {
 #[tokio::test]
 async fn spider_start_error_submits_accepted_output_without_claiming_it() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(halo::harbor::Memory::new())
         .with_downloader(TestDownload)
         .with_spider(StartEmitFailSpider::new(calls.clone()))
@@ -3255,7 +3255,7 @@ async fn engine_start_closes_resources_when_event_push_fails() {
         calls: calls.clone(),
     };
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(LifecycleStore::new(calls.clone()))
@@ -3285,7 +3285,7 @@ async fn engine_reports_output_failure_after_the_sender_is_cancelled() {
     let gate = Arc::new(PushGate::new());
     let task = Arc::new(Mutex::new(None));
     let scheduler = LifecycleScheduler::fail_push(calls).gate_push(gate.clone());
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(CancelledOutputSpider::new(task.clone()))
@@ -3316,7 +3316,7 @@ async fn engine_start_closes_resources_when_downloader_open_fails() {
         calls: calls.clone(),
     };
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_spider(spider)
@@ -3338,7 +3338,7 @@ async fn engine_open_closes_prior_resources_when_store_open_fails() {
     let downloader = LifecycleDownload {
         calls: calls.clone(),
     };
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(LifecycleStore::fail_open(calls.clone()))
@@ -3371,7 +3371,7 @@ async fn executor_completes_current_request() {
         .await
         .unwrap();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(EmptySpider::new())
@@ -3390,7 +3390,7 @@ async fn engine_starts_until_scheduler_is_empty() {
     let spider = StartSpider::new();
     let scheduler = halo::harbor::Memory::new();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(spider)
@@ -3411,7 +3411,7 @@ async fn engine_waits_for_output_sent_after_the_request_task_finishes() {
     let pushed_items = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(pushed_requests.clone(), records);
     let store = RecordingStore::new(pushed_items.clone());
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_store(store)
         .with_downloader(TestDownload)
@@ -3456,7 +3456,7 @@ async fn engine_waits_for_detached_item_submit_before_closing_store() {
     let downloader = LifecycleDownload {
         calls: calls.clone(),
     };
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_store(GatedStore {
@@ -3508,7 +3508,7 @@ async fn stale_empty_claim_is_rechecked_after_detached_output() {
         Arc::new(Mutex::new(Vec::new())),
     )
     .with_stale_claim(sync.clone());
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(StaleClaimSpider::new(sync))
@@ -3549,7 +3549,7 @@ graph:
     let pushed_items = Arc::new(Mutex::new(Vec::new()));
     let scheduler = RecordingScheduler::new(pushed_requests.clone(), records);
     let store = RecordingStore::new(pushed_items.clone());
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_store(store)
         .with_rules(config)
@@ -3595,7 +3595,7 @@ async fn engine_submits_start_items_to_store() {
     let items = Arc::new(Mutex::new(Vec::new()));
     let store = RecordingStore::new(items.clone());
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_store(store)
         .with_downloader(TestDownload)
@@ -3615,7 +3615,7 @@ async fn engine_submits_start_items_to_store() {
 async fn replacing_scheduler_does_not_change_store_submission() {
     let items = Arc::new(Mutex::new(Vec::new()));
 
-    let mut memory = engine::Builder::new()
+    let mut memory = engine::Engine::new()
         .with_scheduler(halo::harbor::Memory::new())
         .with_store(RecordingStore::new(items.clone()))
         .with_downloader(TestDownload)
@@ -3623,7 +3623,7 @@ async fn replacing_scheduler_does_not_change_store_submission() {
         .build();
     memory.start_until_idle().await.unwrap();
 
-    let mut alternate = engine::Builder::new()
+    let mut alternate = engine::Engine::new()
         .with_scheduler(LifecycleScheduler::new(Arc::new(Mutex::new(Vec::new()))))
         .with_store(RecordingStore::new(items.clone()))
         .with_downloader(TestDownload)
@@ -3636,7 +3636,7 @@ async fn replacing_scheduler_does_not_change_store_submission() {
 
 #[tokio::test]
 async fn builder_uses_memory_scheduler_and_jsonl_store_by_default() {
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_spider(EmptySpider::new())
         .build();
 
@@ -3656,7 +3656,7 @@ async fn spider_macro_keeps_user_business_fields_and_injects_tx() {
     });
     let scheduler = halo::harbor::Memory::new();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(spider)
@@ -3683,7 +3683,7 @@ async fn engine_records_failed_request_and_continues_other_requests() {
         .await
         .unwrap();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(spider)
@@ -3721,7 +3721,7 @@ async fn engine_concurrency_controls_concurrent_requests() {
         max_active: max_active.clone(),
     };
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(downloader)
         .with_spider(spider)
@@ -3744,7 +3744,7 @@ async fn engine_refreshes_the_lease_while_a_request_is_running() {
         .push(payload::Payload::new().requests(vec![bound_request("https://example.com/slow")]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -3769,7 +3769,7 @@ async fn slow_lease_refresh_does_not_pause_request_execution() {
         .push(payload::Payload::new().requests(vec![bound_request("https://example.com/slow")]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -3800,7 +3800,7 @@ async fn transient_refresh_errors_are_retried_before_the_lease_expires() {
         .push(payload::Payload::new().requests(vec![bound_request("https://example.com/slow")]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -3829,7 +3829,7 @@ async fn lease_is_refreshed_until_completion_finishes() {
         )
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(EmptySpider::new())
@@ -3851,7 +3851,7 @@ async fn engine_does_not_settle_after_lease_refresh_is_rejected() {
         .push(payload::Payload::new().requests(vec![bound_request("https://example.com/slow")]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -3895,7 +3895,7 @@ async fn tx_events_keep_current_request_context_and_inherit_trace_fields() {
         .await
         .unwrap();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_store(store)
         .with_downloader(TestDownload)
@@ -3967,7 +3967,7 @@ async fn rejected_requests_only_fail_current_request_and_keep_consuming() {
         .await
         .unwrap();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(EventSpider::new())
@@ -4015,7 +4015,7 @@ async fn rejected_items_only_fail_current_request_and_keep_consuming() {
         .await
         .unwrap();
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_store(store)
         .with_downloader(TestDownload)
@@ -4065,7 +4065,7 @@ async fn independent_items_run_concurrently() {
         .push(payload::Payload::new().requests(requests))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(EventSpider::new())
@@ -4097,7 +4097,7 @@ async fn engine_retries_transient_success_error_without_reexecution() {
         ]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(SlowDownload {
             active: Arc::new(AtomicUsize::new(0)),
@@ -4136,7 +4136,7 @@ async fn engine_retries_the_same_success_payload_after_a_lost_response() {
         .push(payload::Payload::new().requests(vec![bound_request("https://example.com/one")]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(LifecycleDownload {
             calls: calls.clone(),
@@ -4180,7 +4180,7 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
         .push(payload::Payload::new().requests(vec![request]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(RetryDownload {
             attempts: downloads.clone(),
@@ -4227,7 +4227,7 @@ async fn claim_returning_after_a_request_error_still_executes_its_request() {
         ]))
         .await
         .unwrap();
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(scheduler)
         .with_downloader(TestDownload)
         .with_spider(EmptySpider::new())

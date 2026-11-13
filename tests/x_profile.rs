@@ -44,7 +44,7 @@ async fn x_profile_rules_fetch_posts_and_items() {
         .with_headless(false);
     let downloader = Downloader::new().with_browser(browser);
 
-    let mut engine = engine::Builder::new()
+    let mut engine = engine::Engine::new()
         .with_scheduler(Memory::new().with_modes([Mode::Browser]))
         .with_downloader(downloader)
         .with_rules(config)
