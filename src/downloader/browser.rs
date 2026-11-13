@@ -779,15 +779,16 @@ async fn login_check(
             return Ok(false);
         }
     }
-    if !check.cookie.is_empty()
-        && !driver
+    if !check.cookie.is_empty() {
+        let found = driver
             .get_all_cookies()
             .await
             .map_err(driver_error)?
             .iter()
-            .any(|cookie| cookie.name == check.cookie)
-    {
-        return Ok(false);
+            .any(|cookie| cookie.name == check.cookie);
+        if !found {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
