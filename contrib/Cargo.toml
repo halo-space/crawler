@@ -1,6 +1,6 @@
 [package]
 name = "halo-harbor-contrib"
-version = "0.2.8"
+version = "0.2.9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -26,7 +26,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
-harbor = { package = "halo-harbor", path = "..", version = "0.1.5" }
+harbor = { package = "halo-harbor", path = "..", version = "0.1.6" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
