@@ -63,18 +63,19 @@ impl Load for Redis {
     > {
         Box::pin(async move {
             let mut connection = self.manager().await?;
-            let Some((_key, encoded)) = redis::cmd("BLPOP")
-                .arg(&self.key)
-                .arg(0)
-                .query_async::<Option<(String, String)>>(&mut connection)
-                .await
-                .map_err(redis_error)?
-            else {
-                return Ok(None);
-            };
-            serde_json::from_str(&encoded)
-                .map(Some)
-                .map_err(|error| Error::Message(format!("Redis Load decode failed: {error}")))
+            loop {
+                let encoded: Option<String> = redis::cmd("LPOP")
+                    .arg(&self.key)
+                    .query_async(&mut connection)
+                    .await
+                    .map_err(redis_error)?;
+                if let Some(encoded) = encoded {
+                    return serde_json::from_str(&encoded)
+                        .map(Some)
+                        .map_err(|error| Error::Message(format!("Redis Load decode failed: {error}")));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
         })
     }
 }

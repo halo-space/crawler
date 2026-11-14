@@ -52,21 +52,21 @@ graph:
             - kind: regex
               expr: "[0-9]{6},[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,([^,]*),"
       binds:
-        fund_codes:
-          kind: pipeline
-          from: "$fields.fund_codes"
-        next_page:
+        p_page:
           kind: pipeline
           from: "$vals.page"
           transforms:
             - kind: add
               value: 1
-        next_url:
+        fund_codes:
+          kind: pipeline
+          from: "$fields.fund_codes"
+        p_next_url:
           kind: template
           template: "https://fund.eastmoney.com/data/rankhandler.aspx?op=ph&dt=kf&ft=all&rs=&gs=0&sc=1nzf&st=desc&sd=2025-11-07&ed=2026-11-07&qdii=&tabSubtype=,,,,,&pi={page}&pn=50&dx=1"
           vars:
             page:
-              from: "$binds.next_page"
+              from: "$binds.p_page"
         overview_urls:
           kind: template
           template: "https://fundf10.eastmoney.com/jbgk_{fund_code}.html"
@@ -163,14 +163,14 @@ graph:
       request:
         node: ranking
         url:
-          from: "$binds.next_url"
+          from: "$binds.p_next_url"
         method: GET
         download_mode: http
         headers:
           Referer: "https://fund.eastmoney.com/data/fundranking.html"
         vals:
           page:
-            from: "$binds.next_page"
+            from: "$binds.p_page"
 
     - from: ranking
       kind: item
@@ -199,6 +199,12 @@ graph:
         method: GET
         download_mode: browser
         wait_selector: "table.info"
+        middlewares:
+          - name: dedup
+            hook: before_scheduler
+            args:
+              key: ["$request.url"]
+              ttl: -1
         vals:
           fund_code:
             from: "$binds.fund_codes"
@@ -214,6 +220,12 @@ graph:
         method: GET
         download_mode: browser
         wait_selector: "#cctable table"
+        middlewares:
+          - name: dedup
+            hook: before_scheduler
+            args:
+              key: ["$request.url"]
+              ttl: -1
         vals:
           fund_code:
             from: "$binds.fund_codes"
@@ -229,6 +241,12 @@ graph:
         method: GET
         download_mode: browser
         wait_selector: "#hypztable table"
+        middlewares:
+          - name: dedup
+            hook: before_scheduler
+            args:
+              key: ["$request.url"]
+              ttl: -1
         vals:
           fund_code:
             from: "$binds.fund_codes"
