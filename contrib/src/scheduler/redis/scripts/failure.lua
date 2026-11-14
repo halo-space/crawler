@@ -142,7 +142,7 @@ if redis.call('EXISTS', completion) == 1 then
     if redis.call('HGET', completion, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
     if redis.call('HGET', completion, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
     if redis.call('HGET', completion, 'node') ~= payload.node then return 'NODE_MISMATCH' end
-    if redis.call('HGET', completion, 'state') ~= payload.state then return 'STATE_MISMATCH' end
+    if redis.call('HGET', completion, 'state') ~= tostring(payload.state) then return 'STATE_MISMATCH' end
     if redis.call('HGET', completion, 'worker_id') ~= scheduler_worker_id then return 'LEASE_MISMATCH' end
     return 'OK'
 end
@@ -153,7 +153,7 @@ if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MI
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
-if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
+if redis.call('HGET', key, 'state') ~= '1' then return 'STATE_MISMATCH' end
 local worker_id = redis.call('HGET', key, 'leased_by')
 if worker_id ~= scheduler_worker_id then return 'LEASE_MISMATCH' end
 
@@ -199,8 +199,12 @@ if retry < retry_limit then
     if not has_type(ready_events, 'zset') then return 'CORRUPT_READY_EVENTS' end
 end
 
-local stats, stats_error = merged_stats()
-if not stats then return stats_error end
+local stats = {}
+if retry >= retry_limit then
+    local merged, stats_error = merged_stats()
+    if not merged then return stats_error end
+    stats = merged
+end
 
 local sequence = nil
 if retry < retry_limit then
@@ -240,13 +244,13 @@ if retry < retry_limit then
         redis.call('ZADD', exclusions, 0, worker_segment(worker) .. '|' .. segment)
     end
     redis.call('HSET', key,
-        'state', 'pending', 'retry_count', retry, 'max_retry_count', retry_limit, 'next_time', '0',
+        'state', '0', 'retry_count', retry, 'max_retry_count', retry_limit, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', 'ready', 'queue_member', member, 'ready_event', event,
         'updated_time', now)
 else
     redis.call('HSET', key,
-        'state', 'failed', 'retry_count', retry, 'max_retry_count', retry_limit, 'next_time', '0',
+        'state', '3', 'retry_count', retry, 'max_retry_count', retry_limit, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)
 end

@@ -143,17 +143,19 @@ pub(super) fn apply_stats(
     trace_id: String,
     counters: Vec<(String, stats::Counter)>,
 ) {
+    state.touch_trace(&trace_id);
     let trace_stats = state.trace_stats.entry(trace_id).or_default();
     for (name, counter) in counters {
         trace_stats.insert(name, counter);
     }
 }
 
-pub(super) fn retry(
-    state: &mut State,
-    mut request: net::Request,
-    worker_id: &str,
-) -> Option<String> {
+pub(super) enum RetryOutcome {
+    Requeued(Box<net::request::Snapshot>),
+    Failed(Option<String>),
+}
+
+pub(super) fn retry(mut request: net::Request, worker_id: &str) -> RetryOutcome {
     if !request
         .failed_workers
         .iter()
@@ -162,8 +164,7 @@ pub(super) fn retry(
         request.failed_workers.push(worker_id.to_string());
     }
     let Some(retry_count) = request.retry_count.checked_add(1) else {
-        state.failed += 1;
-        return Some(format!("request retry overflow: {}", request.id));
+        return RetryOutcome::Failed(Some(format!("request retry overflow: {}", request.id)));
     };
     request.retry_count = retry_count;
 
@@ -173,25 +174,16 @@ pub(super) fn retry(
         request.lease_time = 0;
         request.next_time = 0;
         match queue::snapshot(request.clone()) {
-            Ok(snapshot) => state.enqueue(snapshot, crate::utils::time::now_millis()),
-            Err(error) => {
-                request.state = net::State::Failed;
-                request.lease_time = crate::utils::time::now_millis();
-                request.next_time = 0;
-                state.failed += 1;
-                return Some(format!("Request cannot be queued: {error}"));
-            }
+            Ok(snapshot) => RetryOutcome::Requeued(Box::new(snapshot)),
+            Err(error) => RetryOutcome::Failed(Some(format!("Request cannot be queued: {error}"))),
         }
     } else {
-        request.state = net::State::Failed;
-        request.lease_time = crate::utils::time::now_millis();
-        request.next_time = 0;
-        state.failed += 1;
+        RetryOutcome::Failed(None)
     }
-    None
 }
 
 pub(super) fn record(state: &mut State, payload: &payload::Payload, worker_id: &str) {
+    state.touch_trace(&payload.trace_id);
     state.completed.insert(
         (payload.id.clone(), payload.version),
         Completion::new(payload, worker_id),
@@ -204,6 +196,7 @@ pub(super) fn record_error(
     worker_id: &str,
     error: impl Into<String>,
 ) {
+    state.touch_trace(&payload.trace_id);
     let mut completion = Completion::new(payload, worker_id);
     completion.state = net::State::Failed;
     let transition = error.into();

@@ -290,6 +290,11 @@ impl scheduler::Scheduler for Redis {
         self.refresh(payload, self.worker.id()?).await
     }
 
+    async fn recover_worker(&self, worker_id: &str) -> Result<usize, scheduler::Error> {
+        let _activity = self.enter().await?;
+        self.recover_offline_worker(worker_id).await
+    }
+
     async fn success(&self, payload: &payload::Payload) -> Result<(), scheduler::Error> {
         let _activity = self.enter().await?;
         self.succeed(payload, self.worker.id()?).await

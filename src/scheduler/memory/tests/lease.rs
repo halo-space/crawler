@@ -57,7 +57,7 @@ async fn refresh_lease_updates_an_acknowledged_lease() {
 }
 
 #[tokio::test]
-async fn lease_refresh_prevents_reclaim_until_it_stops() {
+async fn lease_expiry_does_not_reclaim_an_online_request() {
     let policy = scheduler::Lease::new(
         std::time::Duration::from_millis(40),
         std::time::Duration::from_millis(10),
@@ -82,8 +82,6 @@ async fn lease_refresh_prevents_reclaim_until_it_stops() {
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let reclaimed = scheduler.next_requests(1).await.unwrap().pop().unwrap();
-    assert_eq!(reclaimed.id, claimed.id);
-    assert_eq!(reclaimed.version, claimed.version + 1);
-    assert_eq!(reclaimed.failed_workers, [WORKER]);
+    assert!(scheduler.next_requests(1).await.unwrap().is_empty());
+    assert_eq!(scheduler.processing_len(), 1);
 }

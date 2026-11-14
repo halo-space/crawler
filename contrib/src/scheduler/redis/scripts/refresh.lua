@@ -17,7 +17,7 @@ if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MI
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
-if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
+if redis.call('HGET', key, 'state') ~= '1' then return 'STATE_MISMATCH' end
 if redis.call('HGET', key, 'leased_by') ~= worker_id then return 'LEASE_MISMATCH' end
 
 local time = redis.call('TIME')

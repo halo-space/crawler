@@ -179,7 +179,7 @@ async fn malformed_records_do_not_discard_valid_claims_from_the_same_call() {
         .query_async::<i32>(&mut connection)
         .await
         .unwrap();
-    assert_eq!(trace_state, "pending");
+    assert_eq!(trace_state, "0");
     assert_eq!(trace_retry, 0);
     let trace_failed_workers = redis::cmd("LLEN")
         .arg(key::failed_workers(&namespace, "broken-trace"))
@@ -195,7 +195,7 @@ async fn malformed_records_do_not_discard_valid_claims_from_the_same_call() {
             .query_async::<String>(&mut connection)
             .await
             .unwrap();
-        assert_eq!(state, "failed");
+        assert_eq!(state, "3");
     }
 
     redis::cmd("HSET")
@@ -296,7 +296,7 @@ async fn failed_recovery_does_not_withhold_a_valid_claim() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(damaged_state, "processing");
+    assert_eq!(damaged_state, "1");
 
     scheduler.close().await.unwrap();
     server.clear(&namespace).await;
@@ -534,7 +534,7 @@ async fn claim_recovery_uses_the_original_queue_segment_not_the_stored_id() {
     assert_eq!(claimed[0].id, "segment-b");
     settlement::succeed(&scheduler, &claimed[0]).await;
 
-    for (id, expected) in [("segment-a", "failed"), ("segment-b", "done")] {
+    for (id, expected) in [("segment-a", "3"), ("segment-b", "2")] {
         let state = redis::cmd("HGET")
             .arg(key::request(&namespace, id))
             .arg("state")
@@ -576,15 +576,6 @@ async fn corrupt_expired_lease_does_not_block_valid_claims() {
         .arg(key::request(&namespace, "expired-damaged"))
         .arg("priority")
         .arg("not-an-integer")
-        .arg("lease_time")
-        .arg("0")
-        .query_async::<usize>(&mut connection)
-        .await
-        .unwrap();
-    redis::cmd("ZADD")
-        .arg(key::processing(&namespace, "http"))
-        .arg(0)
-        .arg(key::segment("expired-damaged"))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
@@ -594,7 +585,7 @@ async fn corrupt_expired_lease_does_not_block_valid_claims() {
     settlement::succeed(&worker_b, &valid).await;
 
     let key = key::request(&namespace, "expired-damaged");
-    for (field, expected) in [("state", "failed"), ("leased_by", ""), ("lease_time", "0")] {
+    for (field, expected) in [("state", "1")] {
         let value = redis::cmd("HGET")
             .arg(&key)
             .arg(field)
@@ -669,7 +660,7 @@ async fn corrupt_ready_members_are_quarantined_without_blocking_valid_claims() {
         .query_async::<String>(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "3");
     let exists = redis::cmd("ZSCORE")
         .arg(&ready)
         .arg(malformed)
@@ -776,7 +767,7 @@ async fn corrupt_queue_pointers_cannot_remove_another_request() {
     assert_eq!(claimed[0].id, "pointer-b");
     settlement::succeed(&scheduler, &claimed[0]).await;
 
-    for (id, expected) in [("pointer-a", "failed"), ("pointer-b", "done")] {
+    for (id, expected) in [("pointer-a", "3"), ("pointer-b", "2")] {
         let state = redis::cmd("HGET")
             .arg(key::request(&namespace, id))
             .arg("state")
@@ -840,7 +831,7 @@ async fn mismatched_processing_scores_are_repaired_without_blocking_work() {
         .query_async::<String>(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "processing");
+    assert_eq!(state, "1");
     let score = redis::cmd("ZSCORE")
         .arg(&processing)
         .arg(key::segment("lease-damaged"))
@@ -890,7 +881,7 @@ async fn malformed_future_delayed_members_do_not_keep_the_scheduler_pending() {
 }
 
 #[tokio::test]
-async fn claim_bounds_expired_lease_recovery() {
+async fn claim_does_not_recover_an_online_workers_requests() {
     const RECOVERY_LIMIT: usize = 64;
 
     let Some(server) = server::Handle::connect().await else {
@@ -913,35 +904,19 @@ async fn claim_bounds_expired_lease_recovery() {
     let claimed = scheduler.next_requests(RECOVERY_LIMIT + 1).await.unwrap();
     assert_eq!(claimed.len(), RECOVERY_LIMIT + 1);
 
-    let mut connection = server.connection().await;
     let processing = key::processing(&namespace, "http");
-    for request in &claimed {
-        redis::cmd("HSET")
-            .arg(key::request(&namespace, &request.id))
-            .arg("lease_time")
-            .arg("0")
-            .query_async::<usize>(&mut connection)
-            .await
-            .unwrap();
-        redis::cmd("ZADD")
-            .arg(&processing)
-            .arg(0)
-            .arg(key::segment(&request.id))
-            .query_async::<usize>(&mut connection)
-            .await
-            .unwrap();
-    }
-
     let next = worker_b.next_requests(1).await.unwrap();
-    assert_eq!(next.len(), 1);
+    assert!(next.is_empty());
+    let mut connection = server.connection().await;
     let remaining = redis::cmd("ZCARD")
         .arg(&processing)
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
     assert_eq!(
-        remaining, 2,
-        "one old lease and one newly claimed lease remain"
+        remaining,
+        RECOVERY_LIMIT + 1,
+        "online Worker requests stay in processing"
     );
 
     scheduler.close().await.unwrap();
@@ -961,7 +936,7 @@ async fn assert_settlement_is_unchanged(
         .query_async::<String>(&mut *connection)
         .await
         .unwrap();
-    assert_eq!(state, "processing");
+    assert_eq!(state, "1");
     let completion_exists = redis::cmd("EXISTS")
         .arg(key::completion(namespace, &request.id, request.version))
         .query_async::<usize>(&mut *connection)

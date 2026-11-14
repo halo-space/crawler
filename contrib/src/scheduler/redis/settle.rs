@@ -6,12 +6,12 @@ use super::error::redis as redis_error;
 use super::key;
 use super::validate;
 
-fn state(value: harbor::net::State) -> &'static str {
+fn state(value: harbor::net::State) -> u8 {
     match value {
-        harbor::net::State::Pending => "pending",
-        harbor::net::State::Processing => "processing",
-        harbor::net::State::Done => "done",
-        harbor::net::State::Failed => "failed",
+        harbor::net::State::Pending => 0,
+        harbor::net::State::Processing => 1,
+        harbor::net::State::Done => 2,
+        harbor::net::State::Failed => 3,
     }
 }
 
@@ -22,7 +22,7 @@ struct Execution {
     trace_id: String,
     node: String,
     version: String,
-    state: String,
+    state: u8,
     error: Option<String>,
     stats: Vec<Stat>,
 }
@@ -79,7 +79,7 @@ impl Execution {
             trace_id: payload.trace_id.clone(),
             node: payload.node.clone(),
             version: payload.version.to_string(),
-            state: state(payload.state).to_string(),
+            state: state(payload.state),
             error: payload.error.clone(),
             stats,
         })

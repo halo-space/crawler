@@ -68,6 +68,10 @@ impl Keys {
         self.key(&format!("worker:{}", segment(worker_id)))
     }
 
+    pub(super) fn processing(&self, mode: &str) -> String {
+        self.key(&format!("processing:{mode}"))
+    }
+
     fn key(&self, suffix: &str) -> String {
         format!("{}:{suffix}", self.namespace)
     }

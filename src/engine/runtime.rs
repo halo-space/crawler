@@ -2,6 +2,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::FutureExt;
 use kameo::actor::Spawn;
@@ -12,9 +13,11 @@ use crate::{downloader, engine, middleware, scheduler};
 pub const MAX_REQUEST_CONCURRENCY: usize = 16;
 pub const MAX_EVENTS: usize = 32;
 pub const DEFAULT_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const TASK_INIT_ATTEMPTS: usize = 5;
+const TASK_INIT_BACKOFF: Duration = Duration::from_millis(100);
 
 type ShutdownSignal = Pin<Box<dyn Future<Output = Result<(), crate::Error>> + Send>>;
-pub(super) type Seed<S> = Arc<
+pub(super) type TaskInitializer<S> = Arc<
     dyn Fn(
             Arc<S>,
             crate::load::Message,
@@ -22,6 +25,8 @@ pub(super) type Seed<S> = Arc<
         + Send
         + Sync,
 >;
+pub(super) type TaskValidator =
+    Arc<dyn Fn(&crate::load::Message) -> Result<(), crate::Error> + Send + Sync>;
 
 pub(super) struct Setup<S, D, E, O> {
     pub(super) scheduler: S,
@@ -32,7 +37,8 @@ pub(super) struct Setup<S, D, E, O> {
     pub(super) registry: middleware::Registry,
     pub(super) middlewares: Vec<middleware::Spec>,
     pub(super) load: Option<Arc<dyn crate::load::Load>>,
-    pub(super) seed: Option<Seed<S>>,
+    pub(super) load_validator: Option<TaskValidator>,
+    pub(super) task_initializer: Option<TaskInitializer<S>>,
 }
 
 pub struct Runtime<S, D, E, N = engine::NoInit, O = crate::item::Jsonl> {
@@ -44,7 +50,8 @@ pub struct Runtime<S, D, E, N = engine::NoInit, O = crate::item::Jsonl> {
     registry: Arc<middleware::Registry>,
     middlewares: Arc<Vec<middleware::Spec>>,
     load: Option<Arc<dyn crate::load::Load>>,
-    seed: Option<Seed<S>>,
+    load_validator: Option<TaskValidator>,
+    task_initializer: Option<TaskInitializer<S>>,
     concurrency: usize,
     claim_limit: Option<usize>,
     event_limit: usize,
@@ -67,7 +74,8 @@ where
             registry: Arc::new(setup.registry),
             middlewares: Arc::new(setup.middlewares),
             load: setup.load,
-            seed: setup.seed,
+            load_validator: setup.load_validator,
+            task_initializer: setup.task_initializer,
             concurrency: MAX_REQUEST_CONCURRENCY,
             claim_limit: None,
             event_limit: MAX_EVENTS,
@@ -89,7 +97,8 @@ impl<S, D, E, N, O> Runtime<S, D, E, N, O> {
             registry: self.registry,
             middlewares: self.middlewares,
             load: self.load,
-            seed: self.seed,
+            load_validator: self.load_validator,
+            task_initializer: self.task_initializer,
             concurrency: self.concurrency,
             claim_limit: self.claim_limit,
             event_limit: self.event_limit,
@@ -364,12 +373,17 @@ where
         let actor_ref = prepared.actor_ref().clone();
         events.bind(actor_ref.clone().reply_recipient::<Event>())?;
         let mut handle = prepared.spawn((actor, init));
-        let load_task = match (self.load.as_ref(), self.seed.as_ref()) {
-            (Some(load), Some(seed)) => {
+        let load_task = match (self.load.as_ref(), self.task_initializer.as_ref()) {
+            (Some(load), Some(initializer)) => {
                 let scheduler = self.scheduler.clone();
                 let load = Arc::clone(load);
-                let seed = Arc::clone(seed);
-                Some(tokio::spawn(load_runs(scheduler, load, seed)))
+                let initializer = Arc::clone(initializer);
+                Some(tokio::spawn(load_tasks(
+                    scheduler,
+                    load,
+                    self.load_validator.clone(),
+                    initializer,
+                )))
             }
             _ => None,
         };
@@ -420,15 +434,40 @@ where
     }
 }
 
-async fn load_runs<S>(scheduler: Arc<S>, load: Arc<dyn crate::load::Load>, seed: Seed<S>)
-where
+async fn load_tasks<S>(
+    scheduler: Arc<S>,
+    load: Arc<dyn crate::load::Load>,
+    validator: Option<TaskValidator>,
+    initializer: TaskInitializer<S>,
+) where
     S: scheduler::Scheduler + 'static,
 {
     loop {
         match load.load().await {
             Ok(Some(message)) => {
-                if let Err(error) = seed(Arc::clone(&scheduler), message).await {
-                    tracing::error!(error = %error, "failed to seed a loaded crawler task");
+                let task_id = message.task_id.clone();
+                let trace_id = message.trace_id.clone();
+                if let Some(validator) = &validator
+                    && let Err(error) = validator(&message)
+                {
+                    tracing::error!(
+                        task_id = %task_id,
+                        trace_id = %trace_id,
+                        error = %error,
+                        "loaded crawler task failed runtime validation"
+                    );
+                    continue;
+                }
+                if let Err(error) =
+                    init_task_with_retry(Arc::clone(&scheduler), Arc::clone(&initializer), message)
+                        .await
+                {
+                    tracing::error!(
+                        task_id = %task_id,
+                        trace_id = %trace_id,
+                        error = %error,
+                        "failed to initialize loaded crawler task"
+                    );
                 }
             }
             Ok(None) => return,
@@ -440,7 +479,44 @@ where
     }
 }
 
-pub(super) async fn seed_run<S>(
+async fn init_task_with_retry<S>(
+    scheduler: Arc<S>,
+    initializer: TaskInitializer<S>,
+    message: crate::load::Message,
+) -> Result<(), crate::Error>
+where
+    S: scheduler::Scheduler + 'static,
+{
+    for attempt in 0..TASK_INIT_ATTEMPTS {
+        match initializer(Arc::clone(&scheduler), message.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if is_transient_task_init_error(&error) && attempt + 1 < TASK_INIT_ATTEMPTS =>
+            {
+                let multiplier = u32::try_from(attempt + 1).unwrap_or(u32::MAX);
+                let delay = TASK_INIT_BACKOFF.saturating_mul(multiplier);
+                tracing::warn!(
+                    task_id = %message.task_id,
+                    trace_id = %message.trace_id,
+                    attempt = attempt + 1,
+                    delay_ms = delay.as_millis(),
+                    error = %error,
+                    "task initialization failed; retrying"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("task initialization attempts must be positive")
+}
+
+fn is_transient_task_init_error(error: &crate::Error) -> bool {
+    matches!(error, crate::Error::Scheduler(error) if error.is_transient())
+}
+
+pub(super) async fn init_task<S>(
     scheduler: Arc<S>,
     message: crate::load::Message,
 ) -> Result<(), crate::Error>
@@ -468,14 +544,14 @@ where
         .map_err(crate::Error::Scheduler)
 }
 
-pub(super) fn seed_callback<S>(
+pub(super) fn task_initializer<S>(
     scheduler: Arc<S>,
     message: crate::load::Message,
 ) -> Pin<Box<dyn Future<Output = Result<(), crate::Error>> + Send>>
 where
     S: scheduler::Scheduler + scheduler::Init + 'static,
 {
-    Box::pin(seed_run(scheduler, message))
+    Box::pin(init_task(scheduler, message))
 }
 
 fn lifecycle_result(

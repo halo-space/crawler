@@ -166,7 +166,7 @@ async fn malformed_ready_member_clears_its_referenced_event() {
         .query_async::<String>(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "3");
     assert_eq!(cardinality(&server, ready(&namespace)).await, 0);
     assert_eq!(cardinality(&server, events(&namespace)).await, 0);
 
@@ -203,7 +203,7 @@ async fn dangling_terminal_member_clears_exclusions_before_pending_is_reused() {
     redis::cmd("HSET")
         .arg(key::request(&namespace, "stale"))
         .arg("state")
-        .arg("done")
+        .arg("2")
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();

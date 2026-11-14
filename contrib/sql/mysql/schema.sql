@@ -27,7 +27,7 @@ CREATE TABLE requests (
     priority INT NOT NULL,
     snapshot JSON NOT NULL,
     snapshot_hash BINARY(32) NOT NULL,
-    state VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
+    state TINYINT UNSIGNED NOT NULL,
     version BIGINT NOT NULL,
     next_time BIGINT NOT NULL,
     leased_by VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT '',
@@ -44,7 +44,7 @@ CREATE TABLE requests (
     KEY idx_requests_worker (state, leased_by, id),
     KEY idx_requests_cleanup (state, updated_time, id),
     CONSTRAINT chk_requests_mode CHECK (mode IN ('http', 'browser')),
-    CONSTRAINT chk_requests_state CHECK (state IN ('pending', 'processing', 'done', 'failed')),
+    CONSTRAINT chk_requests_state CHECK (state BETWEEN 0 AND 3),
     CONSTRAINT chk_requests_version CHECK (version >= 0),
     CONSTRAINT chk_requests_next_time CHECK (next_time >= 0),
     CONSTRAINT chk_requests_retry CHECK (
@@ -56,8 +56,8 @@ CREATE TABLE requests (
         ack_version IS NULL OR (ack_version > 0 AND ack_version = version)
     ),
     CONSTRAINT chk_requests_lease CHECK (
-        (state = 'processing' AND leased_by <> '' AND lease_time > 0)
-        OR (state <> 'processing' AND leased_by = '' AND lease_time = 0 AND ack_version IS NULL)
+        (state = 1 AND leased_by <> '' AND lease_time > 0)
+        OR (state <> 1 AND leased_by = '' AND lease_time = 0 AND ack_version IS NULL)
     ),
     CONSTRAINT chk_requests_time CHECK (updated_time >= created_time)
 ) ENGINE = InnoDB DEFAULT CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_bin;
@@ -107,7 +107,7 @@ CREATE TABLE completions (
     trace_id VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
     node VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
     worker_id VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
-    state VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
+    state TINYINT UNSIGNED NOT NULL,
     error LONGTEXT NULL,
     start_time BIGINT NULL,
     end_time BIGINT NULL,
@@ -117,10 +117,10 @@ CREATE TABLE completions (
     KEY idx_completions_trace (trace_id, created_time, request_id, version),
     KEY idx_completions_cleanup (updated_time, request_id, version),
     CONSTRAINT chk_completions_version CHECK (version >= 0),
-    CONSTRAINT chk_completions_state CHECK (state IN ('done', 'failed')),
+    CONSTRAINT chk_completions_state CHECK (state IN (2, 3)),
     CONSTRAINT chk_completions_error CHECK (
-        (state = 'done' AND error IS NULL)
-        OR (state = 'failed' AND error IS NOT NULL AND CHAR_LENGTH(error) > 0)
+        (state = 2 AND error IS NULL)
+        OR (state = 3 AND error IS NOT NULL AND CHAR_LENGTH(error) > 0)
     ),
     CONSTRAINT chk_completions_execution_time CHECK (
         (start_time IS NULL AND end_time IS NULL)

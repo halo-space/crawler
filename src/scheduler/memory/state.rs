@@ -14,6 +14,7 @@ pub(super) struct State {
     pub(super) done: usize,
     pub(super) failed: usize,
     pub(super) trace_stats: HashMap<String, HashMap<String, stats::Counter>>,
+    pub(super) trace_activity: HashMap<String, i64>,
 }
 
 impl State {
@@ -48,6 +49,7 @@ impl State {
 
     pub(super) fn fail_request(&mut self, request: &net::Request, error: impl Into<String>) {
         self.failed += 1;
+        self.touch_trace(&request.trace_id);
         self.completed.insert(
             (request.id.clone(), request.version),
             Completion::failed(
@@ -68,6 +70,7 @@ impl State {
         error: impl Into<String>,
     ) {
         self.failed += 1;
+        self.touch_trace(&snapshot.trace_id);
         self.completed.insert(
             (snapshot.id.clone(), snapshot.version),
             Completion::failed(
@@ -80,6 +83,68 @@ impl State {
             ),
         );
     }
+
+    pub(super) fn touch_trace(&mut self, trace_id: &str) {
+        self.trace_activity
+            .insert(trace_id.to_string(), crate::utils::time::now_millis());
+    }
+
+    pub(super) fn cleanup(&mut self, before: i64) -> usize {
+        let mut active_ids = self.queue.request_ids();
+        active_ids.extend(self.processing.keys().cloned());
+
+        let removable_ids = self
+            .request_hashes
+            .keys()
+            .filter(|id| !active_ids.contains(*id))
+            .filter(|id| {
+                let mut entries = self
+                    .completed
+                    .iter()
+                    .filter(|((request_id, _), _)| request_id == *id);
+                entries.next().is_some()
+                    && entries.all(|(_, completion)| completion.completed_at < before)
+            })
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        self.completed
+            .retain(|(request_id, _), _| !removable_ids.contains(request_id));
+        self.request_hashes
+            .retain(|request_id, _| !removable_ids.contains(request_id));
+        self.acknowledged
+            .retain(|(request_id, _)| !removable_ids.contains(request_id));
+
+        let mut active_traces = self.queue.trace_ids();
+        active_traces.extend(
+            self.processing
+                .values()
+                .map(|request| request.trace_id.clone()),
+        );
+        let retained_traces = self
+            .completed
+            .values()
+            .map(|completion| completion.trace_id.as_str())
+            .collect::<HashSet<_>>();
+        let removable_traces = self
+            .trace_activity
+            .iter()
+            .filter(|(trace_id, updated_at)| {
+                **updated_at < before
+                    && !active_traces.contains(*trace_id)
+                    && !retained_traces.contains(trace_id.as_str())
+            })
+            .map(|(trace_id, _)| trace_id.clone())
+            .collect::<Vec<_>>();
+
+        for trace_id in removable_traces {
+            self.trace_activity.remove(&trace_id);
+            self.trace_snapshots.remove(&trace_id);
+            self.trace_stats.remove(&trace_id);
+        }
+
+        removable_ids.len()
+    }
 }
 
 #[derive(Debug)]
@@ -91,6 +156,7 @@ pub(super) struct Completion {
     pub(super) node: String,
     pub(super) state: net::State,
     pub(super) error: Option<String>,
+    pub(super) completed_at: i64,
 }
 
 impl Completion {
@@ -103,6 +169,7 @@ impl Completion {
             node: payload.node.clone(),
             state: payload.state,
             error: payload.error.clone(),
+            completed_at: crate::utils::time::now_millis(),
         }
     }
 
@@ -122,6 +189,7 @@ impl Completion {
             node,
             state: net::State::Failed,
             error: Some(error.into()),
+            completed_at: crate::utils::time::now_millis(),
         }
     }
 }

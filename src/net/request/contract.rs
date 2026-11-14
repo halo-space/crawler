@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use url::Url;
 
@@ -16,14 +17,46 @@ pub enum Mode {
     Browser,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum State {
     #[default]
-    Pending,
-    Processing,
-    Done,
-    Failed,
+    Pending = 0,
+    Processing = 1,
+    Done = 2,
+    Failed = 3,
+}
+
+impl TryFrom<u8> for State {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Pending),
+            1 => Ok(Self::Processing),
+            2 => Ok(Self::Done),
+            3 => Ok(Self::Failed),
+            _ => Err("Request state must be 0, 1, 2, or 3"),
+        }
+    }
+}
+
+impl Serialize for State {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
+impl<'de> Deserialize<'de> for State {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(u8::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -474,6 +507,23 @@ impl fmt::Debug for Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_uses_numeric_wire_values() {
+        for (state, value) in [
+            (State::Pending, 0),
+            (State::Processing, 1),
+            (State::Done, 2),
+            (State::Failed, 3),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), value);
+            assert_eq!(
+                serde_json::from_value::<State>(value.into()).unwrap(),
+                state
+            );
+        }
+        assert!(serde_json::from_value::<State>(4.into()).is_err());
+    }
 
     #[test]
     fn follow_requires_absolute_url() {

@@ -39,9 +39,9 @@ where
 }
 
 /// Runs the lease-specific scenarios for a fixture that explicitly exposes a lease policy.
-pub async fn lease<S>(scheduler: S, single_worker: bool, timing: Timing)
+pub async fn lease<S>(scheduler: S, timing: Timing)
 where
     S: harbor::Scheduler + harbor::scheduler::Init,
 {
-    leases::contract(scheduler, single_worker, timing).await;
+    leases::contract(scheduler, timing).await;
 }

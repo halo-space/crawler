@@ -163,6 +163,77 @@ async fn stats_merge_and_overflow_are_transactional() {
 }
 
 #[tokio::test]
+async fn retryable_failure_does_not_duplicate_stats() {
+    let Some(server) = server::Server::connect().await else {
+        return;
+    };
+    let database = server.database("stats-retry").await;
+    let scheduler = fixture::scheduler(database.url(), "worker-a");
+    let retry_scheduler = fixture::scheduler(database.url(), "worker-b");
+    fixture::open(&scheduler).await;
+    fixture::open(&retry_scheduler).await;
+    fixture::init(&scheduler).await;
+
+    let mut request = fixture::request("stats-retry-request");
+    request.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+
+    let first = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    scheduler.ack(&fixture::processing(&first)).await.unwrap();
+    let mut first_failure = fixture::failure(&first, "first");
+    first_failure.stats.insert(
+        "requests".to_string(),
+        serde_json::to_value(Counter {
+            total: 1,
+            download: 1,
+            ..Counter::default()
+        })
+        .unwrap(),
+    );
+    scheduler.failure(&first_failure).await.unwrap();
+
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM trace_stats WHERE trace_id = ? AND name = 'requests'",
+    )
+    .bind(fixture::TRACE_ID)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+
+    let second = retry_scheduler
+        .next_requests(1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    retry_scheduler
+        .ack(&fixture::processing(&second))
+        .await
+        .unwrap();
+    let mut final_failure = fixture::failure(&second, "final");
+    final_failure.stats = first_failure.stats;
+    retry_scheduler.failure(&final_failure).await.unwrap();
+
+    let row = sqlx::query(
+        "SELECT total, download FROM trace_stats WHERE trace_id = ? AND name = 'requests'",
+    )
+    .bind(fixture::TRACE_ID)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(row.get::<i64, _>("total"), 1);
+    assert_eq!(row.get::<i64, _>("download"), 1);
+
+    scheduler.close().await.unwrap();
+    retry_scheduler.close().await.unwrap();
+    database.remove().await;
+}
+
+#[tokio::test]
 async fn refresh_reads_database_time_after_locking_the_request() {
     let Some(server) = server::Server::connect().await else {
         return;

@@ -38,9 +38,9 @@ async fn invalid_initial_queue_state_records_a_version_zero_completion() {
     .fetch_one(database.pool())
     .await
     .unwrap();
-    assert_eq!(utf8(&row, "state"), "failed");
+    assert_eq!(row.try_get::<u8, _>("state").unwrap(), 3);
     assert_eq!(row.try_get::<i64, _>("version").unwrap(), 0);
-    assert_eq!(utf8(&row, "completion_state"), "failed");
+    assert_eq!(row.try_get::<u8, _>("completion_state").unwrap(), 3);
     assert!(utf8(&row, "error").contains("queue does not match"));
 
     scheduler.close().await.unwrap();
@@ -110,7 +110,7 @@ async fn missing_trace_is_released_without_consuming_a_retry() {
             .fetch_one(database.pool())
             .await
             .unwrap();
-    assert_eq!(utf8(&row, "state"), "pending");
+    assert_eq!(row.try_get::<u8, _>("state").unwrap(), 0);
     assert_eq!(row.try_get::<i32, _>("retry_count").unwrap(), 0);
     assert_eq!(utf8(&row, "leased_by"), "");
     assert_eq!(row.try_get::<i64, _>("lease_time").unwrap(), 0);
@@ -174,7 +174,7 @@ async fn immutable_snapshot_controls_the_retry_limit() {
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(utf8(&row, "state"), "failed");
+    assert_eq!(row.try_get::<u8, _>("state").unwrap(), 3);
     assert_eq!(row.try_get::<i32, _>("retry_count").unwrap(), 1);
     assert_eq!(row.try_get::<i32, _>("max_retry_count").unwrap(), 1);
 
@@ -216,7 +216,7 @@ async fn failure_uses_the_snapshot_retry_limit_after_a_claim() {
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(utf8(&row, "state"), "failed");
+    assert_eq!(row.try_get::<u8, _>("state").unwrap(), 3);
     assert_eq!(row.try_get::<i32, _>("retry_count").unwrap(), 1);
     assert_eq!(row.try_get::<i32, _>("max_retry_count").unwrap(), 1);
 
@@ -266,7 +266,7 @@ async fn damaged_snapshot_is_quarantined_without_trusting_mutable_retry_fields()
         .fetch_one(database.pool())
         .await
         .unwrap();
-    assert_eq!(utf8(&row, "state"), "failed");
+    assert_eq!(row.try_get::<u8, _>("state").unwrap(), 3);
     assert_eq!(row.try_get::<i32, _>("retry_count").unwrap(), 0);
     let failed_workers =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM failed_workers WHERE request_id = ?")

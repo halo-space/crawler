@@ -463,7 +463,7 @@ graph:
     );
     let scheduler = Arc::new(scheduler::Memory::new());
 
-    seed_run(Arc::clone(&scheduler), message).await.unwrap();
+    init_task(Arc::clone(&scheduler), message).await.unwrap();
 
     assert_eq!(scheduler.trace_ids(), vec!["trace-1"]);
     assert_eq!(scheduler.queued_len(), 1);
@@ -654,7 +654,8 @@ async fn signal_during_init_preserves_the_seed_without_starting_the_actor() {
         registry: middleware::Registry::new(),
         middlewares: Vec::new(),
         load: None,
-        seed: None,
+        load_validator: None,
+        task_initializer: None,
     })
     .with_init(BlockingInit {
         started: Arc::clone(&started),
@@ -734,7 +735,8 @@ async fn signal_drains_every_request_from_an_active_claim_without_claiming_again
         registry: middleware::Registry::new(),
         middlewares: Vec::new(),
         load: None,
-        seed: None,
+        load_validator: None,
+        task_initializer: None,
     });
     let (send_signal, received) = oneshot::channel::<()>();
     let mut shutdown: ShutdownSignal = Box::pin(async move {
@@ -779,7 +781,8 @@ async fn start_until_idle_uses_the_configured_idle_interval() {
         registry: middleware::Registry::new(),
         middlewares: Vec::new(),
         load: None,
-        seed: None,
+        load_validator: None,
+        task_initializer: None,
     })
     .with_idle_interval(interval);
 
@@ -809,7 +812,8 @@ async fn close_returns_the_first_error_and_logs_later_failures() {
         registry: middleware::Registry::new(),
         middlewares: Vec::new(),
         load: None,
-        seed: None,
+        load_validator: None,
+        task_initializer: None,
     });
     let recorded = Arc::new(Mutex::new(Vec::new()));
 
@@ -849,7 +853,8 @@ async fn lifecycle_returns_the_first_error_and_logs_cleanup_failures() {
         registry,
         middlewares: vec![middleware::Spec::new("failing-lifecycle")],
         load: None,
-        seed: None,
+        load_validator: None,
+        task_initializer: None,
     });
     let mut shutdown: ShutdownSignal = Box::pin(std::future::pending());
     let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -873,4 +878,57 @@ async fn lifecycle_returns_the_first_error_and_logs_cleanup_failures() {
         event.contains("Engine close failed after execution failed")
             && event.contains("downloader close failed")
     }));
+}
+
+#[tokio::test]
+async fn loaded_task_initialization_retries_transient_scheduler_errors() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let initializer: TaskInitializer<IdleScheduler> = {
+        let attempts = Arc::clone(&attempts);
+        Arc::new(move |_scheduler, _message| {
+            let attempts = Arc::clone(&attempts);
+            Box::pin(async move {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt < 4 {
+                    Err(crate::Error::Scheduler(scheduler::Error::Unavailable(
+                        "scheduler temporarily unavailable".to_string(),
+                    )))
+                } else {
+                    Ok(())
+                }
+            })
+        })
+    };
+    let message =
+        crate::load::Message::new("task-1", "trace-1", crate::trace::Snapshot::code("task-1"));
+
+    init_task_with_retry(Arc::new(IdleScheduler::new()), initializer, message)
+        .await
+        .unwrap();
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test]
+async fn loaded_task_initialization_does_not_retry_configuration_errors() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let initializer: TaskInitializer<IdleScheduler> = {
+        let attempts = Arc::clone(&attempts);
+        Arc::new(move |_scheduler, _message| {
+            let attempts = Arc::clone(&attempts);
+            Box::pin(async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(crate::Error::message("invalid task configuration"))
+            })
+        })
+    };
+    let message =
+        crate::load::Message::new("task-1", "trace-1", crate::trace::Snapshot::code("task-1"));
+
+    let error = init_task_with_retry(Arc::new(IdleScheduler::new()), initializer, message)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("invalid task configuration"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }

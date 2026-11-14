@@ -73,6 +73,7 @@ fn retry(
                 error,
             ),
         );
+        state.touch_trace(&snapshot.trace_id);
         state.enqueue(snapshot, crate::utils::time::now_millis());
     } else {
         state.fail_snapshot(&snapshot, worker_id, error);

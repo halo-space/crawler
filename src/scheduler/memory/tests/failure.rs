@@ -1,10 +1,16 @@
 use super::*;
 
+fn processing(request: &net::Request) -> payload::Payload {
+    let mut payload = payload::Payload::for_request(request, WORKER);
+    payload.state = net::State::Processing;
+    payload
+}
+
 #[tokio::test]
 async fn failure_rejects_stats_overflow_without_partial_settlement() {
     let scheduler = memory();
     let mut request = request("https://example.com");
-    request.max_retry_count = 2;
+    request.max_retry_count = 1;
     scheduler
         .push(payload::Payload::new().requests(vec![request]))
         .await
@@ -106,6 +112,45 @@ async fn failure_requeues_when_retry_budget_remains() {
     assert_eq!(scheduler.failed_len(), 0);
     let retried = scheduler.next_requests(1).await.unwrap().pop().unwrap();
     assert_eq!(retried.failed_workers, [WORKER]);
+}
+
+#[tokio::test]
+async fn retryable_failure_does_not_update_stats_until_terminal() {
+    let scheduler = memory();
+    let mut request = request("https://example.com");
+    request.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+
+    let first = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    scheduler.ack(&processing(&first)).await.unwrap();
+    let mut first_failure = payload::Payload::for_request(&first, WORKER).failed("first");
+    first_failure.start_time = Some(1);
+    first_failure.end_time = Some(2);
+    first_failure.stats.insert(
+        "detail".to_string(),
+        serde_json::to_value(stats::Counter {
+            total: 1,
+            download: 1,
+            ..stats::Counter::default()
+        })
+        .unwrap(),
+    );
+    scheduler.failure(&first_failure).await.unwrap();
+    assert!(scheduler.trace_stats(TRACE).is_empty());
+
+    let second = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    scheduler.ack(&processing(&second)).await.unwrap();
+    let mut final_failure = payload::Payload::for_request(&second, WORKER).failed("final");
+    final_failure.start_time = Some(3);
+    final_failure.end_time = Some(4);
+    final_failure.stats = first_failure.stats;
+    scheduler.failure(&final_failure).await.unwrap();
+
+    assert_eq!(scheduler.trace_stats(TRACE)["detail"].total, 1);
+    assert_eq!(scheduler.trace_stats(TRACE)["detail"].download, 1);
 }
 
 #[tokio::test]

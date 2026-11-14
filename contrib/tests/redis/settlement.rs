@@ -1,5 +1,5 @@
 use halo::contrib::scheduler::redis::Redis;
-use harbor::{Scheduler, net, payload};
+use harbor::{Scheduler, net, payload, stats};
 
 use super::{request, server, worker};
 
@@ -98,6 +98,78 @@ async fn settlement_rejects_a_scheduler_that_does_not_own_the_lease() {
     assert!(claimed.is_empty());
     owner.close().await.unwrap();
     other.close().await.unwrap();
+    server.clear(&namespace).await;
+}
+
+#[tokio::test]
+async fn retryable_failure_does_not_duplicate_stats() {
+    let Some(server) = server::Handle::connect().await else {
+        return;
+    };
+    let namespace = server::namespace("stats-retry");
+    let scheduler = server.redis(&namespace);
+    let retry_scheduler = server.redis_as(&namespace, worker::B);
+    server::open(&scheduler).await;
+    server::open(&retry_scheduler).await;
+    super::run::init(&scheduler).await;
+
+    let mut request = request::new("stats-retry-request", "https://example.com/stats-retry");
+    request.max_retry_count = 2;
+    scheduler
+        .push(payload::Payload::new().requests(vec![request]))
+        .await
+        .unwrap();
+
+    let first = scheduler.next_requests(1).await.unwrap().pop().unwrap();
+    scheduler.ack(&processing(&first)).await.unwrap();
+    let mut first_failure = failure(&first, "first");
+    first_failure.stats.insert(
+        "requests".to_string(),
+        serde_json::to_value(stats::Counter {
+            total: 1,
+            download: 1,
+            ..stats::Counter::default()
+        })
+        .unwrap(),
+    );
+    scheduler.failure(&first_failure).await.unwrap();
+
+    let mut connection = server.connection().await;
+    let stats_key = super::key::stats(&namespace, &first.trace_id);
+    let stats_after_retry = redis::cmd("HGETALL")
+        .arg(&stats_key)
+        .query_async::<std::collections::HashMap<String, String>>(&mut connection)
+        .await
+        .unwrap();
+    assert!(stats_after_retry.is_empty());
+
+    let second = retry_scheduler
+        .next_requests(1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    retry_scheduler.ack(&processing(&second)).await.unwrap();
+    let mut final_failure = failure(&second, "final");
+    final_failure.stats = first_failure.stats;
+    retry_scheduler.failure(&final_failure).await.unwrap();
+
+    let stats_after_final = redis::cmd("HGETALL")
+        .arg(&stats_key)
+        .query_async::<std::collections::HashMap<String, String>>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        stats_after_final.get("requests.total"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        stats_after_final.get("requests.download"),
+        Some(&"1".to_string())
+    );
+
+    scheduler.close().await.unwrap();
+    retry_scheduler.close().await.unwrap();
     server.clear(&namespace).await;
 }
 

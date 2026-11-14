@@ -71,6 +71,22 @@ pub trait Scheduler: Send + Sync {
         payload: &payload::Payload,
     ) -> impl Future<Output = Result<(), crate::scheduler::Error>> + Send;
 
+    /// 回收已经标记为 offline 的 Worker 持有的 Request。
+    ///
+    /// `lease_time` 只用于租约校验和续租，不会单独触发回收。调用方必须先完成
+    /// Worker 的 offline 状态更新；不支持持久化 Worker 状态的 Scheduler 保持默认错误。
+    fn recover_worker(
+        &self,
+        worker_id: &str,
+    ) -> impl Future<Output = Result<usize, crate::scheduler::Error>> + Send {
+        let _ = worker_id;
+        async {
+            Err(crate::scheduler::Error::Message(
+                "explicit offline Worker recovery is not supported by this Scheduler".to_string(),
+            ))
+        }
+    }
+
     /// 成功结算当前 Request 和统计。
     fn success(
         &self,

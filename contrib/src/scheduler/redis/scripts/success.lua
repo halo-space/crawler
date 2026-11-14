@@ -88,7 +88,7 @@ if redis.call('EXISTS', completion) == 1 then
     if redis.call('HGET', completion, 'task_id') ~= payload.task_id then return 'TASK_ID_MISMATCH' end
     if redis.call('HGET', completion, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
     if redis.call('HGET', completion, 'node') ~= payload.node then return 'NODE_MISMATCH' end
-    if redis.call('HGET', completion, 'state') ~= payload.state then return 'STATE_MISMATCH' end
+    if redis.call('HGET', completion, 'state') ~= tostring(payload.state) then return 'STATE_MISMATCH' end
     if redis.call('HGET', completion, 'worker_id') ~= scheduler_worker_id then return 'LEASE_MISMATCH' end
     return 'OK'
 end
@@ -99,7 +99,7 @@ if redis.call('HGET', key, 'task_id') ~= payload.task_id then return 'TASK_ID_MI
 if redis.call('HGET', key, 'trace_id') ~= payload.trace_id then return 'TRACE_ID_MISMATCH' end
 if redis.call('HGET', key, 'node') ~= payload.node then return 'NODE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= payload.version then return 'VERSION_MISMATCH' end
-if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
+if redis.call('HGET', key, 'state') ~= '1' then return 'STATE_MISMATCH' end
 local worker_id = redis.call('HGET', key, 'leased_by')
 if worker_id ~= scheduler_worker_id then return 'LEASE_MISMATCH' end
 
@@ -130,7 +130,7 @@ end
 redis.call('ZREM', processing, segment)
 redis.call('ZREM', other_processing, segment)
 redis.call('HSET', key,
-    'state', 'done', 'leased_by', '', 'lease_time', '0', 'ack_version', '',
+    'state', '2', 'leased_by', '', 'lease_time', '0', 'ack_version', '',
     'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)
 redis.call('HSET', completion,
     'task_id', payload.task_id, 'trace_id', payload.trace_id, 'node', payload.node,

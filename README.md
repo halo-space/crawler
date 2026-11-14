@@ -88,4 +88,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
+Real-network, browser, and external-service acceptance tests are excluded from the default test flow. Run them explicitly with `--ignored` after preparing the required dependencies, for example:
+
+```bash
+cargo test --test eastmoney_funds -- --ignored --nocapture
+cargo test --test json_selector -- --ignored --nocapture
+cargo test --test x_profile -- --ignored --nocapture
+cargo test --test x_account -- --ignored --nocapture
+```
+
+Browser tests require `WEBDRIVER_URL`; X API account tests require `X_USERNAME` and `X_BEARER_TOKEN`. A failure in an external acceptance test only reports an issue with that real service or environment; it does not indicate a failure in the default deterministic test suite.
+
 The workspace is currently at version `0.1.0` and uses the MIT license.

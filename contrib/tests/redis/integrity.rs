@@ -86,7 +86,7 @@ async fn tampered_snapshot_is_quarantined_without_discarding_a_valid_claim() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "3");
     let retry_count: String = redis::cmd("HGET")
         .arg(&tampered_key)
         .arg("retry_count")
@@ -154,7 +154,7 @@ async fn tampered_snapshot_cannot_fall_back_to_the_stored_retry_limit() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "3");
     let retry_count: String = redis::cmd("HGET")
         .arg(&key)
         .arg("retry_count")
@@ -222,7 +222,7 @@ async fn mutable_hash_cannot_override_the_snapshot_retry_limit() {
             .query_async(&mut connection)
             .await
             .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "3");
     assert_eq!(retry_count, 1);
     assert_eq!(retry_limit, 1);
     assert_eq!(max_retry_count, 1);
@@ -274,21 +274,6 @@ async fn retry_limit_tampering_cannot_change_an_active_request_budget() {
     let error = scheduler.failure(&failed).await.unwrap_err();
     assert!(error.to_string().contains("CORRUPT_REQUEST_RETRY"));
 
-    redis::cmd("HSET")
-        .arg(&request_key)
-        .arg("lease_time")
-        .arg(0)
-        .query_async::<usize>(&mut connection)
-        .await
-        .unwrap();
-    redis::cmd("ZADD")
-        .arg(key::processing(&namespace, "http"))
-        .arg(0)
-        .arg(key::segment(&claimed.id))
-        .query_async::<usize>(&mut connection)
-        .await
-        .unwrap();
-
     assert!(scheduler.next_requests(1).await.unwrap().is_empty());
     let (state, retry_count): (String, i32) = redis::cmd("HMGET")
         .arg(&request_key)
@@ -297,7 +282,7 @@ async fn retry_limit_tampering_cannot_change_an_active_request_budget() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "1");
     assert_eq!(retry_count, 0);
 
     scheduler.close().await.unwrap();
@@ -305,7 +290,7 @@ async fn retry_limit_tampering_cannot_change_an_active_request_budget() {
 }
 
 #[tokio::test]
-async fn expired_lease_cannot_recover_without_a_snapshot_retry_limit() {
+async fn online_worker_request_is_not_recovered_by_a_damaged_snapshot() {
     let Some(server) = server::Handle::connect().await else {
         return;
     };
@@ -339,15 +324,6 @@ async fn expired_lease_cannot_recover_without_a_snapshot_retry_limit() {
         .arg("{}")
         .arg("retry_limit")
         .arg(128)
-        .arg("lease_time")
-        .arg(0)
-        .query_async::<usize>(&mut connection)
-        .await
-        .unwrap();
-    redis::cmd("ZADD")
-        .arg(key::processing(&namespace, "http"))
-        .arg(0)
-        .arg(key::segment(&claimed.id))
         .query_async::<usize>(&mut connection)
         .await
         .unwrap();
@@ -360,7 +336,7 @@ async fn expired_lease_cannot_recover_without_a_snapshot_retry_limit() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "1");
     assert_eq!(retry_count, 0);
     let failed_workers: i64 = redis::cmd("LLEN")
         .arg(key::failed_workers(&namespace, &claimed.id))
@@ -368,7 +344,7 @@ async fn expired_lease_cannot_recover_without_a_snapshot_retry_limit() {
         .await
         .unwrap();
     assert_eq!(failed_workers, 0);
-    assert!(!worker_b.has_pending_requests().await.unwrap());
+    assert!(worker_b.has_pending_requests().await.unwrap());
 
     scheduler.close().await.unwrap();
     worker_b.close().await.unwrap();
@@ -425,7 +401,7 @@ async fn another_request_snapshot_cannot_override_the_retry_limit() {
         .query_async(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "3");
     assert_eq!(retry_limit, 1);
     assert_eq!(max_retry_count, 1);
 

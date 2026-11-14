@@ -133,21 +133,29 @@ where
 {
     pub fn build(self) -> Runtime<S, D, P, O> {
         let (tx, events) = tx::channel(MAX_EVENTS);
-        let spider = (self.spider)(tx);
+        let spider = Arc::new((self.spider)(tx));
         let validation_error = self.load.is_none().then(|| {
             validate_ai(&self.config, self.ai.as_deref())
-                .or_else(|| validate_item_functions(&spider, &self.config))
+                .or_else(|| validate_item_functions(spider.as_ref(), &self.config))
         });
         let validation_error = validation_error.flatten();
         let config = Arc::new(self.config);
         let schemas = self.schemas;
-        let executor = super::executor::Executor::new(Arc::new(spider), schemas.clone(), self.ai);
+        let executor =
+            super::executor::Executor::new(Arc::clone(&spider), schemas.clone(), self.ai.clone());
         let trace_id = config.next_trace_id();
         let load_enabled = self.load.is_some();
-        let seed = self
-            .load
-            .as_ref()
-            .map(|_| Arc::new(super::runtime::seed_callback::<S>) as super::runtime::Seed<S>);
+        let task_initializer = self.load.as_ref().map(|_| {
+            Arc::new(super::runtime::task_initializer::<S>) as super::runtime::TaskInitializer<S>
+        });
+        let load_validator = self.load.as_ref().map(|_| {
+            let spider = Arc::clone(&spider);
+            let schemas = Arc::clone(&schemas);
+            let ai = self.ai.clone();
+            Arc::new(move |message: &crate::load::Message| {
+                validate_loaded_message(message, spider.as_ref(), ai.as_deref(), schemas.as_ref())
+            }) as super::runtime::TaskValidator
+        });
 
         super::runtime::Runtime::new(super::runtime::Setup {
             scheduler: self.scheduler,
@@ -158,7 +166,8 @@ where
             registry: self.registry,
             middlewares: self.middlewares,
             load: self.load,
-            seed,
+            load_validator,
+            task_initializer,
         })
         .with_init(Init::new(
             config,
@@ -201,6 +210,35 @@ where
         }
     }
     None
+}
+
+fn validate_loaded_message<P>(
+    message: &crate::load::Message,
+    spider: &P,
+    ai: Option<&crate::ai::OpenAI>,
+    schemas: &crate::item::schema::Store,
+) -> Result<(), crate::Error>
+where
+    P: harbor::Spider,
+{
+    message
+        .validate()
+        .map_err(|error| crate::Error::message(error.to_string()))?;
+    let config = message
+        .snapshot
+        .dsl
+        .as_ref()
+        .ok_or_else(|| crate::Error::message("loaded task configuration must contain DSL"))?;
+    if let Some(error) = validate_ai(config, ai) {
+        return Err(crate::Error::message(error));
+    }
+    if let Some(error) = validate_item_functions(spider, config) {
+        return Err(crate::Error::message(error));
+    }
+    if let Some(item) = &config.item {
+        schemas.register(&item.schema).map_err(crate::Error::Item)?;
+    }
+    Ok(())
 }
 
 #[doc(hidden)]
@@ -269,6 +307,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net;
+
+    struct ValidationSpider {
+        tx: crate::harbor::tx::Tx,
+    }
+
+    impl harbor::Spider for ValidationSpider {
+        type Item = crate::item::Map;
+
+        fn name(&self) -> &str {
+            "validation"
+        }
+
+        fn tx(&self) -> &crate::harbor::tx::Tx {
+            &self.tx
+        }
+
+        async fn index(&self, _response: net::Response) -> Result<(), crate::Error> {
+            Ok(())
+        }
+    }
+
+    fn validation_spider() -> ValidationSpider {
+        let (tx, _) = crate::harbor::tx::channel(super::super::runtime::MAX_EVENTS);
+        ValidationSpider { tx }
+    }
 
     #[tokio::test]
     async fn dynamic_rules_init_does_not_seed_the_static_configuration() {
@@ -305,5 +369,76 @@ graph:
         assert_eq!(output, crate::engine::init::Output::Consume);
         assert_eq!(scheduler.trace_len(), 0);
         assert_eq!(scheduler.queued_len(), 0);
+    }
+
+    #[test]
+    fn loaded_rules_require_the_worker_ai_provider_before_scheduler_init() {
+        let config = config::Config::from_yaml(
+            r#"
+spider:
+  name: ai-task
+  start: [{node: index, url: https://example.com}]
+graph:
+  nodes:
+    index:
+      fields:
+        title:
+          extractors:
+            - {kind: ai, expr: "extract title"}
+  edges: []
+"#,
+        )
+        .unwrap();
+        let message = crate::load::Message::new(
+            "ai-task",
+            "trace-ai",
+            crate::trace::Snapshot::rules("ai-task", config),
+        );
+
+        let error = validate_loaded_message(
+            &message,
+            &validation_spider(),
+            None,
+            &crate::item::schema::Store::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no AI provider"));
+    }
+
+    #[test]
+    fn loaded_rules_require_registered_item_functions_before_scheduler_init() {
+        let config = config::Config::from_yaml(
+            r#"
+spider:
+  name: item-task
+  start: [{node: index, url: https://example.com}]
+graph:
+  nodes:
+    index: {}
+  edges:
+    - from: index
+      kind: item
+      fn: persist
+item:
+  schema:
+    fields:
+      title: {type: string}
+"#,
+        )
+        .unwrap();
+        let message = crate::load::Message::new(
+            "item-task",
+            "trace-item",
+            crate::trace::Snapshot::rules("item-task", config),
+        );
+
+        let error = validate_loaded_message(
+            &message,
+            &validation_spider(),
+            None,
+            &crate::item::schema::Store::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not registered"));
     }
 }

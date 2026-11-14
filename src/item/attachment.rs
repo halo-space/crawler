@@ -1,10 +1,12 @@
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde_json::Value;
+use url::{Host, Url};
 
 use super::Item;
 
@@ -12,6 +14,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub const DEFAULT_TIMEOUT_MILLIS: u64 = 60_000;
 pub const DEFAULT_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 10;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -149,6 +152,7 @@ impl AttachmentDownloader for Local {
                 ));
             }
             let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_millis(config.timeout))
                 .build()
                 .map_err(|error| super::Error::Message(error.to_string()))?;
@@ -206,13 +210,164 @@ async fn read_body(
     source: &str,
     limit: u64,
 ) -> Result<Vec<u8>, super::Error> {
-    let response = client
-        .get(source)
-        .send()
-        .await
-        .map_err(|error| super::Error::Message(error.to_string()))?
-        .error_for_status()
-        .map_err(|error| super::Error::Message(error.to_string()))?;
+    let mut url = parse_attachment_url(source)?;
+
+    for redirect_count in 0..=MAX_REDIRECTS {
+        validate_attachment_url(&url).await?;
+        let response = client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|error| super::Error::Message(error.to_string()))?;
+
+        if response.status().is_redirection() {
+            if redirect_count == MAX_REDIRECTS {
+                return Err(super::Error::Message(
+                    "attachment redirect limit exceeded".to_string(),
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| {
+                    super::Error::Message("attachment redirect has no location".to_string())
+                })?
+                .to_str()
+                .map_err(|_| {
+                    super::Error::Message("attachment redirect location is invalid".to_string())
+                })?;
+            url = url.join(location).map_err(|error| {
+                super::Error::Message(format!("invalid attachment redirect: {error}"))
+            })?;
+            continue;
+        }
+
+        let response = response
+            .error_for_status()
+            .map_err(|error| super::Error::Message(error.to_string()))?;
+        return read_response_body(response, limit).await;
+    }
+
+    unreachable!("attachment redirect loop is bounded")
+}
+
+fn parse_attachment_url(source: &str) -> Result<Url, super::Error> {
+    Url::parse(source)
+        .map_err(|error| super::Error::Message(format!("invalid attachment URL: {error}")))
+}
+
+async fn validate_attachment_url(url: &Url) -> Result<(), super::Error> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(super::Error::Message(format!(
+            "attachment URL scheme is not allowed: {}",
+            url.scheme()
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(super::Error::Message(
+            "attachment URL credentials are not allowed".to_string(),
+        ));
+    }
+
+    let host = url
+        .host()
+        .ok_or_else(|| super::Error::Message("attachment URL must contain a host".to_string()))?;
+    match host {
+        Host::Ipv4(ip) => reject_forbidden_ip(IpAddr::V4(ip))?,
+        Host::Ipv6(ip) => reject_forbidden_ip(IpAddr::V6(ip))?,
+        Host::Domain(domain) => {
+            if is_local_domain(domain) {
+                return Err(super::Error::Message(format!(
+                    "attachment host is not allowed: {domain}"
+                )));
+            }
+
+            let port = url.port_or_known_default().ok_or_else(|| {
+                super::Error::Message("attachment URL must contain a known port".to_string())
+            })?;
+            let host = domain.to_string();
+            let addresses = tokio::task::spawn_blocking(move || {
+                (host.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|addresses| addresses.collect::<Vec<_>>())
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| super::Error::Message(error.to_string()))?
+            .map_err(|error| {
+                super::Error::Message(format!("cannot resolve attachment host: {error}"))
+            })?;
+
+            if addresses.is_empty() {
+                return Err(super::Error::Message(
+                    "attachment host resolved to no addresses".to_string(),
+                ));
+            }
+            for address in addresses {
+                reject_forbidden_ip(address.ip())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_local_domain(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    domain == "localhost" || domain.ends_with(".localhost")
+}
+
+fn reject_forbidden_ip(ip: IpAddr) -> Result<(), super::Error> {
+    if is_forbidden_ip(ip) {
+        return Err(super::Error::Message(format!(
+            "attachment host resolves to a restricted address: {ip}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_forbidden_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_forbidden_ipv4(ip),
+        IpAddr::V6(ip) => is_forbidden_ipv6(ip),
+    }
+}
+
+fn is_forbidden_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 168)
+        || (a == 198 && (18..=19).contains(&b))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224
+}
+
+fn is_forbidden_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    let octets = ip.octets();
+    let mapped_ipv4 = (segments[..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff)
+        .then(|| Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]));
+
+    ip.is_unspecified()
+        || ip.is_loopback()
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] & 0xff00) == 0xff00
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || mapped_ipv4.is_some_and(is_forbidden_ipv4)
+}
+
+async fn read_response_body(
+    response: reqwest::Response,
+    limit: u64,
+) -> Result<Vec<u8>, super::Error> {
     if response
         .content_length()
         .is_some_and(|length| length > limit)
@@ -253,64 +408,51 @@ fn safe_extension(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::thread;
-
     use indexmap::IndexMap;
 
     use super::*;
 
     #[tokio::test]
-    async fn local_download_rewrites_url_and_keeps_src() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request);
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
-                )
-                .unwrap();
-        });
-
-        let source = format!("http://{address}/cover.txt");
+    async fn local_download_rejects_private_address() {
+        let source = "http://127.0.0.1:8080/cover.txt";
         let mut item = crate::item::Map::new(IndexMap::from([(
             "cover".to_string(),
             serde_json::json!([{"src": source, "url": source, "ext": "txt"}]),
         )]));
-        item.id_mut().push_str("attachment-test");
         item.state_mut().set_download_fields(["cover"]);
 
-        let directory =
-            std::env::temp_dir().join(format!("harbor-attachment-{}", uuid::Uuid::now_v7()));
         let config = Config {
             enabled: true,
-            store: Store {
-                kind: "local".to_string(),
-                path: directory.to_string_lossy().into_owned(),
-            },
-            retry: Retry::default(),
-            timeout: DEFAULT_TIMEOUT_MILLIS,
-            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            ..Default::default()
         };
-        Local.download(&mut item, &config).await.unwrap();
+        let error = Local.download(&mut item, &config).await.unwrap_err();
+        assert!(error.to_string().contains("restricted address"));
+    }
 
-        let values = item.values().unwrap();
-        let media = &values["cover"][0];
-        assert_eq!(media["src"], source);
-        assert_ne!(media["url"], source);
-        assert_eq!(
-            tokio::fs::read(media["url"].as_str().unwrap())
+    #[tokio::test]
+    async fn attachment_url_rejects_non_http_and_localhost() {
+        for source in ["file:///tmp/cover.txt", "http://localhost/cover.txt"] {
+            let error = validate_attachment_url(&parse_attachment_url(source).unwrap())
                 .await
-                .unwrap(),
-            b"hello"
-        );
+                .unwrap_err();
+            assert!(error.to_string().contains("not allowed"));
+        }
+    }
 
-        tokio::fs::remove_dir_all(directory).await.unwrap();
-        server.join().unwrap();
+    #[test]
+    fn attachment_address_policy_rejects_private_and_reserved_ranges() {
+        for address in [
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6("fc00::1".parse().unwrap()),
+            IpAddr::V6("::ffff:127.0.0.1".parse().unwrap()),
+        ] {
+            assert!(is_forbidden_ip(address), "{address} should be rejected");
+        }
+        assert!(!is_forbidden_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
     }
 
     #[test]

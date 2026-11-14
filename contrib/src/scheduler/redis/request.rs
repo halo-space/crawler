@@ -85,6 +85,12 @@ struct Claimed {
     failed_workers: Vec<String>,
 }
 
+struct RecoverOptions {
+    max_retry_count: Option<i32>,
+    preserve_retry: bool,
+    require_offline: bool,
+}
+
 enum RestoreFailure {
     Trace {
         claimed: Box<Claimed>,
@@ -182,7 +188,6 @@ impl Redis {
                 .arg(self.keys.prefix())
                 .arg(limit)
                 .arg(worker_id)
-                .arg(self.lease.timeout().as_millis() as i64)
                 .arg(&modes)
                 .arg(&position.http.revision)
                 .arg(&position.http.member)
@@ -380,6 +385,174 @@ impl Redis {
         Ok(requests)
     }
 
+    pub(super) async fn recover_offline_worker(
+        &self,
+        worker_id: &str,
+    ) -> Result<usize, scheduler::Error> {
+        if worker_id.trim().is_empty() {
+            return Err(scheduler::Error::Message(
+                "worker_id must not be empty".to_string(),
+            ));
+        }
+        let mut connection = self.connection().await?;
+        let worker_key = self.keys.worker(worker_id);
+        let offline_time: Option<String> = redis::cmd("HGET")
+            .arg(&worker_key)
+            .arg("offline_time")
+            .query_async(&mut connection)
+            .await
+            .map_err(redis_error)?;
+        match offline_time {
+            None => {
+                return Err(scheduler::Error::Message(format!(
+                    "Redis Worker is not registered: {worker_id}"
+                )));
+            }
+            Some(value) if value.is_empty() => {
+                return Err(scheduler::Error::Message(format!(
+                    "Redis Worker must be offline before recovery: {worker_id}"
+                )));
+            }
+            Some(value) if value.parse::<i64>().ok().is_none_or(|value| value <= 0) => {
+                return Err(scheduler::Error::Message(format!(
+                    "Redis Worker offline time is invalid: {worker_id}"
+                )));
+            }
+            Some(_) => {}
+        }
+
+        let mut recovered = 0;
+        for mode_name in [HTTP, BROWSER] {
+            let processing = self.keys.processing(mode_name);
+            let segments: Vec<String> = redis::cmd("ZRANGE")
+                .arg(&processing)
+                .arg(0)
+                .arg(-1)
+                .query_async(&mut connection)
+                .await
+                .map_err(redis_error)?;
+            for segment in segments {
+                let key = self.keys.request_segment(&segment);
+                let values: Vec<Option<String>> = redis::cmd("HMGET")
+                    .arg(&key)
+                    .arg(&[
+                        "state",
+                        "leased_by",
+                        "version",
+                        "id",
+                        "task_id",
+                        "trace_id",
+                        "node",
+                        "mode",
+                        "priority",
+                        "snapshot",
+                        "snapshot_hash",
+                        "ack_version",
+                    ])
+                    .query_async(&mut connection)
+                    .await
+                    .map_err(redis_error)?;
+                let fields: [Option<String>; 12] = values.try_into().map_err(|_| {
+                    scheduler::Error::Message(
+                        "Redis offline Worker recovery returned an invalid Request field count"
+                            .to_string(),
+                    )
+                })?;
+                let [
+                    state,
+                    leased_by,
+                    version,
+                    id,
+                    task_id,
+                    trace_id,
+                    node,
+                    stored_mode,
+                    priority,
+                    snapshot,
+                    snapshot_hash,
+                    ack_version,
+                ] = fields;
+                if state.as_deref() != Some("1") || leased_by.as_deref() != Some(worker_id) {
+                    continue;
+                }
+                let id = id.ok_or_else(|| scheduler::Error::InvalidRequest {
+                    id: segment.clone(),
+                    message: "offline Worker recovery found a Request without id".to_string(),
+                })?;
+                let version = version.ok_or_else(|| scheduler::Error::InvalidRequest {
+                    id: id.clone(),
+                    message: "offline Worker recovery found a Request without version".to_string(),
+                })?;
+                let task_id = task_id.ok_or_else(|| scheduler::Error::InvalidRequest {
+                    id: id.clone(),
+                    message: "offline Worker recovery found a Request without task_id".to_string(),
+                })?;
+                let trace_id = trace_id.ok_or_else(|| scheduler::Error::InvalidRequest {
+                    id: id.clone(),
+                    message: "offline Worker recovery found a Request without trace_id".to_string(),
+                })?;
+                let node = node.ok_or_else(|| scheduler::Error::InvalidRequest {
+                    id: id.clone(),
+                    message: "offline Worker recovery found a Request without node".to_string(),
+                })?;
+                let stored_mode = stored_mode.ok_or_else(|| scheduler::Error::InvalidRequest {
+                    id: id.clone(),
+                    message: "offline Worker recovery found a Request without mode".to_string(),
+                })?;
+                let priority = priority
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .ok_or_else(|| scheduler::Error::InvalidRequest {
+                        id: id.clone(),
+                        message: "offline Worker recovery found an invalid Request priority"
+                            .to_string(),
+                    })?;
+                let snapshot = snapshot.ok_or_else(|| scheduler::Error::InvalidRequest {
+                    id: id.clone(),
+                    message: "offline Worker recovery found a Request without Snapshot".to_string(),
+                })?;
+                let snapshot_hash =
+                    snapshot_hash.ok_or_else(|| scheduler::Error::InvalidRequest {
+                        id: id.clone(),
+                        message: "offline Worker recovery found a Request without Snapshot hash"
+                            .to_string(),
+                    })?;
+                let claimed = Claimed {
+                    id: id.clone(),
+                    task_id,
+                    trace_id,
+                    node,
+                    mode: stored_mode,
+                    priority,
+                    next_time: "0".to_string(),
+                    version: version.clone(),
+                    retry_count: 0,
+                    max_retry_count: 0,
+                    leased_by: worker_id.to_string(),
+                    lease_time: "0".to_string(),
+                    snapshot,
+                    snapshot_hash,
+                    trace: None,
+                    failed_workers: Vec::new(),
+                };
+                self.recover(
+                    &segment,
+                    worker_id,
+                    &version,
+                    &id,
+                    "offline Worker recovery",
+                    RecoverOptions {
+                        max_retry_count: snapshot_retry_limit(&claimed),
+                        preserve_retry: ack_version.as_deref() != Some(version.as_str()),
+                        require_offline: true,
+                    },
+                )
+                .await?;
+                recovered += 1;
+            }
+        }
+        Ok(recovered)
+    }
+
     pub(super) async fn pending(
         &self,
         worker_id: &str,
@@ -548,7 +721,7 @@ impl Redis {
         version: &str,
         id: &str,
         reason: &str,
-        max_retry_count: Option<i32>,
+        options: RecoverOptions,
     ) -> Result<(), scheduler::Error> {
         let mut connection = self.connection().await?;
         let result: String = self
@@ -557,16 +730,20 @@ impl Redis {
             .prepare_invoke()
             .key(self.keys.request_segment(segment))
             .key(self.keys.meta())
+            .key(self.keys.worker(worker_id))
             .arg(self.keys.prefix())
             .arg(segment)
             .arg(worker_id)
             .arg(version)
             .arg(reason)
             .arg(
-                max_retry_count
+                options
+                    .max_retry_count
                     .map(|value| value.to_string())
                     .unwrap_or_default(),
             )
+            .arg(if options.preserve_retry { "1" } else { "0" })
+            .arg(if options.require_offline { "1" } else { "0" })
             .invoke_async(&mut connection)
             .await
             .map_err(redis_error)?;
@@ -606,7 +783,11 @@ impl Redis {
                     &version,
                     &id,
                     &message,
-                    max_retry_count,
+                    RecoverOptions {
+                        max_retry_count,
+                        preserve_retry: false,
+                        require_offline: false,
+                    },
                 )
                 .await
             }

@@ -40,7 +40,7 @@ struct Claimed {
     failed_workers: Vec<String>,
 }
 
-struct Expired {
+struct LeasedRequest {
     id: String,
     task_id: String,
     trace_id: String,
@@ -94,7 +94,7 @@ impl MySql {
              (id, task_id, trace_id, node, mode, priority, snapshot, snapshot_hash, state, \
               version, next_time, leased_by, lease_time, retry_count, max_retry_count, \
               ack_version, created_time, updated_time) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, '', 0, ?, ?, NULL, \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '', 0, ?, ?, NULL, \
                      CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))",
         )
         .bind(&snapshot.id)
@@ -159,12 +159,6 @@ impl MySql {
             transaction.commit().await.map_err(sql_error)?;
             return Ok(Vec::new());
         }
-        recover_expired(
-            &mut transaction,
-            now,
-            self.lease.timeout().as_millis() as i64,
-        )
-        .await?;
         if limit == 0 {
             transaction.commit().await.map_err(sql_error)?;
             return Ok(Vec::new());
@@ -242,9 +236,9 @@ impl MySql {
                 }
 
                 let result = sqlx::query(
-                    "UPDATE requests SET state = 'processing', version = ?, leased_by = ?, \
+                    "UPDATE requests SET state = 1, version = ?, leased_by = ?, \
                         lease_time = ?, ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
-                 WHERE id = ? AND state = 'pending' AND version = ?",
+                 WHERE id = ? AND state = 0 AND version = ?",
                 )
                 .bind(next_version)
                 .bind(worker_id)
@@ -322,6 +316,89 @@ impl MySql {
         Ok(requests)
     }
 
+    pub(super) async fn recover_offline_worker(
+        &self,
+        worker_id: &str,
+    ) -> Result<usize, scheduler::Error> {
+        if worker_id.trim().is_empty() {
+            return Err(scheduler::Error::Message(
+                "worker_id must not be empty".to_string(),
+            ));
+        }
+        let pool = self.pool().await?;
+        let mut transaction = pool.begin().await.map_err(sql_error)?;
+        let offline_time = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT offline_time FROM workers WHERE worker_id = ? FOR UPDATE",
+        )
+        .bind(worker_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(sql_error)?;
+        match offline_time {
+            None => {
+                return Err(scheduler::Error::Message(format!(
+                    "MySQL Worker is not registered: {worker_id}"
+                )));
+            }
+            Some(None) => {
+                return Err(scheduler::Error::Message(format!(
+                    "MySQL Worker must be offline before recovery: {worker_id}"
+                )));
+            }
+            Some(Some(value)) if value <= 0 => {
+                return Err(scheduler::Error::Message(format!(
+                    "MySQL Worker offline time is invalid: {worker_id}"
+                )));
+            }
+            Some(Some(_)) => {}
+        }
+
+        let mut recovered = 0;
+        loop {
+            let rows = sqlx::query(
+                "SELECT id, task_id, trace_id, node, mode, priority, snapshot, snapshot_hash, \
+                        version, retry_count, leased_by, ack_version \
+                 FROM requests \
+                 WHERE state = 1 AND leased_by = ? \
+                 ORDER BY id ASC \
+                 LIMIT ? FOR UPDATE SKIP LOCKED",
+            )
+            .bind(worker_id)
+            .bind(MAX_RECOVERY)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(sql_error)?;
+            if rows.is_empty() {
+                break;
+            }
+
+            for row in rows {
+                let version = row.try_get::<i64, _>("version").map_err(sql_error)?;
+                let request = LeasedRequest {
+                    id: decode::string(&row, "id")?,
+                    task_id: decode::string(&row, "task_id")?,
+                    trace_id: decode::string(&row, "trace_id")?,
+                    node: decode::string(&row, "node")?,
+                    mode: decode::string(&row, "mode")?,
+                    priority: row.try_get("priority").map_err(sql_error)?,
+                    snapshot: row.try_get("snapshot").map_err(sql_error)?,
+                    snapshot_hash: row.try_get("snapshot_hash").map_err(sql_error)?,
+                    version,
+                    retry_count: row.try_get("retry_count").map_err(sql_error)?,
+                    leased_by: decode::string(&row, "leased_by")?,
+                    acknowledged: row
+                        .try_get::<Option<i64>, _>("ack_version")
+                        .map_err(sql_error)?
+                        == Some(version),
+                };
+                recover_worker_request(&mut transaction, &request).await?;
+                recovered += 1;
+            }
+        }
+        transaction.commit().await.map_err(sql_error)?;
+        Ok(recovered)
+    }
+
     pub(super) async fn pending(
         &self,
         worker_id: &str,
@@ -333,11 +410,11 @@ impl MySql {
         let pending = sqlx::query_scalar::<_, i64>(
             "SELECT EXISTS( \
                  SELECT 1 FROM requests r \
-                 WHERE r.state = 'processing' \
+                 WHERE r.state = 1 \
                    AND ((? AND r.mode = 'http') OR (? AND r.mode = 'browser')) \
                  UNION ALL \
                  SELECT 1 FROM queues q \
-                 INNER JOIN requests r ON r.id = q.request_id AND r.state = 'pending' \
+                 INNER JOIN requests r ON r.id = q.request_id AND r.state = 0 \
                  WHERE ((? AND q.mode = 'http') OR (? AND q.mode = 'browser')) \
                    AND NOT EXISTS ( \
                        SELECT 1 FROM failed_workers f \
@@ -372,7 +449,7 @@ async fn scan_candidates(
             "SELECT q.priority, q.sequence \
              FROM queues q \
              INNER JOIN requests r ON r.id = q.request_id \
-             WHERE r.state = 'pending' AND q.next_time <= ? \
+             WHERE r.state = 0 AND q.next_time <= ? \
                AND ((? AND q.mode = 'http') OR (? AND q.mode = 'browser')) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM failed_workers f \
@@ -398,7 +475,7 @@ async fn scan_candidates(
             "SELECT q.priority, q.sequence \
              FROM queues q \
              INNER JOIN requests r ON r.id = q.request_id \
-             WHERE r.state = 'pending' AND q.next_time <= ? \
+             WHERE r.state = 0 AND q.next_time <= ? \
                AND ((? AND q.mode = 'http') OR (? AND q.mode = 'browser')) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM failed_workers f \
@@ -446,7 +523,7 @@ async fn lock_candidate(
          FROM queues q \
          INNER JOIN requests r ON r.id = q.request_id \
          LEFT JOIN traces t ON t.id = r.trace_id \
-         WHERE q.sequence = ? AND r.state = 'pending' AND q.next_time <= ? \
+         WHERE q.sequence = ? AND r.state = 0 AND q.next_time <= ? \
            AND ((? AND q.mode = 'http') OR (? AND q.mode = 'browser')) \
            AND NOT EXISTS ( \
                SELECT 1 FROM failed_workers f \
@@ -476,7 +553,7 @@ async fn refresh_claimed_leases(
         let lease_time = database_time(transaction).await?;
         let result = sqlx::query(
             "UPDATE requests SET lease_time = ?, updated_time = CURRENT_TIMESTAMP(3) \
-             WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+             WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
         )
         .bind(lease_time)
         .bind(&request.id)
@@ -574,7 +651,7 @@ async fn replay_or_insert_request(
          (id, task_id, trace_id, node, mode, priority, snapshot, snapshot_hash, state, \
           version, next_time, leased_by, lease_time, retry_count, max_retry_count, \
           ack_version, created_time, updated_time) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, '', 0, 0, ?, NULL, \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, '', 0, 0, ?, NULL, \
                  CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3)) \
          ON DUPLICATE KEY UPDATE id = requests.id",
     )
@@ -620,7 +697,7 @@ async fn enqueue_initial_request(
          (request_id, mode, priority, next_time, created_time, updated_time) \
          SELECT id, mode, priority, next_time, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3) \
          FROM requests \
-         WHERE id = ? AND state = 'pending' AND version = 0 AND retry_count = 0 \
+         WHERE id = ? AND state = 0 AND version = 0 AND retry_count = 0 \
            AND leased_by = '' AND lease_time = 0 \
          ON DUPLICATE KEY UPDATE request_id = queues.request_id",
     )
@@ -650,53 +727,9 @@ async fn enqueue(
     Ok(())
 }
 
-async fn recover_expired(
+async fn recover_worker_request(
     transaction: &mut Transaction<'_, SqlMySql>,
-    now: i64,
-    lease_timeout: i64,
-) -> Result<(), scheduler::Error> {
-    let expired_before = now.saturating_sub(lease_timeout);
-    let rows = sqlx::query(
-        "SELECT id, task_id, trace_id, node, mode, priority, snapshot, snapshot_hash, \
-                version, retry_count, leased_by, ack_version \
-         FROM requests \
-         WHERE state = 'processing' AND lease_time <= ? \
-         ORDER BY lease_time ASC, id ASC \
-         LIMIT ? FOR UPDATE SKIP LOCKED",
-    )
-    .bind(expired_before)
-    .bind(MAX_RECOVERY)
-    .fetch_all(&mut **transaction)
-    .await
-    .map_err(sql_error)?;
-
-    for row in rows {
-        let version = row.try_get::<i64, _>("version").map_err(sql_error)?;
-        let expired = Expired {
-            id: decode::string(&row, "id")?,
-            task_id: decode::string(&row, "task_id")?,
-            trace_id: decode::string(&row, "trace_id")?,
-            node: decode::string(&row, "node")?,
-            mode: decode::string(&row, "mode")?,
-            priority: row.try_get("priority").map_err(sql_error)?,
-            snapshot: row.try_get("snapshot").map_err(sql_error)?,
-            snapshot_hash: row.try_get("snapshot_hash").map_err(sql_error)?,
-            version,
-            retry_count: row.try_get("retry_count").map_err(sql_error)?,
-            leased_by: decode::string(&row, "leased_by")?,
-            acknowledged: row
-                .try_get::<Option<i64>, _>("ack_version")
-                .map_err(sql_error)?
-                == Some(version),
-        };
-        recover_expired_request(transaction, &expired).await?;
-    }
-    Ok(())
-}
-
-async fn recover_expired_request(
-    transaction: &mut Transaction<'_, SqlMySql>,
-    request: &Expired,
+    request: &LeasedRequest,
 ) -> Result<(), scheduler::Error> {
     sqlx::query("DELETE FROM queues WHERE request_id = ?")
         .bind(&request.id)
@@ -706,12 +739,13 @@ async fn recover_expired_request(
 
     if !request.acknowledged {
         sqlx::query(
-            "UPDATE requests SET state = 'pending', next_time = 0, leased_by = '', \
+            "UPDATE requests SET state = 0, next_time = 0, leased_by = '', \
                     lease_time = 0, ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
-             WHERE id = ? AND state = 'processing' AND version = ?",
+             WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
         )
         .bind(&request.id)
         .bind(request.version)
+        .bind(&request.leased_by)
         .execute(&mut **transaction)
         .await
         .map_err(sql_error)?;
@@ -729,10 +763,10 @@ async fn recover_expired_request(
         &request.mode,
         request.priority,
     ) else {
-        return quarantine_expired(
+        return quarantine_worker_request(
             transaction,
             request,
-            "acknowledged lease expired but its immutable Request Snapshot is invalid",
+            "offline Worker recovery found an invalid immutable Request Snapshot",
         )
         .await;
     };
@@ -743,7 +777,8 @@ async fn recover_expired_request(
             .checked_add(1)
             .ok_or_else(|| scheduler::Error::InvalidRequest {
                 id: request.id.clone(),
-                message: "request retry overflow while recovering expired lease".to_string(),
+                message: "request retry overflow while recovering offline Worker Request"
+                    .to_string(),
             })?;
     record_failed_worker(transaction, &request.id, &request.leased_by).await?;
     record_failure(
@@ -754,38 +789,40 @@ async fn recover_expired_request(
         &request.trace_id,
         &request.node,
         &request.leased_by,
-        "acknowledged lease expired",
+        "offline Worker recovery",
     )
     .await?;
 
     if retry < max_retry_count {
         sqlx::query(
-            "UPDATE requests SET state = 'pending', retry_count = ?, max_retry_count = ?, \
+            "UPDATE requests SET state = 0, retry_count = ?, max_retry_count = ?, \
                     next_time = 0, \
                     leased_by = '', lease_time = 0, ack_version = NULL, \
                     updated_time = CURRENT_TIMESTAMP(3) \
-             WHERE id = ? AND state = 'processing' AND version = ?",
+             WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
         )
         .bind(retry)
         .bind(max_retry_count)
         .bind(&request.id)
         .bind(request.version)
+        .bind(&request.leased_by)
         .execute(&mut **transaction)
         .await
         .map_err(sql_error)?;
         enqueue_values(transaction, &request.id, &request.mode, request.priority, 0).await?;
     } else {
         sqlx::query(
-            "UPDATE requests SET state = 'failed', retry_count = ?, max_retry_count = ?, \
+            "UPDATE requests SET state = 3, retry_count = ?, max_retry_count = ?, \
                     next_time = 0, \
                     leased_by = '', lease_time = 0, ack_version = NULL, \
                     updated_time = CURRENT_TIMESTAMP(3) \
-             WHERE id = ? AND state = 'processing' AND version = ?",
+             WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
         )
         .bind(retry)
         .bind(max_retry_count)
         .bind(&request.id)
         .bind(request.version)
+        .bind(&request.leased_by)
         .execute(&mut **transaction)
         .await
         .map_err(sql_error)?;
@@ -940,9 +977,9 @@ async fn release_claim(
     claimed: &Claimed,
 ) -> Result<(), scheduler::Error> {
     let released = sqlx::query(
-        "UPDATE requests SET state = 'pending', next_time = 0, leased_by = '', lease_time = 0, \
+        "UPDATE requests SET state = 0, next_time = 0, leased_by = '', lease_time = 0, \
                 ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
-         WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+         WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
     )
     .bind(&claimed.id)
     .bind(claimed.version)
@@ -988,11 +1025,11 @@ async fn recover_claim(
 
     if retry < max_retry_count {
         sqlx::query(
-            "UPDATE requests SET state = 'pending', retry_count = ?, max_retry_count = ?, \
+            "UPDATE requests SET state = 0, retry_count = ?, max_retry_count = ?, \
                     next_time = 0, \
                     leased_by = '', lease_time = 0, ack_version = NULL, \
                     updated_time = CURRENT_TIMESTAMP(3) \
-             WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+             WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
         )
         .bind(retry)
         .bind(max_retry_count)
@@ -1005,11 +1042,11 @@ async fn recover_claim(
         enqueue_values(transaction, &claimed.id, &claimed.mode, claimed.priority, 0).await?;
     } else {
         sqlx::query(
-            "UPDATE requests SET state = 'failed', retry_count = ?, max_retry_count = ?, \
+            "UPDATE requests SET state = 3, retry_count = ?, max_retry_count = ?, \
                     next_time = 0, \
                     leased_by = '', lease_time = 0, ack_version = NULL, \
                     updated_time = CURRENT_TIMESTAMP(3) \
-             WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+             WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
         )
         .bind(retry)
         .bind(max_retry_count)
@@ -1077,9 +1114,9 @@ async fn quarantine_claim(
     )
     .await?;
     let updated = sqlx::query(
-        "UPDATE requests SET state = 'failed', next_time = 0, leased_by = '', lease_time = 0, \
+        "UPDATE requests SET state = 3, next_time = 0, leased_by = '', lease_time = 0, \
                 ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
-         WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+         WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
     )
     .bind(&claimed.id)
     .bind(claimed.version)
@@ -1093,9 +1130,9 @@ async fn quarantine_claim(
     Ok(())
 }
 
-async fn quarantine_expired(
+async fn quarantine_worker_request(
     transaction: &mut Transaction<'_, SqlMySql>,
-    request: &Expired,
+    request: &LeasedRequest,
     reason: &str,
 ) -> Result<(), scheduler::Error> {
     record_failure(
@@ -1110,9 +1147,9 @@ async fn quarantine_expired(
     )
     .await?;
     let updated = sqlx::query(
-        "UPDATE requests SET state = 'failed', next_time = 0, leased_by = '', lease_time = 0, \
+        "UPDATE requests SET state = 3, next_time = 0, leased_by = '', lease_time = 0, \
                 ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
-         WHERE id = ? AND state = 'processing' AND version = ? AND leased_by = ?",
+         WHERE id = ? AND state = 1 AND version = ? AND leased_by = ?",
     )
     .bind(&request.id)
     .bind(request.version)
@@ -1155,7 +1192,7 @@ async fn fail_unclaimable(
     )
     .await?;
     sqlx::query(
-        "UPDATE requests SET state = 'failed', leased_by = '', lease_time = 0, \
+        "UPDATE requests SET state = 3, leased_by = '', lease_time = 0, \
                 ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) WHERE id = ?",
     )
     .bind(id)
@@ -1221,7 +1258,7 @@ async fn record_failure(
         "INSERT INTO completions \
          (request_id, version, task_id, trace_id, node, worker_id, state, error, \
           start_time, end_time, created_time, updated_time) \
-         VALUES (?, ?, ?, ?, ?, ?, 'failed', ?, NULL, NULL, \
+         VALUES (?, ?, ?, ?, ?, ?, 3, ?, NULL, NULL, \
                  CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3)) \
          ON DUPLICATE KEY UPDATE request_id = completions.request_id",
     )

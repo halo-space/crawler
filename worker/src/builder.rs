@@ -16,9 +16,11 @@ pub struct Engine<S = harbor::scheduler::Memory, D = Downloader, P = RulesSpider
 
 impl Engine<harbor::scheduler::Memory, Downloader, RulesSpider, Jsonl> {
     pub fn new(config: Config) -> Self {
+        let scheduler = harbor::scheduler::Memory::new().with_modes(config.download_modes.clone());
         Self {
             config: config.clone(),
             engine: engine::Engine::new()
+                .with_scheduler(scheduler)
                 .with_downloader(default_downloader(&config))
                 .with_store(Jsonl::with_dir(&config.store_dir))
                 .with_spider(rules),

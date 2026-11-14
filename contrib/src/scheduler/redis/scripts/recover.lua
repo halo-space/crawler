@@ -4,10 +4,20 @@ local worker_id = ARGV[3]
 local version = ARGV[4]
 local reason = ARGV[5]
 local snapshot_max_retry = ARGV[6]
+local preserve_retry = ARGV[7] == '1'
+local require_offline = ARGV[8] == '1'
 local key = KEYS[1]
 
 local MAX_SEQUENCE = '99999999999999999999999999999999'
 local MAX_RETRY_COUNT = 128
+
+if require_offline then
+    if redis.call('TYPE', KEYS[3]).ok ~= 'hash' then return 'WORKER_NOT_OFFLINE' end
+    local offline_time = redis.call('HGET', KEYS[3], 'offline_time')
+    if not offline_time or offline_time == '' then
+        return 'WORKER_NOT_OFFLINE'
+    end
+end
 
 local function has_type(key, expected)
     local actual = redis.call('TYPE', key).ok
@@ -56,7 +66,7 @@ if not has_type(key, 'hash') then return 'CORRUPT_REQUEST' end
 if redis.call('EXISTS', key) == 0 then return 'REQUEST_NOT_FOUND' end
 if redis.call('HGET', key, 'leased_by') ~= worker_id then return 'LEASE_MISMATCH' end
 if redis.call('HGET', key, 'version') ~= version then return 'VERSION_MISMATCH' end
-if redis.call('HGET', key, 'state') ~= 'processing' then return 'STATE_MISMATCH' end
+if redis.call('HGET', key, 'state') ~= '1' then return 'STATE_MISMATCH' end
 
 local time = redis.call('TIME')
 local now = time[1] * 1000 + math.floor(time[2] / 1000)
@@ -69,7 +79,7 @@ if snapshot_max_retry ~= '' then
     if not trusted_max_retry then return 'CORRUPT_REQUEST_RETRY' end
 end
 local quarantine = not retry_count or not trusted_max_retry or retry_count >= trusted_max_retry
-local retry = not quarantine and retry_count + 1 or nil
+local retry = not quarantine and (preserve_retry and retry_count or retry_count + 1) or nil
 local priority = nil
 if not quarantine and retry < trusted_max_retry then
     priority = parse_i32(redis.call('HGET', key, 'priority'), -2147483648, 2147483647)
@@ -104,24 +114,26 @@ if not quarantine and retry < trusted_max_retry then
     if not sequence then return 'SEQUENCE_OVERFLOW' end
 end
 
-if reset_failed_workers then redis.call('DEL', failed_workers) end
+if reset_failed_workers and (not preserve_retry or quarantine) then redis.call('DEL', failed_workers) end
 if reset_completion then redis.call('DEL', completion) end
-if not quarantine and redis.call('LPOS', failed_workers, worker_id) == false then
+if not preserve_retry and not quarantine and redis.call('LPOS', failed_workers, worker_id) == false then
     redis.call('RPUSH', failed_workers, worker_id)
 end
-redis.call('HSET', completion,
-    'task_id', redis.call('HGET', key, 'task_id'),
-    'trace_id', redis.call('HGET', key, 'trace_id'),
-    'node', redis.call('HGET', key, 'node'),
-    'worker_id', worker_id,
-    'state', 'failed',
-    'error', reason)
+if not preserve_retry or quarantine then
+    redis.call('HSET', completion,
+        'task_id', redis.call('HGET', key, 'task_id'),
+        'trace_id', redis.call('HGET', key, 'trace_id'),
+        'node', redis.call('HGET', key, 'node'),
+        'worker_id', worker_id,
+        'state', '3',
+        'error', reason)
+end
 redis.call('ZREM', processing, segment)
 redis.call('ZREM', other_processing, segment)
 
 if quarantine then
     redis.call('HSET', key,
-        'state', 'failed', 'next_time', '0',
+        'state', '3', 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)
     return 'OK'
@@ -142,14 +154,14 @@ if retry < trusted_max_retry then
         redis.call('ZADD', exclusions, 0, worker_segment(worker) .. '|' .. segment)
     end
     redis.call('HSET', key,
-        'state', 'pending', 'retry_count', retry, 'retry_limit', trusted_max_retry,
+        'state', '0', 'retry_count', retry, 'retry_limit', trusted_max_retry,
         'max_retry_count', trusted_max_retry, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', 'ready', 'queue_member', member, 'ready_event', event,
         'updated_time', now)
 else
     redis.call('HSET', key,
-        'state', 'failed', 'retry_count', retry, 'retry_limit', trusted_max_retry,
+        'state', '3', 'retry_count', retry, 'retry_limit', trusted_max_retry,
         'max_retry_count', trusted_max_retry, 'next_time', '0',
         'leased_by', '', 'lease_time', '0', 'ack_version', '',
         'queue_kind', '', 'queue_member', '', 'ready_event', '', 'updated_time', now)

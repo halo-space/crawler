@@ -1,15 +1,13 @@
+use super::restore;
 use super::state::State;
-use super::{reclaim, restore};
-use crate::{net, scheduler};
+use crate::net;
 
 pub(super) fn next(
     state: &mut State,
-    lease: scheduler::Lease,
     limit: usize,
     worker_id: &str,
     modes: &[net::Mode],
 ) -> Vec<net::Request> {
-    reclaim::expired(state, lease);
     let now = crate::utils::time::now_millis();
     let queued = state.take(now, limit, modes);
     let mut requests = Vec::with_capacity(queued.len());

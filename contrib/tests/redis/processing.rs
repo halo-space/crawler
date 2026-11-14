@@ -323,7 +323,7 @@ async fn refresh_rejects_a_malformed_lease_time_without_mutation() {
 }
 
 #[tokio::test]
-async fn expired_processing_score_recovers_the_request() {
+async fn offline_worker_recovery_requeues_the_request() {
     let Some(server) = server::Handle::connect().await else {
         return;
     };
@@ -349,28 +349,15 @@ async fn expired_processing_score_recovers_the_request() {
         .await
         .unwrap();
 
-    let index = key::processing(&namespace, "http");
-    let mut connection = server.connection().await;
-    redis::cmd("HSET")
-        .arg(key::request(&namespace, &claimed.id))
-        .arg("lease_time")
-        .arg(0)
-        .query_async::<usize>(&mut connection)
-        .await
-        .unwrap();
-    redis::cmd("ZADD")
-        .arg(&index)
-        .arg(0)
-        .arg(key::segment(&claimed.id))
-        .query_async::<usize>(&mut connection)
-        .await
-        .unwrap();
+    scheduler.close().await.unwrap();
+    assert_eq!(worker_b.recover_worker(worker::A).await.unwrap(), 1);
 
     let recovered = worker_b.next_requests(1).await.unwrap().pop().unwrap();
     assert_eq!(recovered.id, claimed.id);
     assert_eq!(recovered.version, claimed.version + 1);
     assert_eq!(recovered.retry_count, claimed.retry_count + 1);
     assert_eq!(recovered.failed_workers, [worker::A]);
+    let mut connection = server.connection().await;
     let stored = redis::cmd("HGET")
         .arg(key::request(&namespace, &recovered.id))
         .arg("lease_time")
@@ -378,12 +365,16 @@ async fn expired_processing_score_recovers_the_request() {
         .await
         .unwrap();
     assert_eq!(
-        score(&mut connection, &index, &recovered.id).await,
+        score(
+            &mut connection,
+            &key::processing(&namespace, "http"),
+            &recovered.id,
+        )
+        .await,
         Some(stored)
     );
 
     settlement::succeed(&worker_b, &recovered).await;
-    scheduler.close().await.unwrap();
     worker_b.close().await.unwrap();
     server.clear(&namespace).await;
 }
@@ -474,7 +465,7 @@ async fn claim_removes_orphans_and_repairs_a_request_in_the_wrong_mode_index() {
 }
 
 #[tokio::test]
-async fn expired_recovery_limit_is_shared_across_modes() {
+async fn offline_worker_recovery_requeues_all_modes() {
     const PER_MODE: usize = 129;
 
     let Some(server) = server::Handle::connect().await else {
@@ -513,32 +504,15 @@ async fn expired_recovery_limit_is_shared_across_modes() {
     let claimed = scheduler.next_requests(PER_MODE * 2).await.unwrap();
     assert_eq!(claimed.len(), PER_MODE * 2);
 
-    let mut connection = server.connection().await;
-    for request in &claimed {
-        redis::cmd("HSET")
-            .arg(key::request(&namespace, &request.id))
-            .arg("lease_time")
-            .arg(0)
-            .query_async::<usize>(&mut connection)
-            .await
-            .unwrap();
-        redis::cmd("ZADD")
-            .arg(key::processing(
-                &namespace,
-                match request.mode {
-                    net::Mode::Http => "http",
-                    net::Mode::Browser => "browser",
-                },
-            ))
-            .arg(0)
-            .arg(key::segment(&request.id))
-            .query_async::<usize>(&mut connection)
-            .await
-            .unwrap();
-    }
+    scheduler.close().await.unwrap();
+    assert_eq!(
+        worker_b.recover_worker(worker::A).await.unwrap(),
+        PER_MODE * 2
+    );
 
     let recovered = worker_b.next_requests(1).await.unwrap();
     assert_eq!(recovered.len(), 1);
+    let mut connection = server.connection().await;
     let mut counts = Vec::new();
     for mode in ["http", "browser"] {
         counts.push(
@@ -550,9 +524,8 @@ async fn expired_recovery_limit_is_shared_across_modes() {
         );
     }
     counts.sort_unstable();
-    assert_eq!(counts, [65, 66]);
+    assert_eq!(counts, [0, 1]);
 
-    scheduler.close().await.unwrap();
     worker_b.close().await.unwrap();
     server.clear(&namespace).await;
 }
@@ -625,7 +598,7 @@ async fn opposite_mode_type_errors_do_not_partially_refresh_or_settle() {
             .query_async::<String>(&mut connection)
             .await
             .unwrap(),
-        "processing"
+        "1"
     );
     assert_eq!(
         score(&mut connection, &http, &request.id).await,

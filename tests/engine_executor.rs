@@ -1,9 +1,7 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
 
 use bytes::Bytes;
 use halo::harbor::item::{Item, Store};
@@ -1187,6 +1185,40 @@ impl halo::harbor::item::attachment::AttachmentDownloader for FailingAttachmentD
     }
 }
 
+struct SuccessfulAttachmentDownloader;
+
+impl halo::harbor::item::attachment::AttachmentDownloader for SuccessfulAttachmentDownloader {
+    fn download<'a>(
+        &'a self,
+        item: &'a mut dyn Item,
+        config: &'a halo::harbor::item::attachment::Config,
+    ) -> halo::harbor::item::attachment::BoxFuture<'a, Result<(), halo::harbor::item::Error>> {
+        Box::pin(async move {
+            let path = PathBuf::from(&config.store.path).join("attachment.bin");
+            tokio::fs::create_dir_all(&config.store.path).await?;
+            tokio::fs::write(&path, b"attachment-bytes").await?;
+
+            let mut values = item.values()?;
+            for field in item.state().download_fields().iter() {
+                let Some(Value::Array(media)) = values.get_mut(field) else {
+                    continue;
+                };
+                for value in media {
+                    let Some(object) = value.as_object_mut() else {
+                        continue;
+                    };
+                    object.insert(
+                        "url".to_string(),
+                        Value::String(path.to_string_lossy().into_owned()),
+                    );
+                    object.insert("size".to_string(), Value::from(16));
+                }
+            }
+            item.replace_values(values)
+        })
+    }
+}
+
 fn media_download_rules(
     task: &str,
     media_path: &std::path::Path,
@@ -1253,23 +1285,6 @@ item:
 "#,
         media_path.display(),
     )
-}
-
-fn one_shot_media_server(body: &'static [u8]) -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 1024];
-        let _ = stream.read(&mut request);
-        let header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        stream.write_all(header.as_bytes()).unwrap();
-        stream.write_all(body).unwrap();
-    });
-    (format!("http://{address}/cover.jpg"), handle)
 }
 
 #[tokio::test]
@@ -1343,7 +1358,7 @@ item:
 
 #[tokio::test]
 async fn rules_attachment_download_runs_before_store_and_preserves_src() {
-    let (source, server) = one_shot_media_server(b"attachment-bytes");
+    let source = "https://example.com/cover.jpg".to_string();
     let root = std::env::temp_dir().join(format!("crawler-attachment-{}", uuid::Uuid::now_v7()));
     let output_dir = root.join("output");
     let media_dir = root.join("media");
@@ -1352,6 +1367,7 @@ async fn rules_attachment_download_runs_before_store_and_preserves_src() {
         .with_store(halo::harbor::item::Jsonl::with_dir(&output_dir))
         .with_rules(config)
         .with_spider(RulesSpider::new())
+        .with_attachment_downloader(SuccessfulAttachmentDownloader)
         .with_downloader(AttachmentPageDownload {
             source: source.clone(),
         })
@@ -1378,7 +1394,6 @@ async fn rules_attachment_download_runs_before_store_and_preserves_src() {
     );
     assert_eq!(media["size"], 16);
 
-    server.join().unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
@@ -4201,9 +4216,9 @@ async fn engine_retries_the_same_failure_payload_after_a_lost_response() {
     assert_eq!(engine.scheduler().inner.queued_len(), 0);
     assert_eq!(engine.scheduler().inner.processing_len(), 0);
     let stats = engine.scheduler().inner.trace_stats(FIXTURE_TRACE);
-    assert_eq!(stats["index"].total, 2);
+    assert_eq!(stats["index"].total, 1);
     assert_eq!(stats["index"].done, 1);
-    assert_eq!(stats["index"].download, 1);
+    assert_eq!(stats["index"].download, 0);
 }
 
 #[tokio::test]

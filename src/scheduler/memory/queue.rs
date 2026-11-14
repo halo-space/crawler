@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 
 use crate::{net, scheduler};
 
@@ -58,6 +58,32 @@ impl Queue {
         self.domains
             .iter()
             .any(|domain| !domain.is_empty() && supported_modes.contains(&domain.mode))
+    }
+
+    pub(super) fn request_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        for domain in &self.domains {
+            for entry in &domain.ready {
+                ids.insert(entry.0.snapshot.id.clone());
+            }
+            for entry in &domain.delayed {
+                ids.insert(entry.0.snapshot.id.clone());
+            }
+        }
+        ids
+    }
+
+    pub(super) fn trace_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        for domain in &self.domains {
+            for entry in &domain.ready {
+                ids.insert(entry.0.snapshot.trace_id.clone());
+            }
+            for entry in &domain.delayed {
+                ids.insert(entry.0.snapshot.trace_id.clone());
+            }
+        }
+        ids
     }
 
     fn domain(&mut self, mode: &net::Mode) -> &mut Domain {

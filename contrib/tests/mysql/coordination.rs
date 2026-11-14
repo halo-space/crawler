@@ -264,7 +264,7 @@ async fn claimed_requests_receive_a_lease_time_near_transaction_commit() {
     sqlx::raw_sql(
         "CREATE TRIGGER slow_request_claim BEFORE UPDATE ON requests FOR EACH ROW \
          BEGIN \
-             IF OLD.state = 'pending' AND NEW.state = 'processing' THEN \
+             IF OLD.state = 0 AND NEW.state = 1 THEN \
                  DO SLEEP(0.2); \
                  UPDATE claim_probe SET stamp = \
                      CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED); \

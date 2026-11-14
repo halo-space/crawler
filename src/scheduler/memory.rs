@@ -5,7 +5,6 @@ use crate::{net, payload, scheduler, stats, trace};
 
 mod claim;
 mod queue;
-mod reclaim;
 mod restore;
 mod settle;
 mod state;
@@ -83,6 +82,14 @@ impl Memory {
             .get(trace_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Removes terminal history older than `before` while preserving active work.
+    ///
+    /// Memory is a process-local backend, so cleanup is explicit and is not part of the
+    /// Scheduler contract. The caller may invoke it from its own periodic maintenance task.
+    pub fn cleanup(&self, before: i64) -> usize {
+        self.state().cleanup(before)
     }
 
     pub fn errors(&self) -> Vec<String> {
@@ -186,13 +193,7 @@ impl scheduler::Scheduler for Memory {
 
     async fn next_requests(&self, limit: usize) -> Result<Vec<net::Request>, scheduler::Error> {
         let mut state = self.state();
-        Ok(claim::next(
-            &mut state,
-            self.lease,
-            limit,
-            LOCAL_WORKER,
-            &self.modes,
-        ))
+        Ok(claim::next(&mut state, limit, LOCAL_WORKER, &self.modes))
     }
 
     async fn has_pending_requests(&self) -> Result<bool, scheduler::Error> {
@@ -298,20 +299,38 @@ impl scheduler::Scheduler for Memory {
         settle::validate_lease(&state, payload, self.lease)?;
         settle::require_ack(&state, payload)?;
         let counters = settle::counters(payload)?;
-        let counters = settle::merge_stats(&state, &payload.trace_id, counters)?;
-        let Some(request) = state.processing.remove(&payload.id) else {
+        let Some(request) = state.processing.get(&payload.id).cloned() else {
             return Err(scheduler::Error::RequestNotFound(payload.id.clone()));
         };
+        let worker_id = request.leased_by.clone();
+        let outcome = settle::retry(request, &worker_id);
+        let counters = match &outcome {
+            settle::RetryOutcome::Requeued(_) => None,
+            settle::RetryOutcome::Failed(_) => {
+                Some(settle::merge_stats(&state, &payload.trace_id, counters)?)
+            }
+        };
+        state.processing.remove(&payload.id);
         state
             .acknowledged
             .remove(&(payload.id.clone(), payload.version));
-        let worker_id = request.leased_by.clone();
-        if let Some(error) = settle::retry(&mut state, request, &worker_id) {
-            settle::record_error(&mut state, payload, &worker_id, error);
-        } else {
-            settle::record(&mut state, payload, &worker_id);
+        match outcome {
+            settle::RetryOutcome::Requeued(snapshot) => {
+                state.enqueue(*snapshot, crate::utils::time::now_millis());
+                settle::record(&mut state, payload, &worker_id);
+            }
+            settle::RetryOutcome::Failed(error) => {
+                state.failed += 1;
+                if let Some(error) = error {
+                    settle::record_error(&mut state, payload, &worker_id, error);
+                } else {
+                    settle::record(&mut state, payload, &worker_id);
+                }
+            }
         }
-        settle::apply_stats(&mut state, payload.trace_id.clone(), counters);
+        if let Some(counters) = counters {
+            settle::apply_stats(&mut state, payload.trace_id.clone(), counters);
+        }
         Ok(())
     }
 }
@@ -394,8 +413,9 @@ impl scheduler::Init for Memory {
             )));
         }
 
-        state.trace_snapshots.insert(trace_id, Arc::new(snapshot));
         let now = crate::utils::time::now_millis();
+        state.trace_activity.insert(trace_id.clone(), now);
+        state.trace_snapshots.insert(trace_id, Arc::new(snapshot));
         for (snapshot, snapshot_hash) in queue {
             state
                 .request_hashes

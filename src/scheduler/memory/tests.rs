@@ -10,6 +10,7 @@ const TASK: &str = "task-1";
 const TRACE: &str = "trace-1";
 
 mod claim;
+mod cleanup;
 mod failure;
 mod identity;
 mod init;

@@ -351,7 +351,7 @@ graph:
         assert_eq!(encoded["protocol"], "http");
         assert_eq!(encoded["method"], "GET");
         assert_eq!(encoded["mode"], "browser");
-        assert_eq!(encoded["state"], "pending");
+        assert_eq!(encoded["state"], 0);
         assert_eq!(
             encoded["headers"]["x-test"],
             serde_json::json!(["one", "two"])

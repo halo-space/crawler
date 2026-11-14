@@ -135,7 +135,7 @@ async fn terminal_settlement_clears_lease_and_queue_fields() {
     scheduler.failure(&failure).await.unwrap();
 
     let mut connection = server.connection().await;
-    for (id, state) in [("terminal-success", "done"), ("terminal-failure", "failed")] {
+    for (id, state) in [("terminal-success", "2"), ("terminal-failure", "3")] {
         let key = key::request(&namespace, id);
         for (field, expected) in [
             ("state", state),

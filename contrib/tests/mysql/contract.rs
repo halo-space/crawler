@@ -45,7 +45,7 @@ async fn all_operations_conform() {
                 TIMING,
             )
             .await;
-            conformance::lease(isolated(&urls, lease), false, TIMING).await;
+            conformance::lease(isolated(&urls, lease), TIMING).await;
         }
     })
     .await;

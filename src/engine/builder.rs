@@ -173,17 +173,16 @@ where
     pub fn build(self) -> Runtime<S, D, engine::executor::Executor<P>, engine::code::Init, O> {
         let (tx, events) = tx::channel(MAX_EVENTS);
         let spider = (self.spider)(tx);
-        let run_seed = (self.load.is_none() && self.scheduler.initializes_run()).then(|| {
+        let run_init = (self.load.is_none() && self.scheduler.initializes_run()).then(|| {
             let task_id = spider.name().to_string();
             let trace_id = crate::trace::next_id();
             spider.tx().set_trace(task_id.clone(), trace_id.clone());
             (task_id, trace_id, self.attachment.clone())
         });
         let executor = engine::executor::Executor::new(Arc::new(spider), self.schemas, self.ai);
-        let load_seed = self
-            .load
-            .as_ref()
-            .map(|_| Arc::new(super::runtime::seed_callback::<S>) as super::runtime::Seed<S>);
+        let task_initializer = self.load.as_ref().map(|_| {
+            Arc::new(super::runtime::task_initializer::<S>) as super::runtime::TaskInitializer<S>
+        });
 
         Runtime::new(super::runtime::Setup {
             scheduler: self.scheduler,
@@ -194,8 +193,9 @@ where
             registry: self.registry,
             middlewares: self.middlewares,
             load: self.load,
-            seed: load_seed,
+            load_validator: None,
+            task_initializer,
         })
-        .with_init(engine::code::Init::new(run_seed))
+        .with_init(engine::code::Init::new(run_init))
     }
 }

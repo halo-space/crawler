@@ -146,6 +146,52 @@ async fn offline_or_expired_workers_do_not_claim_requests() {
 }
 
 #[tokio::test]
+async fn offline_worker_recovery_requeues_claimed_requests() {
+    let Some(server) = server::Server::connect().await else {
+        return;
+    };
+    let database = server.database("worker-recovery").await;
+    let first = fixture::scheduler(database.url(), "worker-a");
+    let second = fixture::scheduler(database.url(), "worker-b");
+    fixture::open(&first).await;
+    fixture::open(&second).await;
+    fixture::init(&first).await;
+
+    let mut original = fixture::request("worker-recovery-request");
+    original.max_retry_count = 3;
+    first
+        .push(payload::Payload::new().requests(vec![original]))
+        .await
+        .unwrap();
+    let claimed = first.next_requests(1).await.unwrap().pop().unwrap();
+    first.ack(&fixture::processing(&claimed)).await.unwrap();
+
+    sqlx::query(
+        "UPDATE workers SET offline_time = \
+             CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED) \
+         WHERE worker_id = ?",
+    )
+    .bind("worker-a")
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    assert_eq!(second.recover_worker("worker-a").await.unwrap(), 1);
+    let recovered = second.next_requests(1).await.unwrap().pop().unwrap();
+    assert_eq!(recovered.id, claimed.id);
+    assert_eq!(recovered.version, claimed.version + 1);
+    assert_eq!(recovered.retry_count, claimed.retry_count + 1);
+    assert_eq!(recovered.failed_workers, ["worker-a"]);
+    assert!(first.success(&fixture::success(&claimed)).await.is_err());
+    second.ack(&fixture::processing(&recovered)).await.unwrap();
+    second.success(&fixture::success(&recovered)).await.unwrap();
+
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    database.remove().await;
+}
+
+#[tokio::test]
 async fn claim_reads_database_time_after_locking_the_worker() {
     let Some(server) = server::Server::connect().await else {
         return;

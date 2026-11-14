@@ -13,7 +13,7 @@ struct Request {
     node: String,
     mode: String,
     priority: i32,
-    state: String,
+    state: u8,
     version: i64,
     leased_by: String,
     lease_time: i64,
@@ -73,7 +73,7 @@ impl Scheduler {
         .execute(&mut *transaction)
         .await
         .map_err(sql_error)?;
-        clear_execution(&mut transaction, &payload.id, "pending").await?;
+        clear_execution(&mut transaction, &payload.id, net::State::Pending).await?;
         transaction.commit().await.map_err(sql_error)
     }
 
@@ -123,7 +123,7 @@ impl Scheduler {
 
         merge_stats(&mut transaction, &payload.trace_id, counters).await?;
         insert_completion(&mut transaction, payload, &request.leased_by).await?;
-        clear_execution(&mut transaction, &payload.id, "done").await?;
+        clear_execution(&mut transaction, &payload.id, net::State::Done).await?;
         transaction.commit().await.map_err(sql_error)
     }
 
@@ -176,7 +176,9 @@ impl Scheduler {
             .map_err(sql_error)?;
         }
 
-        merge_stats(&mut transaction, &payload.trace_id, counters).await?;
+        if retry_count >= retry_limit {
+            merge_stats(&mut transaction, &payload.trace_id, counters).await?;
+        }
         insert_completion(&mut transaction, payload, &request.leased_by).await?;
         if retry_count < retry_limit {
             sqlx::query(
@@ -191,7 +193,7 @@ impl Scheduler {
             .await
             .map_err(sql_error)?;
             sqlx::query(
-                "UPDATE requests SET state = 'pending', retry_count = ?, max_retry_count = ?, next_time = 0, \
+                "UPDATE requests SET state = 0, retry_count = ?, max_retry_count = ?, next_time = 0, \
                         leased_by = '', lease_time = 0, ack_version = NULL, \
                         updated_time = CURRENT_TIMESTAMP(3) \
                  WHERE id = ?",
@@ -204,7 +206,7 @@ impl Scheduler {
             .map_err(sql_error)?;
         } else {
             sqlx::query(
-                "UPDATE requests SET state = 'failed', retry_count = ?, max_retry_count = ?, next_time = 0, \
+                "UPDATE requests SET state = 3, retry_count = ?, max_retry_count = ?, next_time = 0, \
                         leased_by = '', lease_time = 0, ack_version = NULL, \
                         updated_time = CURRENT_TIMESTAMP(3) \
                  WHERE id = ?",
@@ -240,7 +242,7 @@ async fn lock_request(
         node: decode::string(&row, "node")?,
         mode: decode::string(&row, "mode")?,
         priority: row.try_get("priority").map_err(sql_error)?,
-        state: decode::string(&row, "state")?,
+        state: row.try_get("state").map_err(sql_error)?,
         version: row.try_get("version").map_err(sql_error)?,
         leased_by: decode::string(&row, "leased_by")?,
         lease_time: row.try_get("lease_time").map_err(sql_error)?,
@@ -309,7 +311,7 @@ fn validate_execution(
     if request.version != payload.version {
         return Err(scheduler::Error::VersionMismatch(payload.id.clone()));
     }
-    if request.state != "processing" {
+    if request.state != state(net::State::Processing) {
         return Err(scheduler::Error::StateMismatch(payload.id.clone()));
     }
     if request.leased_by != worker_id || request.lease_time <= 0 {
@@ -359,7 +361,7 @@ async fn completion_matches(
             });
         }
     }
-    if decode::string(&row, "state")? != state(payload.state) {
+    if row.try_get::<u8, _>("state").map_err(sql_error)? != state(payload.state) {
         return Err(scheduler::Error::StateMismatch(payload.id.clone()));
     }
     let completed_by = decode::string(&row, "worker_id")?;
@@ -377,14 +379,14 @@ async fn completion_matches(
 async fn clear_execution(
     transaction: &mut Transaction<'_, MySql>,
     id: &str,
-    state: &str,
+    request_state: net::State,
 ) -> Result<(), scheduler::Error> {
     sqlx::query(
         "UPDATE requests SET state = ?, next_time = 0, leased_by = '', lease_time = 0, \
                 ack_version = NULL, updated_time = CURRENT_TIMESTAMP(3) \
          WHERE id = ?",
     )
-    .bind(state)
+    .bind(state(request_state))
     .bind(id)
     .execute(&mut **transaction)
     .await
@@ -518,11 +520,11 @@ async fn failed_workers(
     Ok(workers)
 }
 
-fn state(value: net::State) -> &'static str {
+fn state(value: net::State) -> u8 {
     match value {
-        net::State::Pending => "pending",
-        net::State::Processing => "processing",
-        net::State::Done => "done",
-        net::State::Failed => "failed",
+        net::State::Pending => 0,
+        net::State::Processing => 1,
+        net::State::Done => 2,
+        net::State::Failed => 3,
     }
 }

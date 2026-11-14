@@ -229,7 +229,7 @@ async fn success_stats_overflow_names_the_counter_without_partial_settlement() {
         .query_async::<String>(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "processing");
+    assert_eq!(state, "1");
     let after_lease = redis::cmd("ZSCORE")
         .arg(&processing_key)
         .arg(&request_segment)
@@ -271,7 +271,7 @@ async fn failure_stats_overflow_names_the_counter_without_partial_settlement() {
         "failure-overflow-task",
         "failure-overflow-trace",
     );
-    request.max_retry_count = 2;
+    request.max_retry_count = 1;
     scheduler
         .init(
             "failure-overflow-trace".to_string(),
@@ -425,7 +425,7 @@ async fn request_version_overflow_records_a_terminal_failure() {
         .query_async::<String>(&mut connection)
         .await
         .unwrap();
-    assert_eq!(state, "failed");
+    assert_eq!(state, "3");
     let error = redis::cmd("HGET")
         .arg(key::completion(
             &namespace,

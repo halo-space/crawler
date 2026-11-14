@@ -70,9 +70,9 @@ impl Load for Redis {
                     .await
                     .map_err(redis_error)?;
                 if let Some(encoded) = encoded {
-                    return serde_json::from_str(&encoded)
-                        .map(Some)
-                        .map_err(|error| Error::Message(format!("Redis Load decode failed: {error}")));
+                    return serde_json::from_str(&encoded).map(Some).map_err(|error| {
+                        Error::Message(format!("Redis Load decode failed: {error}"))
+                    });
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }

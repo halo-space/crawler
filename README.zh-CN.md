@@ -80,4 +80,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 ```
 
+真实网络、浏览器和外部服务验收测试不会进入默认测试流程。确认对应依赖已经准备好后，使用 `--ignored` 显式执行，例如：
+
+```bash
+cargo test --test eastmoney_funds -- --ignored --nocapture
+cargo test --test json_selector -- --ignored --nocapture
+cargo test --test x_profile -- --ignored --nocapture
+cargo test --test x_account -- --ignored --nocapture
+```
+
+其中 Browser 测试需要 `WEBDRIVER_URL`，X 账号接口测试需要 `X_USERNAME` 和 `X_BEARER_TOKEN`。外部测试失败只表示对应真实服务或运行环境未通过验收，不代表默认确定性测试失败。
+
 当前 workspace 版本为 `0.1.0`，使用 MIT License。
