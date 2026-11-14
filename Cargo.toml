@@ -27,6 +27,7 @@ base64 = "0.22"
 bytes = { version = "1", features = ["serde"] }
 chrono = "0.4"
 chrono-tz = "0.10"
+croner = { version = "4.0.3", default-features = false, features = ["chrono"] }
 encoding_rs = "0.8"
 erased-serde = "0.4"
 fastrace = { version = "0.7.18", default-features = false }

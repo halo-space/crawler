@@ -1,6 +1,6 @@
 [package]
 name = "halo-harbor-contrib"
-version = "0.2.10"
+version = "0.2.11"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,6 +18,9 @@ runtime-tracing = ["dep:fastrace", "fastrace/enable", "harbor/runtime-tracing"]
 [dependencies]
 base64 = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+croner = { workspace = true }
 fastrace = { workspace = true, optional = true }
 futures-util = { workspace = true }
 redis = { workspace = true }

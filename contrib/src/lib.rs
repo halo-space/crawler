@@ -3,6 +3,10 @@ pub mod contrib {
         pub use crate::browser::*;
     }
 
+    pub mod cron {
+        pub use crate::cron::{Crontab, Error};
+    }
+
     pub mod middleware {
         pub use crate::middleware::*;
     }
@@ -26,6 +30,7 @@ pub mod contrib {
 }
 
 mod browser;
+mod cron;
 mod load;
 mod middleware;
 mod scheduler;
