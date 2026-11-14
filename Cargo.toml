@@ -19,7 +19,7 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 rust-version = "1.97.0"
-version = "0.1.7"
+version = "0.1.8"
 
 [workspace.dependencies]
 async-openai = { version = "0.41.1", default-features = false, features = ["chat-completion", "middleware", "rustls"] }
@@ -109,4 +109,4 @@ halo_validator = { workspace = true }
 
 [dev-dependencies]
 flate2 = { workspace = true }
-macros = { package = "halo-harbor-macros", path = "macros", version = "0.1.7" }
+macros = { package = "halo-harbor-macros", path = "macros", version = "0.1.8" }

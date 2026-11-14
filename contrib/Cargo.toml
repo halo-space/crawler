@@ -29,7 +29,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
-harbor = { package = "halo-harbor", path = "..", version = "0.1.7" }
+harbor = { package = "halo-harbor", path = "..", version = "0.1.8" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
